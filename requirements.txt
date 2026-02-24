@@ -1,0 +1,28 @@
+rank_bm25
+numpy
+chromadb
+openai
+python-dotenv
+tiktoken
+tabulate
+fastapi
+uvicorn[standard]
+python-multipart
+streamlit
+httpx
+groq
+
+
+sqlalchemy[asyncio]   
+asyncpg               # Async Postgres driver (fast, works with FastAPI)
+alembic               # Handles DB schema changes over time
+
+
+redis                 # Python client for Redis
+
+
+celery[redis]         # Task queue; [redis] means it uses Redis as its message broker
+
+qdrant-client         # Python client for Qdrant
+
+pypdf                 # Read PDFs, detect if scanned or digital
