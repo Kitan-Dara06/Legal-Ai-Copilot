@@ -70,6 +70,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "available_files" not in st.session_state:
     st.session_state.available_files = []
+if "is_recovering" not in st.session_state:
+    st.session_state.is_recovering = False
 
 # Legacy: API key still works for get_headers if no Supabase token
 if "api_key" not in st.session_state:
@@ -101,6 +103,19 @@ def _get_supabase_client():
 
 def _handle_supabase_connection_error(e: Exception) -> str:
     """Turn connection/timeout/SSL errors into a clear message."""
+    if isinstance(e, httpx.HTTPStatusError):
+        try:
+            err_data = e.response.json()
+            msg = (
+                err_data.get("error_description")
+                or err_data.get("msg")
+                or err_data.get("message")
+            )
+            if msg:
+                return f"Supabase error: {msg}"
+        except Exception:
+            pass
+        return f"HTTP error {e.response.status_code}: {e.response.text}"
     if isinstance(e, (httpx.TimeoutException, ssl.SSLError, OSError, ConnectionError)):
         return (
             "Connection to Supabase timed out or failed. "
@@ -163,11 +178,133 @@ def _supabase_signup(email: str, password: str):
         )
 
 
+def _supabase_send_reset_email(email: str):
+    """
+    Send a Supabase password reset email. Uses HTTPX to avoid SDK version incompatibilities.
+    Expects FRONTEND_URL in env for redirect back to this app (optional).
+    """
+    if not email:
+        raise ValueError(
+            "Please enter your email address to receive a password reset link."
+        )
+    try:
+        redirect_to = os.getenv("FRONTEND_URL", "http://localhost:8501")
+        url = f"{SUPABASE_URL}/auth/v1/recover"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Content-Type": "application/json",
+        }
+        resp = httpx.post(
+            url,
+            headers=headers,
+            json={"email": email},
+            params={"redirect_to": redirect_to},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        raise ValueError(_handle_supabase_connection_error(e))
+
+
+def _supabase_update_password(new_password: str):
+    """
+    Update the current logged-in user's password.
+    This requires the user to be signed in (via recovery link or existing session).
+    """
+    if not new_password or len(new_password) < 8:
+        raise ValueError("Password must be at least 8 characters.")
+
+    if not st.session_state.access_token:
+        raise ValueError(
+            "No valid session found to update password. Please log in or use the recovery link."
+        )
+
+    try:
+        url = f"{SUPABASE_URL}/auth/v1/user"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {st.session_state.access_token}",
+            "Content-Type": "application/json",
+        }
+        resp = httpx.put(
+            url, headers=headers, json={"password": new_password}, timeout=10.0
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        raise ValueError(_handle_supabase_connection_error(e))
+
+
 def is_logged_in():
     return bool(st.session_state.access_token or st.session_state.api_key)
 
 
+# Handle Supabase redirect tokens (e.g. when user clicks recovery link).
+# Supabase may return an access_token as a query param. If present, apply it
+# to the session_state and attempt to fetch profile information so the UI
+# can continue the recovery flow instead of showing "Auth session missing".
+try:
+    if st.query_params.get("type") == "recovery":
+        st.session_state.is_recovering = True
+        try:
+            if "type" in st.query_params:
+                del st.query_params["type"]
+        except Exception:
+            pass
+
+    token = st.query_params.get("access_token") or st.query_params.get("token")
+    if token:
+        # Set the token into session state so subsequent calls use it.
+        st.session_state.access_token = token
+        # Remove query params from URL to avoid leaking token in UI.
+        try:
+            if "access_token" in st.query_params:
+                del st.query_params["access_token"]
+            if "token" in st.query_params:
+                del st.query_params["token"]
+        except Exception:
+            # Some Streamlit versions may not allow clearing parameters; ignore.
+            pass
+        # Try to fetch /auth/me to load org/profile (best-effort).
+        try:
+            me = httpx.get(
+                f"{API_URL}/auth/me",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10.0,
+            )
+            if me.status_code == 200:
+                data = me.json()
+                st.session_state.user_email = (
+                    data.get("email") or st.session_state.user_email
+                )
+                st.session_state.org_id = data.get("org_id") or st.session_state.org_id
+                st.session_state.app_role = (
+                    data.get("app_role") or st.session_state.app_role
+                )
+                # Re-run so the UI reflects logged-in state immediately.
+                st.rerun()
+        except Exception:
+            # If validation fails, leave the token in session_state; user can paste token manually.
+            pass
+except Exception:
+    # Defensive: don't let query-param parsing break the login flow.
+    pass
+
+
 if not is_logged_in():
+    # Supabase appends access_token in the URL hash for implicit flow (e.g., password recovery).
+    # Streamlit cannot read the hash server-side. This JS auto-redirects the hash to a query parameter.
+    st.markdown(
+        """
+        <script>
+        if (window.location.hash.includes("access_token=")) {
+            const hash = window.location.hash.substring(1);
+            window.location.href = window.location.pathname + "?" + hash;
+        }
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.markdown(
         "<h1 class='main-header'>⚖️ Legal AI Copilot - Login</h1>",
         unsafe_allow_html=True,
@@ -196,6 +333,23 @@ if not is_logged_in():
             except Exception as e:
                 st.error(str(e))
 
+        # Improved Forgot password UX
+        with st.expander("Forgot password?", expanded=False):
+            st.subheader("Send reset email")
+            forgot_email = st.text_input(
+                "Email for password reset",
+                key="forgot_email",
+                help="Enter the email for your account.",
+            )
+            if st.button("Send reset email"):
+                try:
+                    _supabase_send_reset_email(forgot_email)
+                    st.success(
+                        "Password reset email sent. Check your inbox (and spam)."
+                    )
+                except Exception as e:
+                    st.error(str(e))
+
     with tab2:
         st.subheader("Sign Up (Supabase)")
         signup_email = st.text_input("Email", key="signup_email")
@@ -213,6 +367,20 @@ if not is_logged_in():
     st.stop()
 
 
+if st.session_state.get("is_recovering"):
+    st.info("Password Recovery: Please set your new password.")
+    new_pw = st.text_input("New Password", type="password", key="recovery_new_pw")
+    if st.button("Update Password", key="recovery_btn"):
+        try:
+            _supabase_update_password(new_pw)
+            st.success("Password updated successfully!")
+            st.session_state.is_recovering = False
+            time.sleep(1)
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
+    st.markdown("---")
+
 # Accept invite (when logged in and URL has ?invite_token=...)
 invite_token = st.query_params.get("invite_token")
 if invite_token and is_logged_in():
@@ -223,7 +391,9 @@ if invite_token and is_logged_in():
             timeout=10.0,
         )
         if info_res.status_code == 200:
-            st.info("You've been invited to join an organization. Accept to switch to it.")
+            st.info(
+                "You've been invited to join an organization. Accept to switch to it."
+            )
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Accept invite", key="accept_invite_btn"):
@@ -236,12 +406,20 @@ if invite_token and is_logged_in():
                     if res.status_code == 200:
                         data = res.json()
                         st.session_state.org_id = data.get("org_id")
-                        st.success(data.get("message", "You have joined the organization."))
+                        st.success(
+                            data.get("message", "You have joined the organization.")
+                        )
                         if "invite_token" in st.query_params:
                             del st.query_params["invite_token"]
                         st.rerun()
                     else:
-                        err = res.json().get("detail", res.text) if res.headers.get("content-type", "").startswith("application/json") else res.text
+                        err = (
+                            res.json().get("detail", res.text)
+                            if res.headers.get("content-type", "").startswith(
+                                "application/json"
+                            )
+                            else res.text
+                        )
                         st.error(err)
             with col2:
                 if st.button("Decline", key="decline_invite_btn"):
@@ -269,8 +447,20 @@ def refresh_files():
 
 # Sidebar: File Management
 with st.sidebar:
+    with st.expander("Account Settings", expanded=False):
+        st.subheader("Change Password")
+        new_pw = st.text_input("New Password", type="password", key="sidebar_new_pw")
+        if st.button("Update Password"):
+            try:
+                _supabase_update_password(new_pw)
+                st.success("Password updated successfully!")
+            except Exception as e:
+                st.error(str(e))
+
     # Backfill org_id and app_role from /auth/me when we have a token but missing either
-    if st.session_state.access_token and (st.session_state.app_role is None or st.session_state.org_id is None):
+    if st.session_state.access_token and (
+        st.session_state.app_role is None or st.session_state.org_id is None
+    ):
         try:
             me = httpx.get(
                 f"{API_URL}/auth/me",
@@ -280,7 +470,9 @@ with st.sidebar:
             if me.status_code == 200:
                 data = me.json()
                 st.session_state.org_id = st.session_state.org_id or data.get("org_id")
-                st.session_state.app_role = st.session_state.app_role or data.get("app_role")
+                st.session_state.app_role = st.session_state.app_role or data.get(
+                    "app_role"
+                )
                 if st.session_state.org_id or st.session_state.app_role:
                     st.rerun()
         except Exception:
@@ -298,17 +490,29 @@ with st.sidebar:
         st.markdown(f"**Org:** `{org_display}`")
         st.caption(f"**Role:** {role_display}")
         if not st.session_state.org_id or not st.session_state.app_role:
-            if st.button("Refresh profile", key="refresh_profile", help="Load org and role from backend"):
+            if st.button(
+                "Refresh profile",
+                key="refresh_profile",
+                help="Load org and role from backend",
+            ):
                 try:
-                    me = httpx.get(f"{API_URL}/auth/me", headers=get_headers(), timeout=10.0)
+                    me = httpx.get(
+                        f"{API_URL}/auth/me", headers=get_headers(), timeout=10.0
+                    )
                     if me.status_code == 200:
                         data = me.json()
-                        st.session_state.org_id = data.get("org_id") or st.session_state.org_id
-                        st.session_state.app_role = data.get("app_role") or st.session_state.app_role
+                        st.session_state.org_id = (
+                            data.get("org_id") or st.session_state.org_id
+                        )
+                        st.session_state.app_role = (
+                            data.get("app_role") or st.session_state.app_role
+                        )
                         st.success("Profile loaded.")
                         st.rerun()
                     else:
-                        st.error(f"Backend returned {me.status_code}. Is the API at {API_URL} running?")
+                        st.error(
+                            f"Backend returned {me.status_code}. Is the API at {API_URL} running?"
+                        )
                 except Exception as e:
                     st.error(f"Cannot reach backend: {e}")
 
