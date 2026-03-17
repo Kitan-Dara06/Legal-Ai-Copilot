@@ -1,10 +1,14 @@
 # app/router/query.py
 import os
 
-from dotenv import load_dotenv
-from fastapi import APIRouter, Query
-from groq import Groq
+import logging
 
+from dotenv import load_dotenv
+from fastapi import APIRouter, Query, Depends
+from groq import Groq
+from starlette.concurrency import run_in_threadpool
+
+from app.dependencies import get_org_id_unified
 from app.services.embedder import get_embedding
 from app.services.store import (
     extract_sources_from_chunks,
@@ -14,6 +18,8 @@ from app.services.store import (
 from app.services.legal_primitives import search_tool
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
@@ -67,7 +73,7 @@ def generate_final_answer(question: str, context_chunks: list[str]):
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"Error generating final response: {e}")
+        logger.error("Error generating final response: %s", e)
         return "I encountered an error while trying to synthesize the answer."
 
 
@@ -77,6 +83,7 @@ router = APIRouter()
 @router.post("/ask")
 async def ask(
     question: str,
+    org_id: str = Depends(get_org_id_unified),
     mode: str = Query(default="hybrid", description="Search strategy: hybrid, concept, or multiquery"),
 ):
     """
@@ -86,15 +93,11 @@ async def ask(
     - mode=concept: Expands legal terminology then hybrid search (better recall)
     - mode=multiquery: Rephrases question from 3 angles (broadest coverage)
     """
-    print(f"User asked: {question} (mode={mode})")
-
-    # Use the new search_tool with mode support
-    all_chunks = search_tool(query=question, mode=mode, top_k=5)
-
-    print(f"Total Unique Chunks Found: {len(all_chunks)}")
-
-    # RAG with the combined context
-    final_answer = generate_final_answer(question, all_chunks)
+    # These calls use synchronous network clients; run them off the event loop.
+    all_chunks = await run_in_threadpool(
+        search_tool, query=question, mode=mode, top_k=5, org_id=org_id
+    )
+    final_answer = await run_in_threadpool(generate_final_answer, question, all_chunks)
 
     return {
         "original_question": question,

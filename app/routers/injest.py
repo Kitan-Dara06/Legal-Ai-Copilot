@@ -1,5 +1,10 @@
 # app/routers/injest.py
 #
+# REPROCESS NOTE:
+# Files can end up in Postgres as READY but missing from Qdrant if the worker
+# crashed during upsert. Use POST /files/{file_id}/reprocess to re-dispatch
+# the Celery task without needing to re-upload the file.
+#
 # PURPOSE: Handles file uploads and file management.
 #
 # Flow:
@@ -13,20 +18,43 @@
 # The heavy work (parsing, embedding, Qdrant) happens in app/tasks.py.
 
 import hashlib
-import os
 import io
+import logging
+import os
 import uuid
 from typing import List
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import select
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+)
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import File as FileModel, FileStatus
-from app.tasks import is_scanned_pdf, process_digital_pdf, process_scanned_pdf
+from app.dependencies import get_org_id_unified
+from app.models import File as FileModel
+from app.models import FileStatus
+from app.services.object_storage import upload_local_file_to_gcs
+from app.tasks import (
+    is_scanned_pdf,
+    process_digital_pdf,
+    process_scanned_pdf,
+    update_postgres_status_sync,
+)
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/files", tags=["Files"])
+limiter = Limiter(key_func=get_remote_address)
+
+MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
 # ── NOTE on org_id ────────────────────────────────────────────────────────────
@@ -39,22 +67,36 @@ router = APIRouter(prefix="/files", tags=["Files"])
 
 @router.get("/list")  # MUST be before /{file_id} to avoid route conflict
 async def list_files(
-    org_id: str = "default_org",
+    org_id: str = Depends(get_org_id_unified),
+    limit: int = 50,
+    offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Returns all READY files for this org.
-    This is what the UI shows when the user wants to select files for a session.
+    Returns READY files for this org with pagination.
+    Use `limit` and `offset` for large libraries.
     """
+    # Total count for the caller to know how many pages exist
+    count_result = await db.execute(
+        select(func.count(FileModel.id)).where(
+            FileModel.org_id == org_id, FileModel.status == FileStatus.READY
+        )
+    )
+    total = count_result.scalar_one()
+
     result = await db.execute(
-        select(FileModel).where(
-            FileModel.org_id == org_id,
-            FileModel.status == FileStatus.READY
-        ).order_by(FileModel.upload_date.desc())
+        select(FileModel)
+        .where(FileModel.org_id == org_id, FileModel.status == FileStatus.READY)
+        .order_by(FileModel.upload_date.desc())
+        .limit(limit)
+        .offset(offset)
     )
     files = result.scalars().all()
 
     return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
         "files": [
             {
                 "file_id": f.id,
@@ -63,18 +105,54 @@ async def list_files(
                 "status": f.status,
             }
             for f in files
-        ]
+        ],
     }
 
 
+def _upload_to_r2_and_enqueue(
+    temp_file_path: str,
+    file_id: int,
+    org_id: str,
+    filename: str,
+    scanned: bool,
+):
+    """Runs after response is sent: upload to R2, enqueue Celery task, delete temp file."""
+    blob_name = f"{file_id}_{filename.replace(' ', '_')}"
+    try:
+        upload_local_file_to_gcs(temp_file_path, blob_name)
+        if scanned:
+            process_scanned_pdf.delay(file_id, org_id, filename, blob_name)
+        else:
+            process_digital_pdf.delay(file_id, org_id, filename, blob_name)
+    except Exception as e:
+        logger.exception(
+            "Background R2 upload or enqueue failed for file_id=%s: %s", file_id, e
+        )
+        try:
+            update_postgres_status_sync(
+                file_id, "FAILED", error=f"R2 upload failed: {e}"
+            )
+        except Exception as db_err:
+            logger.warning("Could not mark file %s as FAILED: %s", file_id, db_err)
+    finally:
+        try:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+        except OSError as e:
+            logger.warning("Could not remove temp file %s: %s", temp_file_path, e)
+
+
 @router.post("/upload", status_code=202)
+@limiter.limit("10/minute")
 async def upload_files(
+    request: Request,
+    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
-    org_id: str = "default_org",
+    org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Upload one or more PDF files.
+    Upload one or more PDF files (max 50 MB each, max 10 requests/min).
     Returns immediately — processing happens in the background via Celery.
     Poll GET /files/{file_id}/status to check when it's READY.
     """
@@ -83,12 +161,24 @@ async def upload_files(
     results = []
 
     for upload in files:
+        # ── File size guard ──────────────────────────────────────────────────
+        # content_length header is advisory — we enforce it by reading strictly
+        if upload.size and upload.size > MAX_FILE_SIZE_BYTES:
+            results.append(
+                {
+                    "filename": upload.filename,
+                    "status": "error",
+                    "message": f"File exceeds the 100 MB size limit ({upload.size / 1_048_576:.1f} MB).",
+                }
+            )
+            continue
+
         # We process files directly to disk to prevent OOM errors on large 50MB+ PDFs.
         file_hash_obj = hashlib.sha256()
-        
+
         # We need a temporary unique filename until we have the final ID
         temp_file_path = f"app/uploads/temp_{uuid.uuid4().hex}.pdf"
-        
+
         # ── Step 1: Stream bytes to disk and calculate hash simultaneously ───
         try:
             with open(temp_file_path, "wb") as f:
@@ -101,13 +191,15 @@ async def upload_files(
         except Exception as e:
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
-            results.append({
-                "filename": upload.filename,
-                "status": "error",
-                "message": f"Failed to save uploaded file: {str(e)}"
-            })
+            results.append(
+                {
+                    "filename": upload.filename,
+                    "status": "error",
+                    "message": f"Failed to save uploaded file: {str(e)}",
+                }
+            )
             continue
-            
+
         file_hash = file_hash_obj.hexdigest()
 
         # ── Step 2: Duplicate Check (SHA256 hash) ───────────────────────────
@@ -115,7 +207,7 @@ async def upload_files(
             select(FileModel).where(
                 FileModel.file_hash == file_hash,
                 FileModel.org_id == org_id,
-                FileModel.status != FileStatus.FAILED
+                FileModel.status != FileStatus.FAILED,
             )
         )
         existing_file = existing.scalars().first()
@@ -123,12 +215,14 @@ async def upload_files(
         if existing_file:
             # Delete the temp file we just wrote, since we already have it
             os.remove(temp_file_path)
-            results.append({
-                "filename": upload.filename,
-                "status": "duplicate",
-                "message": f"This file was already uploaded (ID: {existing_file.id}).",
-                "file_id": existing_file.id,
-            })
+            results.append(
+                {
+                    "filename": upload.filename,
+                    "status": "duplicate",
+                    "message": f"This file was already uploaded (ID: {existing_file.id}).",
+                    "file_id": existing_file.id,
+                }
+            )
             continue
 
         # ── Step 3: Save PENDING record to Postgres ─────────────────────────
@@ -142,35 +236,65 @@ async def upload_files(
         await db.commit()
         await db.refresh(new_file)
         file_id = new_file.id
-        
-        # ── Step 4: Rename temp file to permanent ID-based name ─────────────
-        final_file_path = f"app/uploads/{file_id}_{upload.filename.replace(' ', '_')}"
-        os.rename(temp_file_path, final_file_path)
 
-        # ── Step 5: Detect PDF type (read directly from disk) ────────────────
+        # ── Step 4: Detect PDF type (read directly from temp disk) ───────────
         try:
-            with open(final_file_path, "rb") as f:
-                # We just need to check the first few pages, so reading the beginning is fine
-                scanned = is_scanned_pdf(f.read(1024 * 1024 * 5)) # Only peek at first 5MB
+            with open(temp_file_path, "rb") as f:
+                scanned = is_scanned_pdf(f.read(1024 * 1024 * 5))
         except Exception as e:
             scanned = False
-            print(f"Warning: PDF scanning detection failed: {e}")
+            logger.warning("PDF scanning detection failed during upload: %s", e)
 
-        # ── Step 6: Fire Celery Task ─────────────────────────────────────────
-        if scanned:
-            process_scanned_pdf.delay(file_id, org_id, upload.filename, final_file_path)
-            queue_name = "ocr"
-        else:
-            process_digital_pdf.delay(file_id, org_id, upload.filename, final_file_path)
-            queue_name = "default"
+        # ── Step 4b: Enforce per-type size limits (after detection) ──────────
+        try:
+            actual_size = os.path.getsize(temp_file_path)
+        except Exception:
+            actual_size = None
 
-        results.append({
-            "filename": upload.filename,
-            "file_id": file_id,
-            "status": "accepted",
-            "queue": queue_name,
-            "message": f"File received. Processing in background. Poll /files/{file_id}/status for updates.",
-        })
+        if actual_size is not None:
+            if scanned and actual_size > MAX_SCANNED_PDF_SIZE_BYTES:
+                os.remove(temp_file_path)
+                results.append(
+                    {
+                        "filename": upload.filename,
+                        "status": "error",
+                        "message": f"Scanned PDF exceeds the 100 MB limit ({actual_size / 1_048_576:.1f} MB).",
+                    }
+                )
+                continue
+
+            if (not scanned) and actual_size > MAX_DIGITAL_PDF_SIZE_BYTES:
+                os.remove(temp_file_path)
+                results.append(
+                    {
+                        "filename": upload.filename,
+                        "status": "error",
+                        "message": f"Digital PDF exceeds the 10 MB limit ({actual_size / 1_048_576:.1f} MB).",
+                    }
+                )
+                continue
+
+        # ── Step 5: Schedule R2 upload + Celery enqueue in background ─────────
+        # Return 202 immediately; upload and chunking start right after response.
+        background_tasks.add_task(
+            _upload_to_r2_and_enqueue,
+            temp_file_path,
+            file_id,
+            org_id,
+            upload.filename,
+            scanned,
+        )
+        queue_name = "ocr" if scanned else "default"
+
+        results.append(
+            {
+                "filename": upload.filename,
+                "file_id": file_id,
+                "status": "accepted",
+                "queue": queue_name,
+                "message": f"File received. Processing in background. Poll /files/{file_id}/status for updates.",
+            }
+        )
 
     return {"results": results}
 
@@ -178,7 +302,7 @@ async def upload_files(
 @router.get("/{file_id}/status")
 async def get_file_status(
     file_id: int,
-    org_id: str = "default_org",
+    org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -186,10 +310,7 @@ async def get_file_status(
     Returns: { status: PENDING | PROCESSING | READY | FAILED }
     """
     result = await db.execute(
-        select(FileModel).where(
-            FileModel.id == file_id,
-            FileModel.org_id == org_id
-        )
+        select(FileModel).where(FileModel.id == file_id, FileModel.org_id == org_id)
     )
     file = result.scalar_one_or_none()
 
@@ -204,10 +325,96 @@ async def get_file_status(
     }
 
 
+@router.post("/{file_id}/reprocess", status_code=202)
+async def reprocess_file(
+    file_id: int,
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Re-dispatches the Celery processing task for a file that is stuck in
+    READY (indexed in Postgres but missing from Qdrant) or FAILED state.
+
+    Does NOT require re-uploading — re-uses the existing GCS blob if present,
+    or returns an error if the blob has already been deleted.
+    """
+    from app.services.object_storage import object_exists
+
+    result = await db.execute(
+        select(FileModel).where(
+            FileModel.id == file_id,
+            FileModel.org_id == org_id,
+        )
+    )
+    file = result.scalar_one_or_none()
+
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    if file.status == FileStatus.PENDING:
+        raise HTTPException(
+            status_code=409,
+            detail="File is already being processed. Wait for it to complete.",
+        )
+
+    # Check that the object still exists in R2
+    blob_name = f"{file_id}_{file.filename.replace(' ', '_')}"
+    try:
+        if not object_exists(blob_name):
+            raise HTTPException(
+                status_code=410,
+                detail=(
+                    f"Storage object '{blob_name}' no longer exists. "
+                    "Please re-upload the file instead."
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not verify storage object: {e}",
+        )
+
+    # Reset status to PENDING so the UI shows processing in progress
+    file.status = FileStatus.PENDING
+    file.error_message = None
+    await db.commit()
+
+    # Re-dispatch to the appropriate queue
+    # Re-detect scan type from stored object
+    try:
+        import tempfile
+
+        from app.services.object_storage import download_file_from_gcs
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
+            download_file_from_gcs(blob_name, tmp.name)
+            with open(tmp.name, "rb") as f:
+                scanned = is_scanned_pdf(f.read(1024 * 1024 * 5))
+    except Exception:
+        scanned = False  # Default to digital on detection failure
+
+    if scanned:
+        process_scanned_pdf.delay(file_id, org_id, file.filename, blob_name)
+        queue_name = "ocr"
+    else:
+        process_digital_pdf.delay(file_id, org_id, file.filename, blob_name)
+        queue_name = "default"
+
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "status": "reprocessing",
+        "queue": queue_name,
+        "message": (f"Reprocessing started. Poll /files/{file_id}/status for updates."),
+    }
+
+
 @router.delete("/{file_id}")
 async def delete_file(
     file_id: int,
-    org_id: str = "default_org",
+    org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -216,15 +423,13 @@ async def delete_file(
     To just remove a file from the current session (without deleting it),
     use DELETE /session/{session_id}/files/{file_id} instead.
     """
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    from app.redis_client import get_redis_client, remove_file_from_all_sessions
     from app.services.store import get_global_qdrant
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
-    from app.redis_client import remove_file_from_all_sessions, get_redis_client
 
     result = await db.execute(
-        select(FileModel).where(
-            FileModel.id == file_id,
-            FileModel.org_id == org_id
-        )
+        select(FileModel).where(FileModel.id == file_id, FileModel.org_id == org_id)
     )
     file = result.scalar_one_or_none()
 
@@ -237,7 +442,10 @@ async def delete_file(
         qdrant.delete(
             collection_name="legal_chunks",
             points_selector=Filter(
-                must=[FieldCondition(key="file_id", match=MatchValue(value=file_id))]
+                must=[
+                    FieldCondition(key="file_id", match=MatchValue(value=file_id)),
+                    FieldCondition(key="org_id", match=MatchValue(value=org_id)),
+                ]
             ),
         )
     except Exception as e:
@@ -246,9 +454,14 @@ async def delete_file(
     # 2. Remove from all active Redis sessions (Zombie File Fix)
     redis = get_redis_client()
     await remove_file_from_all_sessions(file_id, redis)
-    await redis.aclose()
 
-    # 3. Delete record from Postgres
+    # 3. Clean up any orphaned GCS blob (if file was deleted while PENDING)
+    from app.services.object_storage import delete_file_from_gcs
+
+    blob_name = f"{file_id}_{file.filename.replace(' ', '_')}"
+    delete_file_from_gcs(blob_name)
+
+    # 4. Delete record from Postgres
     await db.delete(file)
     await db.commit()
 

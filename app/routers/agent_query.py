@@ -4,20 +4,30 @@ Agentic Query Router - session-aware.
 Reads the active Redis session to scope search to selected files only.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+import logging
 from typing import Optional
 
-from app.services.planner import create_execution_plan, execute_plan
-from app.redis_client import get_redis_client, get_session, get_file_progress
+from fastapi import APIRouter, HTTPException, Query, Request, Depends
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from starlette.concurrency import run_in_threadpool
 
+from app.dependencies import get_org_id_unified
+from app.redis_client import get_file_progress, get_redis_client, get_session
+from app.services.planner import create_execution_plan, execute_plan
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.post("/ask-agent")
+@limiter.limit("30/minute")
 async def ask_agent(
+    request: Request,
     question: str,
     session_id: Optional[str] = Query(default=None, description="Redis session ID from POST /session"),
-    org_id: str = Query(default="default_org"),
+    org_id: str = Depends(get_org_id_unified),
     mode: str = Query(default="hybrid", description="Search strategy: hybrid, concept, or multiquery"),
     force_partial: bool = Query(default=False, description="Answer with READY files even if some are still processing"),
 ):
@@ -37,9 +47,10 @@ async def ask_agent(
       - Extraction      → Search + Read + Draft
       - General Search  → Search + Draft
     """
-    print(f"\n{'=' * 60}")
-    print(f"🤖 AGENT MODE: {question} (mode={mode}, session={session_id})")
-    print(f"{'=' * 60}")
+    logger.info(
+        "ask_agent request",
+        extra={"question_preview": question[:80], "mode": mode, "session_id": session_id},
+    )
 
     # ── Session-Scoped File IDs ───────────────────────────────────────────────
     file_ids = None
@@ -50,11 +61,9 @@ async def ask_agent(
         session = await get_session(session_id, redis)
 
         if not session:
-            await redis.aclose()
             raise HTTPException(status_code=404, detail="Session not found or expired.")
 
         if session["org_id"] != org_id:
-            await redis.aclose()
             raise HTTPException(status_code=403, detail="Session does not belong to your org.")
 
         ready_ids = []
@@ -67,8 +76,6 @@ async def ask_agent(
             elif status == "PROCESSING":
                 progress = await get_file_progress(fid, redis)
                 processing_files.append({"file_id": fid, "progress": progress})
-
-        await redis.aclose()
 
         # If files are still processing and user hasn't forced partial
         if processing_files and not force_partial:
@@ -98,8 +105,10 @@ async def ask_agent(
             raise HTTPException(status_code=425, detail="No files are ready yet in this session.")
 
     # ── Execute Plan ──────────────────────────────────────────────────────────
-    plan = create_execution_plan(question)
-    result = execute_plan(plan, question, mode=mode, file_ids=file_ids, org_id=org_id)
+    plan = await run_in_threadpool(create_execution_plan, question)
+    result = await run_in_threadpool(
+        execute_plan, plan, question, mode=mode, file_ids=file_ids, org_id=org_id
+    )
 
     response = {
         "question": question,

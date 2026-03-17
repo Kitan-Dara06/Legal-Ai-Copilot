@@ -1,10 +1,30 @@
-import streamlit as st
-import httpx
 import os
+import ssl
 import time
+from pathlib import Path
+
+import httpx
+import sentry_sdk
+import streamlit as st
+from dotenv import load_dotenv
+from sentry_sdk.integrations.logging import LoggingIntegration
+from supabase import ClientOptions, create_client
+
+# Load .env from project root
+_env = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_env)
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
-ORG_ID = "stream_ui_org"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPERBASE_KEY", "")
+
+_sentry_dsn = os.getenv("SENTRY_DSN")
+if _sentry_dsn:
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        integrations=[LoggingIntegration(level="INFO", event_level="ERROR")],
+        send_default_pii=False,
+    )
 
 st.set_page_config(
     page_title="Legal AI Copilot",
@@ -14,7 +34,8 @@ st.set_page_config(
 )
 
 # Custom CSS for aesthetics
-st.markdown("""
+st.markdown(
+    """
 <style>
     .stChatFloatingInputContainer {
         padding-bottom: 2rem;
@@ -32,9 +53,17 @@ st.markdown("""
         margin-bottom: 2rem;
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # Initialization
+if "access_token" not in st.session_state:
+    st.session_state.access_token = None
+if "user_email" not in st.session_state:
+    st.session_state.user_email = None
+if "org_id" not in st.session_state:
+    st.session_state.org_id = None
 if "session_id" not in st.session_state:
     st.session_state.session_id = None
 if "messages" not in st.session_state:
@@ -42,38 +71,329 @@ if "messages" not in st.session_state:
 if "available_files" not in st.session_state:
     st.session_state.available_files = []
 
+# Legacy: API key still works for get_headers if no Supabase token
+if "api_key" not in st.session_state:
+    st.session_state.api_key = None
+# App role from backend (ADMIN can invite members)
+if "app_role" not in st.session_state:
+    st.session_state.app_role = None
+
+
+def get_headers():
+    if st.session_state.access_token:
+        return {"Authorization": f"Bearer {st.session_state.access_token}"}
+    if st.session_state.api_key:
+        return {"X-API-Key": st.session_state.api_key}
+    return {}
+
+
+# Longer timeouts for Supabase (avoids SSL handshake / read timeout on slow networks)
+# Single value => applies to connect/read/write/pool.
+_SUPABASE_HTTP_TIMEOUT = httpx.Timeout(60.0)
+
+
+def _get_supabase_client():
+    """Supabase client with longer timeouts for auth (connect 30s, read 60s)."""
+    http_client = httpx.Client(timeout=_SUPABASE_HTTP_TIMEOUT)
+    options = ClientOptions(httpx_client=http_client)
+    return create_client(SUPABASE_URL, SUPABASE_KEY, options=options)
+
+
+def _handle_supabase_connection_error(e: Exception) -> str:
+    """Turn connection/timeout/SSL errors into a clear message."""
+    if isinstance(e, (httpx.TimeoutException, ssl.SSLError, OSError, ConnectionError)):
+        return (
+            "Connection to Supabase timed out or failed. "
+            "Check SUPABASE_URL, your network, and firewall/VPN. "
+            "If you are on a slow connection, try again."
+        )
+    return str(e)
+
+
+def _supabase_login(email: str, password: str):
+    try:
+        client = _get_supabase_client()
+        resp = client.auth.sign_in_with_password({"email": email, "password": password})
+    except Exception as e:
+        raise ValueError(_handle_supabase_connection_error(e))
+    if not resp.session or not resp.session.access_token:
+        raise ValueError("No session returned")
+    st.session_state.access_token = resp.session.access_token
+    st.session_state.user_email = resp.user.email if resp.user else email
+    # Backend maps Supabase user to org; fetch org_id from /auth/me
+    try:
+        me = httpx.get(
+            f"{API_URL}/auth/me",
+            headers={"Authorization": f"Bearer {st.session_state.access_token}"},
+            timeout=10.0,
+        )
+        if me.status_code == 200:
+            data = me.json()
+            st.session_state.org_id = data.get("org_id")
+            st.session_state.app_role = data.get("app_role")
+    except Exception:
+        pass
+
+
+def _supabase_signup(email: str, password: str):
+    try:
+        client = _get_supabase_client()
+        resp = client.auth.sign_up({"email": email, "password": password})
+    except Exception as e:
+        raise ValueError(_handle_supabase_connection_error(e))
+    if resp.session and resp.session.access_token:
+        st.session_state.access_token = resp.session.access_token
+        st.session_state.user_email = resp.user.email if resp.user else email
+        try:
+            me = httpx.get(
+                f"{API_URL}/auth/me",
+                headers={"Authorization": f"Bearer {st.session_state.access_token}"},
+                timeout=10.0,
+            )
+            if me.status_code == 200:
+                data = me.json()
+                st.session_state.org_id = data.get("org_id")
+                st.session_state.app_role = data.get("app_role")
+        except Exception:
+            pass
+    else:
+        # Email confirmation may be required
+        raise ValueError(
+            "Sign-up successful. Check your email to confirm, then log in."
+        )
+
+
+def is_logged_in():
+    return bool(st.session_state.access_token or st.session_state.api_key)
+
+
+if not is_logged_in():
+    st.markdown(
+        "<h1 class='main-header'>⚖️ Legal AI Copilot - Login</h1>",
+        unsafe_allow_html=True,
+    )
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        st.error("Supabase is not configured (SUPABASE_URL / SUPABASE_ANON_KEY).")
+        st.stop()
+
+    # If they landed here from an invite magic link, the URL might be just the app root.
+    st.info(
+        "**Invited by email?** Use the **same email** we sent the invite to: **Sign up** to set a password, or **Log in** if you already have one. You’ll then be added to the organization."
+    )
+
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
+
+    with tab1:
+        st.subheader("Login with Supabase")
+        login_email = st.text_input("Email", key="login_email")
+        login_password = st.text_input(
+            "Password", type="password", key="login_password"
+        )
+        if st.button("Log In"):
+            try:
+                _supabase_login(login_email, login_password)
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    with tab2:
+        st.subheader("Sign Up (Supabase)")
+        signup_email = st.text_input("Email", key="signup_email")
+        signup_password = st.text_input(
+            "Password", type="password", key="signup_password"
+        )
+        if st.button("Sign Up"):
+            try:
+                _supabase_signup(signup_email, signup_password)
+                st.success("Signed up successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    st.stop()
+
+
+# Accept invite (when logged in and URL has ?invite_token=...)
+invite_token = st.query_params.get("invite_token")
+if invite_token and is_logged_in():
+    try:
+        info_res = httpx.get(
+            f"{API_URL}/auth/invite-info",
+            params={"token": invite_token},
+            timeout=10.0,
+        )
+        if info_res.status_code == 200:
+            st.info("You've been invited to join an organization. Accept to switch to it.")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Accept invite", key="accept_invite_btn"):
+                    res = httpx.post(
+                        f"{API_URL}/auth/accept-invite-by-token",
+                        json={"token": invite_token},
+                        headers=get_headers(),
+                        timeout=10.0,
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        st.session_state.org_id = data.get("org_id")
+                        st.success(data.get("message", "You have joined the organization."))
+                        if "invite_token" in st.query_params:
+                            del st.query_params["invite_token"]
+                        st.rerun()
+                    else:
+                        err = res.json().get("detail", res.text) if res.headers.get("content-type", "").startswith("application/json") else res.text
+                        st.error(err)
+            with col2:
+                if st.button("Decline", key="decline_invite_btn"):
+                    if "invite_token" in st.query_params:
+                        del st.query_params["invite_token"]
+                    st.rerun()
+    except Exception as e:
+        st.warning(f"Could not load invite: {e}")
+
+
 def refresh_files():
     try:
-        res = httpx.get(f"{API_URL}/files/list", params={"org_id": ORG_ID})
+        res = httpx.get(f"{API_URL}/files/list", headers=get_headers(), timeout=10.0)
         if res.status_code == 200:
             st.session_state.available_files = res.json().get("files", [])
-    except Exception as e:
-        st.error(f"Backend connection error: {e}")
+        else:
+            st.session_state.available_files = []
+    except httpx.ConnectError:
+        st.warning("⚠️ Cannot reach the backend. Is the FastAPI server running?")
+    except httpx.TimeoutException:
+        st.warning("⏳ Backend is slow to respond. Try refreshing in a moment.")
+    except Exception:
+        st.warning("⚠️ Could not load files. Check that the backend is online.")
+
 
 # Sidebar: File Management
 with st.sidebar:
+    # Backfill org_id and app_role from /auth/me when we have a token but missing either
+    if st.session_state.access_token and (st.session_state.app_role is None or st.session_state.org_id is None):
+        try:
+            me = httpx.get(
+                f"{API_URL}/auth/me",
+                headers=get_headers(),
+                timeout=10.0,
+            )
+            if me.status_code == 200:
+                data = me.json()
+                st.session_state.org_id = st.session_state.org_id or data.get("org_id")
+                st.session_state.app_role = st.session_state.app_role or data.get("app_role")
+                if st.session_state.org_id or st.session_state.app_role:
+                    st.rerun()
+        except Exception:
+            pass
+
     st.header("📂 Document Library")
-    
+
+    if st.session_state.user_email:
+        st.markdown(f"**Logged in:** `{st.session_state.user_email}`")
+
+    # Always show Org and Role when logged in (show "—" if not loaded yet)
+    if st.session_state.access_token or st.session_state.user_email:
+        org_display = st.session_state.org_id if st.session_state.org_id else "—"
+        role_display = st.session_state.app_role if st.session_state.app_role else "—"
+        st.markdown(f"**Org:** `{org_display}`")
+        st.caption(f"**Role:** {role_display}")
+        if not st.session_state.org_id or not st.session_state.app_role:
+            if st.button("Refresh profile", key="refresh_profile", help="Load org and role from backend"):
+                try:
+                    me = httpx.get(f"{API_URL}/auth/me", headers=get_headers(), timeout=10.0)
+                    if me.status_code == 200:
+                        data = me.json()
+                        st.session_state.org_id = data.get("org_id") or st.session_state.org_id
+                        st.session_state.app_role = data.get("app_role") or st.session_state.app_role
+                        st.success("Profile loaded.")
+                        st.rerun()
+                    else:
+                        st.error(f"Backend returned {me.status_code}. Is the API at {API_URL} running?")
+                except Exception as e:
+                    st.error(f"Cannot reach backend: {e}")
+
+    # Admin: invite members (Supabase magic link email)
+    if st.session_state.app_role == "ADMIN":
+        st.divider()
+        st.subheader("👥 Invite member")
+        with st.form("invite_member_form", clear_on_submit=True):
+            invite_email = st.text_input(
+                "Email address",
+                key="invite_email",
+                placeholder="teammate@example.com",
+                label_visibility="collapsed",
+            )
+            submitted = st.form_submit_button("Send invite")
+        if submitted:
+            email = (invite_email or "").strip()
+            if not email:
+                st.warning("Enter an email address.")
+            else:
+                try:
+                    res = httpx.post(
+                        f"{API_URL}/auth/invite-by-email",
+                        json={"email": email},
+                        headers=get_headers(),
+                        timeout=15.0,
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        st.success(data.get("message", "Invite sent."))
+                        if data.get("already_registered") and data.get("invite_link"):
+                            st.caption("Share this link with them:")
+                            st.code(data["invite_link"], language=None)
+                    else:
+                        try:
+                            err = res.json().get("detail", res.text)
+                        except Exception:
+                            err = res.text
+                        if isinstance(err, list):
+                            err = "; ".join(str(x) for x in err)
+                        st.error(str(err))
+                except Exception as e:
+                    st.error(str(e))
+
+    if st.button("🚪 Logout", use_container_width=True):
+        st.session_state.access_token = None
+        st.session_state.user_email = None
+        st.session_state.app_role = None
+        st.session_state.api_key = None
+        st.session_state.org_id = None
+        st.session_state.session_id = None
+        st.session_state.messages = []
+        st.rerun()
+
+    st.divider()
+
     # Upload Section
-    uploaded_files = st.file_uploader("Upload New Contracts", type=["pdf"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader(
+        "Upload New Contracts", type=["pdf"], accept_multiple_files=True
+    )
     if st.button("Upload to Backend", use_container_width=True) and uploaded_files:
         with st.spinner("Uploading & Processing..."):
-            files_payload = [("files", (f.name, f.read(), "application/pdf")) for f in uploaded_files]
+            files_payload = [
+                ("files", (f.name, f.read(), "application/pdf")) for f in uploaded_files
+            ]
             try:
-                res = httpx.post(f"{API_URL}/files/upload", files=files_payload, params={"org_id": ORG_ID}, timeout=120.0)
+                res = httpx.post(
+                    f"{API_URL}/files/upload",
+                    files=files_payload,
+                    headers=get_headers(),
+                    timeout=120.0,
+                )
                 if res.status_code == 202:
                     st.success("Uploaded successfully! Processing in background...")
-                    time.sleep(1) # wait a moment for initial DB flush
+                    time.sleep(1)  # wait a moment for initial DB flush
             except Exception as e:
                 st.error(f"Upload failed: {e}")
-                
+
     st.divider()
-    
+
     # File View Section
     st.subheader("Available Files")
     if st.button("🔄 Refresh List", use_container_width=True):
         refresh_files()
-        
+
     if not st.session_state.available_files:
         st.info("No formatted documents available. Upload one to begin.")
     else:
@@ -81,51 +401,75 @@ with st.sidebar:
             file_id = f["file_id"]
             fname = f["filename"]
             st.caption(f"📄 {fname} (ID: {file_id})")
-            
+
     st.divider()
     if st.session_state.session_id:
         st.success(f"🟢 Active Session:\n\n`{st.session_state.session_id[:8]}...`")
-        
+
         # Display files currently inside the active session
         try:
-            res = httpx.get(f"{API_URL}/session/{st.session_state.session_id}", timeout=10.0)
+            res = httpx.get(
+                f"{API_URL}/session/{st.session_state.session_id}",
+                headers=get_headers(),
+                timeout=10.0,
+            )
             if res.status_code == 200:
                 session_data = res.json()
                 session_files = session_data.get("files", [])
                 st.markdown("**Files in Context:**")
                 for f in session_files:
-                    status_emoji = "⏳" if f['status'] == 'PROCESSING' else "✅"
-                    fname_display = f.get('filename', 'Unknown File')
+                    status_emoji = "⏳" if f["status"] == "PROCESSING" else "✅"
+                    fname_display = f.get("filename", "Unknown File")
                     col_name, col_btn = st.columns([4, 1])
                     with col_name:
                         st.caption(f"{status_emoji} {fname_display}")
                     with col_btn:
-                        if st.button("❌", key=f"remove_{f['file_id']}", help=f"Remove {fname_display} from session"):
+                        if st.button(
+                            "❌",
+                            key=f"remove_{f['file_id']}",
+                            help=f"Remove {fname_display} from session",
+                        ):
                             try:
-                                httpx.delete(
+                                r = httpx.delete(
                                     f"{API_URL}/session/{st.session_state.session_id}/files/{f['file_id']}",
-                                    timeout=10.0
+                                    headers=get_headers(),
+                                    timeout=10.0,
                                 )
-                                st.toast(f"Removed {fname_display} from session.")
-                                st.rerun()
+                                if r.status_code == 200:
+                                    st.toast(
+                                        f"✅ Removed {fname_display} from session."
+                                    )
+                                    st.rerun()
+                                else:
+                                    st.error(
+                                        f"Remove failed ({r.status_code}): {r.json().get('detail', r.text)}"
+                                    )
                             except Exception as e:
                                 st.error(f"Could not remove file: {e}")
         except Exception as e:
             st.error("Could not load session files.")
-            
+
         st.divider()
-        
+
         st.markdown("**Add Document to Session**")
-        session_upload = st.file_uploader("Upload directly to active chat", type=["pdf"], key="session_uploader")
+        session_upload = st.file_uploader(
+            "Upload directly to active chat", type=["pdf"], key="session_uploader"
+        )
         if st.button("Upload to Session", use_container_width=True) and session_upload:
             with st.spinner("Processing & embedding into session..."):
-                files_payload = {"file": (session_upload.name, session_upload.read(), "application/pdf")}
+                files_payload = {
+                    "file": (
+                        session_upload.name,
+                        session_upload.read(),
+                        "application/pdf",
+                    )
+                }
                 try:
                     res = httpx.post(
-                        f"{API_URL}/session/{st.session_state.session_id}/upload", 
-                        files=files_payload, 
-                        params={"org_id": ORG_ID},
-                        timeout=120.0
+                        f"{API_URL}/session/{st.session_state.session_id}/upload",
+                        files=files_payload,
+                        headers=get_headers(),
+                        timeout=120.0,
                     )
                     if res.status_code in [200, 202]:
                         st.success("File added to active session!")
@@ -139,7 +483,10 @@ with st.sidebar:
         st.divider()
         if st.button("🛑 Terminate Session", type="primary", use_container_width=True):
             try:
-                httpx.delete(f"{API_URL}/session/{st.session_state.session_id}")
+                httpx.delete(
+                    f"{API_URL}/session/{st.session_state.session_id}",
+                    headers=get_headers(),
+                )
             except:
                 pass
             st.session_state.session_id = None
@@ -148,28 +495,41 @@ with st.sidebar:
 
 # Main Interface
 st.markdown("<h1 class='main-header'>⚖️ Legal AI Copilot</h1>", unsafe_allow_html=True)
-st.markdown("<p class='sub-header'>Chat seamlessly with your securely embedded corporate contracts.</p>", unsafe_allow_html=True)
+st.markdown(
+    "<p class='sub-header'>Chat seamlessly with your securely embedded corporate contracts.</p>",
+    unsafe_allow_html=True,
+)
 
 # State 1: No active session
 if not st.session_state.session_id:
     st.info("Initialize a secure workspace session to begin chatting.")
-    
+
     if st.session_state.available_files:
-        file_options = {f["file_id"]: f["filename"] for f in st.session_state.available_files}
+        file_options = {
+            f["file_id"]: f["filename"] for f in st.session_state.available_files
+        }
         selected_file_ids = st.multiselect(
             "Select documents to include in this session's context:",
             options=list(file_options.keys()),
-            format_func=lambda x: file_options[x]
+            format_func=lambda x: file_options[x],
         )
-        
+
         if st.button("🚀 Create Workspace", type="primary") and selected_file_ids:
             with st.spinner("Initializing Workspace..."):
                 try:
-                    res = httpx.post(f"{API_URL}/session/", json=selected_file_ids, params={"org_id": ORG_ID}, timeout=120.0)
+                    res = httpx.post(
+                        f"{API_URL}/session/",
+                        json=selected_file_ids,
+                        headers=get_headers(),
+                        timeout=120.0,
+                    )
                     if res.status_code in [200, 201]:
                         st.session_state.session_id = res.json().get("session_id")
                         st.session_state.messages = [
-                            {"role": "assistant", "content": "I'm ready. I have fully indexed the selected contracts. What would you like to know?"}
+                            {
+                                "role": "assistant",
+                                "content": "I'm ready. I have fully indexed the selected contracts. What would you like to know?",
+                            }
                         ]
                         st.rerun()
                     else:
@@ -182,47 +542,59 @@ else:
     # Top Bar: Inference Mode Switcher
     col1, col2 = st.columns([1, 4])
     with col1:
-        use_agentic = st.toggle("🤖 Agentic Tool Router", value=False, help="Enable multi-step planning and tool usage. Slower but better for complex logic.")
+        use_agentic = st.toggle(
+            "🤖 Agentic Tool Router",
+            value=False,
+            help="Enable multi-step planning and tool usage. Slower but better for complex logic.",
+        )
     with col2:
-        st.write("") # spacing
+        st.write("")  # spacing
 
     # Chat History
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            
+
     # Chat Input
     if prompt := st.chat_input("Ask a question about your contracts..."):
         # Append user message
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
-            
+
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
-            
+
             # Formulate request
             endpoint = "/ask-agent" if use_agentic else "/ask"
             q_params = {
                 "session_id": st.session_state.session_id,
                 "question": prompt,
-                "org_id": ORG_ID,
-                "mode": "hybrid" if use_agentic else "fast"
+                "mode": "hybrid" if use_agentic else "fast",
             }
-            
+
             try:
-                with st.spinner("Analyzing..." if not use_agentic else "Agent Planning..."):
-                    res = httpx.post(f"{API_URL}{endpoint}", params=q_params, timeout=60.0)
+                with st.spinner(
+                    "Analyzing..." if not use_agentic else "Agent Planning..."
+                ):
+                    res = httpx.post(
+                        f"{API_URL}{endpoint}",
+                        params=q_params,
+                        headers=get_headers(),
+                        timeout=60.0,
+                    )
                     res.raise_for_status()
-                    
+
                     # Handle varying response structures
                     if use_agentic:
                         answer = res.json().get("answer", "No answer provided")
                     else:
                         answer = res.json().get("answer", "No answer provided")
-                        
+
                     message_placeholder.markdown(answer)
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
-                    
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": answer}
+                    )
+
             except Exception as e:
                 st.error(f"Inference error: {e}")

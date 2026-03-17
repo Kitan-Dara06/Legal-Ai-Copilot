@@ -13,6 +13,8 @@ from typing import Optional
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
 
+from app.config import redis_disable_tls_verify
+
 load_dotenv()
 
 host = os.getenv("UPSTASH_HOST")
@@ -28,15 +30,25 @@ PROGRESS_TTL_SECONDS = 60 * 10
 # ─────────────────────────────────────────────────────────────────────────────
 # Global Redis Connection Pool
 # ─────────────────────────────────────────────────────────────────────────────
-REDIS_URL = f"rediss://default:{password}@{host}:{port}/0?ssl_cert_reqs=none"
+base_redis_url = f"rediss://default:{password}@{host}:{port}/0"
+if redis_disable_tls_verify():
+    REDIS_URL = base_redis_url + "?ssl_cert_reqs=none"
+else:
+    REDIS_URL = base_redis_url
+
 _redis_client = aioredis.from_url(
     REDIS_URL,
     decode_responses=True,
-    health_check_interval=30
+    health_check_interval=30,
 )
 
 def get_redis_client() -> aioredis.Redis:
-    """Returns an async Redis client backed by the global connection pool."""
+    """
+    Returns the shared async Redis client backed by the global connection pool.
+    IMPORTANT: Never call .aclose() on this — it is a shared pool singleton.
+    Closing it would break all subsequent requests in the same process.
+    The pool manages its own connections automatically.
+    """
     return _redis_client
 
 

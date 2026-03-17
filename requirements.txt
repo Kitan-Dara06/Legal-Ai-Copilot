@@ -11,9 +11,14 @@ python-multipart
 streamlit
 httpx
 groq
+sentry-sdk[fastapi,celery]
 
+# Gemini (Google AI) SDK — used for OCR / vision extraction in scanned PDFs
+google-genai
 
-sqlalchemy[asyncio]   
+passlib[bcrypt]
+bcrypt==4.0.1   # 4.1.x removed __about__; passlib breaks without this pin
+sqlalchemy[asyncio]
 asyncpg               # Async Postgres driver (fast, works with FastAPI)
 alembic               # Handles DB schema changes over time
 
@@ -21,8 +26,19 @@ alembic               # Handles DB schema changes over time
 redis                 # Python client for Redis
 
 
-celery[redis]         # Task queue; [redis] means it uses Redis as its message broker
+celery[redis]                  # Task queue; RabbitMQ broker + Redis result backend
 
 qdrant-client         # Python client for Qdrant
 
 pypdf                 # Read PDFs, detect if scanned or digital
+
+boto3                          # S3-compatible API (Cloudflare R2)
+pydantic-ai           # Strictly-typed agent frameworks
+
+cohere                # Semantic Reranking API
+
+# Production hardening
+slowapi               # In-process rate limiting for FastAPI
+python-json-logger    # Structured JSON log formatting
+python-jose[cryptography]  # JWT verification (Supabase auth)
+supabase  # Supabase client (frontend auth)

@@ -1,14 +1,43 @@
+# Environment / secrets (never commit real env files)
 .env
+.env.*
+!.env.example
+
+# Virtualenvs / python junk
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build / packaging artifacts
 .dist/
 .build/
+build/
+dist/
+
+# Local runtime files / generated artifacts
 app/uploads/
 logs/
 *.log
+
+# Celery beat schedule + pid files (generated)
+celerybeat-schedule
+celerybeat-schedule.db
+celerybeat.pid
+
+# Data created by running the app locally
 legal_db/
+results/
+*.csv
+
+# Large documents (keep out of git)
 *.pdf
+
+# OS / editor
 .DS_Store

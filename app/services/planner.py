@@ -121,32 +121,42 @@ def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file
         if tool_name == "search_tool":
             params["query"] = question
             params["mode"] = mode
-            # Pass session scope if available
+            params["org_id"] = org_id  # Always scope by org, even without a session
             if file_ids:
                 params["file_ids"] = file_ids
-                params["org_id"] = org_id
             result = search_tool(**params)
             context["chunks"].extend(result)
             
-            # Heuristic: If we found a specific contract source, use it for read_tool
-            # (Simple: just pick the first source found)
+            # Collect all unique contract sources from the chunks
             if result:
-                first_source = result[0].split("[Source: ")[1].split(",")[0].strip()
-                context["current_contract"] = first_source
-                print(f"   Context: Focused on {first_source}")
+                sources = []
+                for chunk in result:
+                    match = re.search(r"\[Source: (.+?),", chunk)
+                    if match and match.group(1) not in sources:
+                        sources.append(match.group(1))
+                
+                context["current_contracts"] = sources
+                if sources:
+                    print(f"   Context: Focused on {len(sources)} contracts: {sources}")
 
         # 2. Read Tool
         elif tool_name == "read_tool":
-            # Needs a contract name. If search found one, use it.
-            contract = context.get("current_contract")
-            if contract:
-                params["contract_name"] = contract
-                result = read_tool(**params)
-                context["structured_data"] = result
+            # Needs contract names. If search found them, use them.
+            contracts = context.get("current_contracts", [])
+            if contracts:
+                all_extracted = {}
+                for contract in contracts:
+                    params_copy = params.copy()
+                    params_copy["contract_name"] = contract
+                    params_copy["org_id"] = org_id  # Enforce org isolation in read_tool
+                    res = read_tool(**params_copy)
+                    all_extracted[contract] = res
+                
+                context["structured_data"] = all_extracted
                 # Add structured data to chunks for the drafter to see
-                context["chunks"].append(f"Extracted Data: {json.dumps(result)}")
+                context["chunks"].append(f"Extracted Data: {json.dumps(all_extracted)}")
             else:
-                print("   ⚠ SKIPPED: No contract identified from search results")
+                print("   ⚠ SKIPPED: No contracts identified from search results")
                 continue
 
         # 3. Logic Tool
