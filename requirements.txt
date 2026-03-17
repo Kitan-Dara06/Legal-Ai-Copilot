@@ -42,3 +42,5 @@ slowapi               # In-process rate limiting for FastAPI
 python-json-logger    # Structured JSON log formatting
 python-jose[cryptography]  # JWT verification (Supabase auth)
 supabase  # Supabase client (frontend auth)
+
+psycopg2-binary==2.9.9
