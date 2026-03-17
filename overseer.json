@@ -1,18 +1,18 @@
 [
-    {
-        "name": "Fastapi",
-        "command": "venv/bin/uvicorn main:app --reload --env-file .env"
-    },
-    {
-        "name": "Celery_pdf",
-        "command": "venv/bin/celery -A app.worker.celery_app worker -Q default --loglevel=info"
-    },
-    {
-        "name": "Celery_OCR",
-        "command": "venv/bin/celery -A app.worker.celery_app worker -Q ocr --loglevel=info"
-    },
-    {
-        "name": "Streamlit",
-        "command": "venv/bin/streamlit run frontend/app.py"
-    }
+  {
+    "name": "Fastapi",
+    "command": "venv/bin/uvicorn main:app --reload --env-file .env"
+  },
+  {
+    "name": "Celery_pdf",
+    "command": "venv/bin/celery -A app.worker.celery_app worker -Q default -B -n pdf_worker@%h --loglevel=info"
+  },
+  {
+    "name": "Celery_OCR",
+    "command": "venv/bin/celery -A app.worker.celery_app worker -Q ocr -n ocr_worker@%h --loglevel=info"
+  },
+  {
+    "name": "Streamlit",
+    "command": "venv/bin/streamlit run frontend/app.py"
+  }
 ]

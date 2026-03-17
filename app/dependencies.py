@@ -1,5 +1,6 @@
 import hashlib
 import os
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -26,6 +27,8 @@ SUPABASE_JWKS_URL = (
 SUPABASE_JWT_AUD = os.getenv("SUPABASE_JWT_AUD", "authenticated")
 
 _supabase_jwks_cache: dict | None = None
+_supabase_jwks_fetched_at: float = 0.0
+_JWKS_TTL_SECONDS = 86400  # Re-fetch JWKS once per day
 
 
 @dataclass
@@ -163,8 +166,9 @@ def _verify_supabase_token(token: str) -> dict:
             detail="Invalid Supabase token header.",
         )
 
-    global _supabase_jwks_cache
-    if _supabase_jwks_cache is None:
+    global _supabase_jwks_cache, _supabase_jwks_fetched_at
+    now = time.monotonic()
+    if _supabase_jwks_cache is None or (now - _supabase_jwks_fetched_at) > _JWKS_TTL_SECONDS:
         try:
             headers = {}
             if SUPABASE_ANON_KEY:
@@ -172,6 +176,7 @@ def _verify_supabase_token(token: str) -> dict:
             resp = httpx.get(SUPABASE_JWKS_URL, headers=headers, timeout=5.0)
             resp.raise_for_status()
             _supabase_jwks_cache = resp.json()
+            _supabase_jwks_fetched_at = now
         except Exception:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -204,19 +209,18 @@ def _verify_supabase_token(token: str) -> dict:
         )
 
     try:
-        claims = jwt.get_unverified_claims(token)
-    except JWTError:
+        claims = jwt.decode(
+            token,
+            public_key.to_pem().decode("utf-8"),
+            algorithms=[alg],
+            audience=SUPABASE_JWT_AUD,
+            options={"verify_exp": True, "verify_aud": True},
+        )
+    except JWTError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Supabase token.",
-        )
-
-    aud = claims.get("aud")
-    if aud != SUPABASE_JWT_AUD:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Supabase token audience.",
-        )
+            detail="Supabase token is invalid or expired.",
+        ) from exc
 
     return claims
 
@@ -288,21 +292,20 @@ async def _build_supabase_auth_context(claims: dict, db: AsyncSession) -> Supaba
         await db.refresh(user)
         return SupabaseAuthContext(org_id=org_id, user=user, claims=claims)
 
-    # No invite: create new org and admin user.
-    org_id = sub
-    org = Organization(id=org_id)
-    db.add(org)
-    user = User(
-        email=email,
-        supabase_user_id=sub,
-        hashed_password="!",
-        org_id=org_id,
-        role=UserRole.ADMIN,
+    # No invite and no existing account: the user must register explicitly
+    # so they can choose their own org_id. We return a structured 403 that
+    # the frontend detects and redirects to the org-creation / signup form.
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": "setup_required",
+            "message": (
+                "No account found for this email. "
+                "Please sign up and choose your organisation ID, "
+                "or ask your organisation admin to invite you."
+            ),
+        },
     )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    return SupabaseAuthContext(org_id=org_id, user=user, claims=claims)
 
 
 async def get_supabase_auth_context(

@@ -2,7 +2,7 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from supabase import AuthApiError, create_client as create_supabase_client
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, constr
@@ -20,9 +20,12 @@ from app.dependencies import (
     hash_api_key,
 )
 from app.models import ApiKey, Invite, Organization, User, UserRole
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+limiter = Limiter(key_func=get_remote_address)
 
 
 # ── Pydantic Schemas ──────────────────────────────────────────────────────────
@@ -75,7 +78,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
-async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def signup(request: Request, payload: SignupRequest, db: AsyncSession = Depends(get_db)):
     """
     Creates a new organization, admin user, and initial API key.
     Fails if the org_id already exists (to prevent org hijacking).
@@ -143,7 +147,8 @@ async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login")
-async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("5/minute")
+async def login(request: Request, payload: LoginRequest, db: AsyncSession = Depends(get_db)):
     """
     Authenticates a user and issues a NEW API key.
     """
@@ -331,10 +336,11 @@ async def accept_invite(
         Invite.token == payload.token,
         Invite.email == payload.email,
         Invite.is_accepted == False,
+        Invite.expires_at > datetime.now(timezone.utc),
     )
     invite = (await db.execute(stmt)).scalar_one_or_none()
 
-    if not invite or invite.expires_at < datetime.now(timezone.utc):
+    if not invite:
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired invite token.",

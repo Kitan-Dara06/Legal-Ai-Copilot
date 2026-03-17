@@ -180,15 +180,21 @@ def _supabase_signup(email: str, password: str):
 
 def _supabase_send_reset_email(email: str):
     """
-    Send a Supabase password reset email. Uses HTTPX to avoid SDK version incompatibilities.
-    Expects FRONTEND_URL in env for redirect back to this app (optional).
+    Send a Supabase password reset email.
+    Requires FRONTEND_URL to be set in env — raises a clear error if missing
+    so we never silently send a link pointing at localhost.
     """
     if not email:
         raise ValueError(
             "Please enter your email address to receive a password reset link."
         )
+    redirect_to = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+    if not redirect_to:
+        raise ValueError(
+            "Password reset is not configured on this server. "
+            "Ask your administrator to set the FRONTEND_URL environment variable."
+        )
     try:
-        redirect_to = os.getenv("FRONTEND_URL", "http://localhost:8501")
         url = f"{SUPABASE_URL}/auth/v1/recover"
         headers = {
             "apikey": SUPABASE_KEY,
@@ -202,6 +208,8 @@ def _supabase_send_reset_email(email: str):
             timeout=10.0,
         )
         resp.raise_for_status()
+    except ValueError:
+        raise
     except Exception as e:
         raise ValueError(_handle_supabase_connection_error(e))
 
@@ -352,17 +360,55 @@ if not is_logged_in():
 
     with tab2:
         st.subheader("Sign Up (Supabase)")
+        st.caption(
+            "Create your Supabase account and choose a unique Organisation ID for your workspace."
+        )
         signup_email = st.text_input("Email", key="signup_email")
         signup_password = st.text_input(
             "Password", type="password", key="signup_password"
         )
+        signup_org_id = st.text_input(
+            "Organisation ID",
+            key="signup_org_id",
+            placeholder="e.g. acme-legal or my-firm-2025",
+            help="A unique, lowercase identifier for your workspace. You cannot change this later.",
+        )
         if st.button("Sign Up"):
-            try:
-                _supabase_signup(signup_email, signup_password)
-                st.success("Signed up successfully!")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+            org_id_clean = (signup_org_id or "").strip().lower()
+            if not org_id_clean:
+                st.error("Please choose an Organisation ID for your workspace.")
+            else:
+                try:
+                    _supabase_signup(signup_email, signup_password)
+                    # Register the org on the backend so the user gets a proper workspace
+                    try:
+                        reg = httpx.post(
+                            f"{API_URL}/auth/signup",
+                            json={
+                                "email": signup_email,
+                                "password": signup_password,
+                                "org_id": org_id_clean,
+                            },
+                            timeout=15.0,
+                        )
+                        if reg.status_code == 201:
+                            data = reg.json()
+                            st.session_state.org_id = data.get("org_id", org_id_clean)
+                            st.success(
+                                f"Organisation **{org_id_clean}** created! You're all set."
+                            )
+                        else:
+                            err = reg.json().get("detail", reg.text) if reg.headers.get("content-type", "").startswith("application/json") else reg.text
+                            st.warning(f"Supabase account created, but org setup failed: {err}")
+                    except Exception as org_err:
+                        st.warning(f"Supabase account created, but org setup failed: {org_err}")
+                    st.rerun()
+                except Exception as e:
+                    err_msg = str(e)
+                    if "Sign-up successful" in err_msg:
+                        st.info(err_msg)
+                    else:
+                        st.error(err_msg)
 
     st.stop()
 
