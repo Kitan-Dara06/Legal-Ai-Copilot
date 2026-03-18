@@ -149,7 +149,7 @@ def _supabase_login(email: str, password: str):
         )
         if me.status_code == 200:
             data = me.json()
-            st.session_state.org_id = data.get("org_id")
+            st.session_state.org_id = data.get("org_slug") or data.get("org_id")
             st.session_state.app_role = data.get("app_role")
             st.session_state.setup_required = False
         elif me.status_code == 403:
@@ -158,7 +158,10 @@ def _supabase_login(email: str, password: str):
                 err = me.json().get("detail", {})
             except Exception:
                 err = {}
-            if isinstance(err, dict) and err.get("code") == "setup_required":
+            if isinstance(err, dict) and err.get("code") in (
+                "setup_required",
+                "invite_required",
+            ):
                 st.session_state.setup_required = True
                 st.session_state.app_role = None
                 st.session_state.org_id = None
@@ -183,7 +186,7 @@ def _supabase_signup(email: str, password: str):
             )
             if me.status_code == 200:
                 data = me.json()
-                st.session_state.org_id = data.get("org_id")
+                st.session_state.org_id = data.get("org_slug") or data.get("org_id")
                 st.session_state.app_role = data.get("app_role")
                 st.session_state.setup_required = False
             elif me.status_code == 403:
@@ -192,7 +195,10 @@ def _supabase_signup(email: str, password: str):
                     err = me.json().get("detail", {})
                 except Exception:
                     err = {}
-                if isinstance(err, dict) and err.get("code") == "setup_required":
+                if isinstance(err, dict) and err.get("code") in (
+                    "setup_required",
+                    "invite_required",
+                ):
                     st.session_state.setup_required = True
                     st.session_state.app_role = None
                     st.session_state.org_id = None
@@ -201,7 +207,7 @@ def _supabase_signup(email: str, password: str):
     else:
         # Email confirmation may be required
         raise ValueError(
-            "Sign-up successful. Check your email to confirm, then log in."
+            "Signup created. If email confirmation is enabled, check your inbox; otherwise, log in now."
         )
 
 
@@ -612,11 +618,30 @@ with st.sidebar:
             )
             if me.status_code == 200:
                 data = me.json()
-                st.session_state.org_id = st.session_state.org_id or data.get("org_id")
+                st.session_state.org_id = (
+                    st.session_state.org_id
+                    or data.get("org_slug")
+                    or data.get("org_id")
+                )
                 st.session_state.app_role = st.session_state.app_role or data.get(
                     "app_role"
                 )
+                st.session_state.setup_required = False
                 if st.session_state.org_id or st.session_state.app_role:
+                    st.rerun()
+            elif me.status_code == 403:
+                err = {}
+                try:
+                    err = me.json().get("detail", {})
+                except Exception:
+                    err = {}
+                if isinstance(err, dict) and err.get("code") in (
+                    "setup_required",
+                    "invite_required",
+                ):
+                    st.session_state.setup_required = True
+                    st.session_state.org_id = None
+                    st.session_state.app_role = None
                     st.rerun()
         except Exception:
             pass
@@ -645,19 +670,90 @@ with st.sidebar:
                     if me.status_code == 200:
                         data = me.json()
                         st.session_state.org_id = (
-                            data.get("org_id") or st.session_state.org_id
+                            data.get("org_slug")
+                            or data.get("org_id")
+                            or st.session_state.org_id
                         )
                         st.session_state.app_role = (
                             data.get("app_role") or st.session_state.app_role
                         )
+                        st.session_state.setup_required = False
                         st.success("Profile loaded.")
                         st.rerun()
+                    elif me.status_code == 403:
+                        err = {}
+                        try:
+                            err = me.json().get("detail", {})
+                        except Exception:
+                            err = {}
+                        if isinstance(err, dict) and err.get("code") in (
+                            "setup_required",
+                            "invite_required",
+                        ):
+                            st.session_state.setup_required = True
+                            st.session_state.org_id = None
+                            st.session_state.app_role = None
+                            st.info(
+                                "You're signed in but need to create a workspace. Use the form below."
+                            )
+                        else:
+                            st.error(
+                                f"Forbidden (403). Is your Supabase session still valid?"
+                            )
                     else:
                         st.error(
                             f"Backend returned {me.status_code}. Is the API at {API_URL} running?"
                         )
                 except Exception as e:
                     st.error(f"Cannot reach backend: {e}")
+
+        if st.session_state.setup_required and st.session_state.access_token:
+            st.warning(
+                "Authenticated but no workspace exists yet. Create one to continue."
+            )
+            setup_org_id = st.text_input(
+                "Workspace ID",
+                key="setup_required_org_id_logged_in",
+                placeholder="e.g. acme-legal",
+            )
+            if st.button("Create workspace", key="create_workspace_logged_in"):
+                setup_org_id_clean = (setup_org_id or "").strip().lower()
+                if not setup_org_id_clean:
+                    st.error("Please enter a workspace ID.")
+                else:
+                    try:
+                        res = httpx.post(
+                            f"{API_URL}/auth/setup-org",
+                            json={"org_id": setup_org_id_clean},
+                            headers=get_headers(),
+                            timeout=15.0,
+                        )
+                        if res.status_code in (200, 201):
+                            data = (
+                                res.json()
+                                if res.headers.get("content-type", "").startswith(
+                                    "application/json"
+                                )
+                                else {}
+                            )
+                            st.session_state.org_id = data.get(
+                                "org_id", setup_org_id_clean
+                            )
+                            st.session_state.app_role = data.get("app_role", "ADMIN")
+                            st.session_state.setup_required = False
+                            st.success("Workspace created successfully.")
+                            st.rerun()
+                        else:
+                            err = (
+                                res.json().get("detail", res.text)
+                                if res.headers.get("content-type", "").startswith(
+                                    "application/json"
+                                )
+                                else res.text
+                            )
+                            st.error(f"Workspace setup failed: {err}")
+                    except Exception as e:
+                        st.error(str(e))
 
     # Admin: invite members (Supabase magic link email)
     if st.session_state.app_role == "ADMIN":

@@ -310,23 +310,13 @@ async def _build_supabase_auth_context(
     invite = invite_result.scalar_one_or_none()
 
     if invite:
-        # Join existing org as MEMBER.
-        org_id = invite.org_id
-        user = User(
-            email=email,
-            supabase_user_id=sub,
-            hashed_password="!",
-            org_id=org_id,
-            role=UserRole.MEMBER,
-            personal_org_id=org_id,
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "invite_required",
+                "message": "An invite exists for this email. Please accept the invite link to join the organization.",
+            },
         )
-        db.add(user)
-        await db.flush()
-        db.add(UserOrgMembership(user_id=user.id, org_id=org_id, role=UserRole.MEMBER))
-        invite.is_accepted = True
-        await db.commit()
-        await db.refresh(user)
-        return SupabaseAuthContext(org_id=str(org_id), user=user, claims=claims)
 
     # No invite and no existing account: the user must register explicitly
     # so they can choose their own org_id. We return a structured 403 that

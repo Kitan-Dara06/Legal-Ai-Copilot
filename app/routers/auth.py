@@ -295,7 +295,7 @@ async def setup_org(
 
     user.supabase_user_id = user.supabase_user_id or sub
     user.org_id = new_org.id
-    user.personal_org_id = user.personal_org_id or new_org.id
+    user.personal_org_id = new_org.id
     user.role = UserRole.ADMIN
     await db.flush()
     db.add(UserOrgMembership(user_id=user.id, org_id=new_org.id, role=UserRole.ADMIN))
@@ -575,15 +575,30 @@ async def revoke_key(
 
 
 @router.get("/me")
-async def who_am_i(ctx=Depends(get_supabase_auth_context)):
+async def who_am_i(
+    ctx=Depends(get_supabase_auth_context), db: AsyncSession = Depends(get_db)
+):
     """
-    Supabase-authenticated endpoint. Returns identity, org_id, and app role for the UI.
+    Supabase-authenticated endpoint. Returns identity, org_id, org_slug, and app role for the UI.
     """
+    org_slug = None
+    try:
+        if ctx.org_id:
+            org_res = await db.execute(
+                select(Organization).where(Organization.id == ctx.org_id)
+            )
+            org = org_res.scalar_one_or_none()
+            if org:
+                org_slug = org.slug
+    except Exception:
+        org_slug = None
+
     return {
         "sub": ctx.claims.get("sub"),
         "email": ctx.claims.get("email"),
         "role": ctx.claims.get("role"),
         "aud": ctx.claims.get("aud"),
         "org_id": ctx.org_id,
+        "org_slug": org_slug,
         "app_role": ctx.user.role.value,
     }

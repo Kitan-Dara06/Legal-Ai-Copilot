@@ -627,7 +627,7 @@ def sweep_failed_tasks():
             for file_id, filename in rows:
                 logger.warning(
                     "Swept stuck PENDING task",
-                    extra={"file_id": file_id, "filename": filename},
+                    extra={"file_id": file_id, "file_name": filename},
                 )
             logger.info(
                 f"sweep_failed_tasks: marked {len(rows)} stuck file(s) as FAILED"

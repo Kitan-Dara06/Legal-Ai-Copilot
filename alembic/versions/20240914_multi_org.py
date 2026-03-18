@@ -7,9 +7,8 @@ Create Date: 2024-09-14
 """
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
-
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = "20240914_multi_org"
@@ -40,6 +39,10 @@ def upgrade() -> None:
             server_default=sa.text("gen_random_uuid()"),
             nullable=False,
         ),
+    )
+    # ensure temporary uniqueness on id_uuid for FK creation before PK swap
+    op.create_unique_constraint(
+        "uq_organizations_id_uuid", "organizations", ["id_uuid"]
     )
 
     # backfill slug from previous id (which held the human slug)
