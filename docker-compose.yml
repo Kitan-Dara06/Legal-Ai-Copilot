@@ -29,7 +29,7 @@ services:
             - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
             # Force Streamlit to trust the secure websocket
             - STREAMLIT_SERVER_ENABLE_CORS=false
-            - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false
+            - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=true
         restart: always
         depends_on: [api]
         networks: [internal]

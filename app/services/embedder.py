@@ -224,7 +224,7 @@ def get_embedding(texts: list[str]) -> list[list[float]]:
         try:
             return _cloudflare_embeddings(inputs)
         except Exception as cf_err:
-            print(f"   ⚠️ Cloudflare Embedding failed: {cf_err}. Falling back...")
+            logger.warning("Cloudflare Embedding failed: %s. Falling back...", cf_err)
 
     # Strategy 2: OpenRouter (Fallback)
     models = OPENROUTER_EMBEDDING_MODELS or ["baai/bge-m3"]

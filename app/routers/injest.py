@@ -125,7 +125,8 @@ def _upload_to_r2_and_enqueue(
     scanned: bool,
 ):
     """Runs after response is sent: upload to R2, enqueue Celery task, delete temp file."""
-    blob_name = f"{file_id}_{filename.replace(' ', '_')}"
+    import uuid
+    blob_name = f"{uuid.uuid4().hex}_{filename.replace(' ', '_')}"
     try:
         upload_local_file_to_gcs(temp_file_path, blob_name)
         if scanned:

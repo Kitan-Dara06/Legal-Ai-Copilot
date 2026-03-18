@@ -17,7 +17,7 @@ load_dotenv(_env)
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPERBASE_KEY", "")
+SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 
 _sentry_dsn = os.getenv("SENTRY_DSN")
 if _sentry_dsn:
@@ -84,14 +84,26 @@ if "api_key" not in st.session_state:
 # App role from backend (ADMIN can invite members)
 if "app_role" not in st.session_state:
     st.session_state.app_role = None
+if "org_slug" not in st.session_state:
+    st.session_state.org_slug = None
+if "org_name" not in st.session_state:
+    st.session_state.org_name = None
+if "file_search_query" not in st.session_state:
+    st.session_state.file_search_query = ""
+if "file_page" not in st.session_state:
+    st.session_state.file_page = 0
 
 
 def get_headers():
+    headers = {}
     if st.session_state.access_token:
-        return {"Authorization": f"Bearer {st.session_state.access_token}"}
-    if st.session_state.api_key:
-        return {"X-API-Key": st.session_state.api_key}
-    return {}
+        headers["Authorization"] = f"Bearer {st.session_state.access_token}"
+    elif st.session_state.api_key:
+        headers["X-API-Key"] = st.session_state.api_key
+    # Always include X-Active-Org so the backend resolves the org consistently
+    if st.session_state.get("org_slug"):
+        headers["X-Active-Org"] = st.session_state.org_slug
+    return headers
 
 
 # Longer timeouts for Supabase (avoids SSL handshake / read timeout on slow networks)
@@ -149,7 +161,9 @@ def _supabase_login(email: str, password: str):
         )
         if me.status_code == 200:
             data = me.json()
-            st.session_state.org_id = data.get("org_slug") or data.get("org_id")
+            st.session_state.org_id = data.get("org_id")
+            st.session_state.org_slug = data.get("org_slug") or data.get("org_id")
+            st.session_state.org_name = data.get("org_name")
             st.session_state.app_role = data.get("app_role")
             st.session_state.setup_required = False
         elif me.status_code == 403:
@@ -186,7 +200,9 @@ def _supabase_signup(email: str, password: str):
             )
             if me.status_code == 200:
                 data = me.json()
-                st.session_state.org_id = data.get("org_slug") or data.get("org_id")
+                st.session_state.org_id = data.get("org_id")
+                st.session_state.org_slug = data.get("org_slug") or data.get("org_id")
+                st.session_state.org_name = data.get("org_name")
                 st.session_state.app_role = data.get("app_role")
                 st.session_state.setup_required = False
             elif me.status_code == 403:
@@ -334,16 +350,17 @@ except Exception:
 if not is_logged_in():
     # Supabase appends access_token in the URL hash for implicit flow (e.g., password recovery).
     # Streamlit cannot read the hash server-side. This JS auto-redirects the hash to a query parameter.
-    st.markdown(
+    import streamlit.components.v1 as components
+    components.html(
         """
         <script>
-        if (window.location.hash.includes("access_token=")) {
-            const hash = window.location.hash.substring(1);
-            window.location.href = window.location.pathname + "?" + hash;
+        if (window.parent.location.hash.includes("access_token=")) {
+            const hash = window.parent.location.hash.substring(1);
+            window.parent.location.href = window.parent.location.pathname + "?" + hash;
         }
         </script>
         """,
-        unsafe_allow_html=True,
+        height=0,
     )
 
     st.markdown(
@@ -406,6 +423,12 @@ if not is_logged_in():
             placeholder="e.g. acme-legal or my-firm-2025",
             help="A unique, lowercase identifier for your workspace. You cannot change this later.",
         )
+        signup_org_name = st.text_input(
+            "Organisation Name",
+            key="signup_org_name",
+            placeholder="e.g. Acme Legal LLP",
+            help="A human-readable display name for your organisation.",
+        )
         if st.button("Sign Up"):
             org_id_clean = (signup_org_id or "").strip().lower()
             if not org_id_clean:
@@ -414,9 +437,13 @@ if not is_logged_in():
                 try:
                     _supabase_signup(signup_email, signup_password)
                     # Register the org on the backend using setup-org with Bearer auth
+                    org_name_clean = (signup_org_name or "").strip()
+                    payload = {"org_id": org_id_clean}
+                    if org_name_clean:
+                        payload["org_name"] = org_name_clean
                     reg = httpx.post(
                         f"{API_URL}/auth/setup-org",
-                        json={"org_id": org_id_clean},
+                        json=payload,
                         headers=get_headers(),
                         timeout=15.0,
                     )
@@ -429,6 +456,8 @@ if not is_logged_in():
                             else {}
                         )
                         st.session_state.org_id = data.get("org_id", org_id_clean)
+                        st.session_state.org_slug = org_id_clean
+                        st.session_state.org_name = org_name_clean or org_id_clean
                         st.session_state.setup_required = False
                         st.success(
                             f"Organisation **{org_id_clean}** created! You're all set."
@@ -596,15 +625,7 @@ def refresh_files():
 
 # Sidebar: File Management
 with st.sidebar:
-    with st.expander("Account Settings", expanded=False):
-        st.subheader("Change Password")
-        new_pw = st.text_input("New Password", type="password", key="sidebar_new_pw")
-        if st.button("Update Password"):
-            try:
-                _supabase_update_password(new_pw)
-                st.success("Password updated successfully!")
-            except Exception as e:
-                st.error(str(e))
+    # Account settings removed — use "Forgot Password" on login page instead
 
     # Backfill org_id and app_role from /auth/me when we have a token but missing either
     if st.session_state.access_token and (
@@ -653,9 +674,11 @@ with st.sidebar:
 
     # Always show Org and Role when logged in (show "—" if not loaded yet)
     if st.session_state.access_token or st.session_state.user_email:
-        org_display = st.session_state.org_id if st.session_state.org_id else "—"
+        org_display = st.session_state.org_name or st.session_state.org_slug or st.session_state.org_id or "—"
         role_display = st.session_state.app_role if st.session_state.app_role else "—"
-        st.markdown(f"**Org:** `{org_display}`")
+        st.markdown(f"**Org:** {org_display}")
+        if st.session_state.org_slug and st.session_state.org_slug != org_display:
+            st.caption(f"Slug: `{st.session_state.org_slug}`")
         st.caption(f"**Role:** {role_display}")
         if not st.session_state.org_id or not st.session_state.app_role:
             if st.button(
@@ -832,7 +855,7 @@ with st.sidebar:
 
     st.divider()
 
-    # File View Section
+    # File View Section with Search & Pagination
     st.subheader("Available Files")
     if st.button("🔄 Refresh List", use_container_width=True):
         refresh_files()
@@ -840,10 +863,54 @@ with st.sidebar:
     if not st.session_state.available_files:
         st.info("No formatted documents available. Upload one to begin.")
     else:
-        for f in st.session_state.available_files:
+        # Search/filter bar
+        search_q = st.text_input(
+            "🔍 Filter files",
+            value=st.session_state.file_search_query,
+            placeholder="Type to filter by filename...",
+            key="file_search_input",
+            label_visibility="collapsed",
+        )
+        st.session_state.file_search_query = search_q
+
+        filtered = [
+            f for f in st.session_state.available_files
+            if search_q.lower() in f["filename"].lower()
+        ] if search_q else st.session_state.available_files
+
+        # Pagination
+        PAGE_SIZE = 10
+        total_files = len(filtered)
+        total_pages = max(1, (total_files + PAGE_SIZE - 1) // PAGE_SIZE)
+        # Clamp page
+        if st.session_state.file_page >= total_pages:
+            st.session_state.file_page = total_pages - 1
+        if st.session_state.file_page < 0:
+            st.session_state.file_page = 0
+
+        start_idx = st.session_state.file_page * PAGE_SIZE
+        page_files = filtered[start_idx : start_idx + PAGE_SIZE]
+
+        st.caption(f"Showing {start_idx + 1}–{min(start_idx + len(page_files), total_files)} of {total_files} files")
+
+        for f in page_files:
             file_id = f["file_id"]
             fname = f["filename"]
             st.caption(f"📄 {fname} (ID: {file_id})")
+
+        # Pagination controls
+        if total_pages > 1:
+            col_prev, col_info, col_next = st.columns([1, 2, 1])
+            with col_prev:
+                if st.button("◀ Prev", disabled=(st.session_state.file_page == 0), key="file_page_prev"):
+                    st.session_state.file_page -= 1
+                    st.rerun()
+            with col_info:
+                st.caption(f"Page {st.session_state.file_page + 1} / {total_pages}")
+            with col_next:
+                if st.button("Next ▶", disabled=(st.session_state.file_page >= total_pages - 1), key="file_page_next"):
+                    st.session_state.file_page += 1
+                    st.rerun()
 
     st.divider()
     if st.session_state.session_id:

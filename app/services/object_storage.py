@@ -51,10 +51,10 @@ def _bucket():
     return R2_BUCKET_NAME
 
 
-def upload_local_file_to_gcs(local_file_path: str, destination_blob_name: str) -> str:
+def upload_file(local_file_path: str, destination_blob_name: str) -> str:
     """
     Uploads a file from a local path to R2 (object key = destination_blob_name).
-    Kept name for drop-in replacement of GCS; returns an r2://-style identifier.
+    Returns an r2://-style identifier.
     """
     client = _get_client()
     bucket = _bucket()
@@ -63,13 +63,21 @@ def upload_local_file_to_gcs(local_file_path: str, destination_blob_name: str) -
     return f"r2://{bucket}/{destination_blob_name}"
 
 
-def download_file_from_gcs(blob_name: str, destination_file_name: str) -> None:
+# Backward-compatible alias
+upload_local_file_to_gcs = upload_file
+
+
+def download_file(blob_name: str, destination_file_name: str) -> None:
     """Downloads an object from R2 to a local file path."""
     client = _get_client()
     client.download_file(_bucket(), blob_name, destination_file_name)
 
 
-def delete_file_from_gcs(blob_name: str) -> None:
+# Backward-compatible alias
+download_file_from_gcs = download_file
+
+
+def delete_file(blob_name: str) -> None:
     """Deletes an object from R2. Logs and ignores if object is missing."""
     try:
         client = _get_client()
@@ -82,6 +90,10 @@ def delete_file_from_gcs(blob_name: str) -> None:
             logger.warning("[r2] Could not delete object %s: %s", blob_name, e)
     except Exception as e:
         logger.warning("[r2] Could not delete object %s: %s", blob_name, e)
+
+
+# Backward-compatible alias
+delete_file_from_gcs = delete_file
 
 
 def object_exists(blob_name: str) -> bool:

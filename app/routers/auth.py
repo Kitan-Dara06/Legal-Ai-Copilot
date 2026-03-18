@@ -36,7 +36,8 @@ limiter = Limiter(key_func=get_remote_address)
 class SignupRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=72)
-    org_id: str
+    org_id: str = Field(..., pattern=r"^[a-z0-9][a-z0-9-]{2,50}$")
+    org_name: str | None = Field(None, max_length=255)
 
 
 class LoginRequest(BaseModel):
@@ -49,7 +50,8 @@ class InviteRequest(BaseModel):
 
 
 class SetupOrgRequest(BaseModel):
-    org_id: str
+    org_id: str = Field(..., pattern=r"^[a-z0-9][a-z0-9-]{2,50}$")
+    org_name: str | None = Field(None, max_length=255)
 
 
 class AcceptInviteRequest(BaseModel):
@@ -261,7 +263,7 @@ async def setup_org(
             detail="This email is already linked to an organization.",
         )
 
-    new_org = Organization(slug=org_id)
+    new_org = Organization(slug=org_id, name=payload.org_name or org_id)
     db.add(new_org)
     await db.flush()
 
@@ -289,6 +291,7 @@ async def setup_org(
             "message": "Organization created and account linked.",
             "org_id": str(new_org.id),
             "org_slug": new_org.slug,
+            "org_name": new_org.name,
             "email": user.email,
             "app_role": user.role.value,
         }
@@ -306,6 +309,7 @@ async def setup_org(
         "message": "Organization created and account linked.",
         "org_id": str(new_org.id),
         "org_slug": new_org.slug,
+        "org_name": new_org.name,
         "email": user.email,
         "app_role": user.role.value,
     }
@@ -582,6 +586,7 @@ async def who_am_i(
     Supabase-authenticated endpoint. Returns identity, org_id, org_slug, and app role for the UI.
     """
     org_slug = None
+    org_name = None
     try:
         if ctx.org_id:
             org_res = await db.execute(
@@ -590,8 +595,10 @@ async def who_am_i(
             org = org_res.scalar_one_or_none()
             if org:
                 org_slug = org.slug
+                org_name = org.name
     except Exception:
         org_slug = None
+        org_name = None
 
     return {
         "sub": ctx.claims.get("sub"),
@@ -600,5 +607,6 @@ async def who_am_i(
         "aud": ctx.claims.get("aud"),
         "org_id": ctx.org_id,
         "org_slug": org_slug,
+        "org_name": org_name,
         "app_role": ctx.user.role.value,
     }

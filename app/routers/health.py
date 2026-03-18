@@ -37,12 +37,13 @@ async def _check_redis() -> dict:
         return {"ok": False, "error": str(e)[:200]}
 
 
-def _check_qdrant() -> dict:
+async def _check_qdrant() -> dict:
     try:
+        import asyncio
         from app.services.store import get_global_qdrant
 
         client = get_global_qdrant()
-        client.get_collections()
+        await asyncio.get_event_loop().run_in_executor(None, client.get_collections)
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
@@ -58,7 +59,7 @@ async def health():
 
     pg = await _check_postgres()
     rd = await _check_redis()
-    qd = _check_qdrant()
+    qd = await _check_qdrant()
 
     all_ok = all(c["ok"] for c in [pg, rd, qd])
 
@@ -81,7 +82,7 @@ async def ready():
     """
     pg = await _check_postgres()
     rd = await _check_redis()
-    qd = _check_qdrant()
+    qd = await _check_qdrant()
 
     checks = {"postgres": pg, "redis": rd, "qdrant": qd}
     all_ok = all(c["ok"] for c in checks.values())

@@ -19,7 +19,7 @@ API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPERBASE_KEY")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_JWKS_URL = (
     f"{SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json"
     if SUPABASE_URL
@@ -87,11 +87,20 @@ async def get_auth_context(
 
 async def get_admin_auth_context(
     ctx: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
 ) -> AuthContext:
     """
-    Dependency to ensure the authenticated user is an admin for their organization.
+    Dependency to ensure the authenticated user is an admin for their ACTIVE organization.
+    Checks UserOrgMembership.role rather than the deprecated User.role column.
     """
-    if ctx.user.role != UserRole.ADMIN:
+    stmt = select(UserOrgMembership.role).where(
+        UserOrgMembership.user_id == ctx.user.id,
+        UserOrgMembership.org_id == ctx.org_id,
+    )
+    result = await db.execute(stmt)
+    membership_role = result.scalar_one_or_none()
+
+    if membership_role != UserRole.ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin privileges required to perform this action",
@@ -310,12 +319,34 @@ async def _build_supabase_auth_context(
     invite = invite_result.scalar_one_or_none()
 
     if invite:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "invite_required",
-                "message": "An invite exists for this email. Please accept the invite link to join the organization.",
-            },
+        # Auto-accept: create user + membership for the inviting org
+        import uuid as _uuid
+        from passlib.hash import bcrypt as _bcrypt
+
+        new_user = User(
+            id=_uuid.uuid4(),
+            email=email,
+            supabase_user_id=sub,
+            hashed_password=_bcrypt.hash(_uuid.uuid4().hex),  # placeholder — login is via Supabase
+            org_id=invite.org_id,
+            personal_org_id=invite.org_id,
+            role=UserRole.MEMBER,
+        )
+        db.add(new_user)
+
+        membership = UserOrgMembership(
+            user_id=new_user.id,
+            org_id=invite.org_id,
+            role=UserRole.MEMBER,
+        )
+        db.add(membership)
+
+        invite.is_accepted = True
+        await db.commit()
+        await db.refresh(new_user)
+
+        return SupabaseAuthContext(
+            org_id=str(invite.org_id), user=new_user, claims=claims
         )
 
     # No invite and no existing account: the user must register explicitly
@@ -474,9 +505,20 @@ async def get_supabase_org_id(
 
 async def get_supabase_admin_context(
     ctx: SupabaseAuthContext = Depends(get_supabase_auth_context),
+    db: AsyncSession = Depends(get_db),
 ) -> SupabaseAuthContext:
-    """Requires the authenticated Supabase user to be an ADMIN in our app."""
-    if ctx.user.role != UserRole.ADMIN:
+    """Requires the authenticated Supabase user to be an ADMIN for the active org."""
+    from uuid import UUID as _UUID
+
+    org_uuid = _UUID(ctx.org_id) if isinstance(ctx.org_id, str) else ctx.org_id
+    stmt = select(UserOrgMembership.role).where(
+        UserOrgMembership.user_id == ctx.user.id,
+        UserOrgMembership.org_id == org_uuid,
+    )
+    result = await db.execute(stmt)
+    membership_role = result.scalar_one_or_none()
+
+    if membership_role != UserRole.ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin privileges required.",

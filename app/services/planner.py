@@ -6,6 +6,7 @@ Thought/Action/Observation loop that adapts based on tool outputs.
 
 # app/services/planner.py
 import json
+import logging
 import re
 from typing import Any, Dict, List
 
@@ -26,6 +27,8 @@ LEGAL_TOOLS = {
 
 
 from app.services.legal_primitives import groq_client
+
+logger = logging.getLogger(__name__)
 
 def _classify_intent(question: str) -> str:
     """LLM-based classification to route query to the right toolchain"""
@@ -60,7 +63,7 @@ You must output strictly valid JSON matching this schema:
         return intent
 
     except Exception as e:
-        print(f"⚠️ Intent classification failed, defaulting to 'search': {e}")
+        logger.warning("Intent classification failed, defaulting to 'search': %s", e)
         return "search"
 
 
@@ -98,13 +101,13 @@ def create_execution_plan(question: str) -> Dict[str, Any]:
     }
 
 
-def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file_ids: list = None, org_id: str = "default_org") -> Dict[str, Any]:
+def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file_ids: list = None, *, org_id: str) -> Dict[str, Any]:
     """
     Executes the static plan sequentially.
     Passes context between steps (Found chunks -> Read -> Logic -> Draft).
     file_ids: if provided, restricts search to those Qdrant file IDs (session scope).
     """
-    print(f"\n🚀 EXECUTING DETERMINISTIC PLAN: {plan['query_type']}")
+    logger.info("EXECUTING DETERMINISTIC PLAN: %s", plan['query_type'])
     
     context = {"chunks": [], "structured_data": {}}
     trace = []
@@ -113,7 +116,7 @@ def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file
     for step in plan["tools"]:
         tool_name = step["name"]
         params = step["params"].copy()
-        print(f"\n▶ STEP: {tool_name}")
+        logger.info("STEP: %s", tool_name)
 
         # --- DYNAMIC PARAMETER INJECTION ---
         
@@ -137,7 +140,7 @@ def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file
                 
                 context["current_contracts"] = sources
                 if sources:
-                    print(f"   Context: Focused on {len(sources)} contracts: {sources}")
+                    logger.info("Context: Focused on %d contracts: %s", len(sources), sources)
 
         # 2. Read Tool
         elif tool_name == "read_tool":
@@ -156,7 +159,7 @@ def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file
                 # Add structured data to chunks for the drafter to see
                 context["chunks"].append(f"Extracted Data: {json.dumps(all_extracted)}")
             else:
-                print("   ⚠ SKIPPED: No contracts identified from search results")
+                logger.info("SKIPPED read_tool: No contracts identified from search results")
                 continue
 
         # 3. Logic Tool
@@ -169,7 +172,7 @@ def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file
                 # Add verdict to chunks
                 context["chunks"].append(f"Logic Analysis: {result['verdict']} because {result['reasoning']}")
             else:
-                print("   ⚠ SKIPPED: No structured data available")
+                logger.info("SKIPPED logic_tool: No structured data available")
                 continue
 
         # 4. Draft Tool

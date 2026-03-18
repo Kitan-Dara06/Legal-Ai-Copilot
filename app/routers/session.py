@@ -118,11 +118,11 @@ async def get_session_info(
     file_ids_in_session = [int(fid) for fid in session["files"].keys()]
     filenames_map = {}
     if file_ids_in_session:
-        result = await db.execute(
-            select(FileModel.id, FileModel.filename).where(
-                FileModel.id.in_(file_ids_in_session)
-            )
+        stmt = select(FileModel.id, FileModel.filename, FileModel.status).where(
+            FileModel.id.in_(file_ids_in_session),
+            FileModel.org_id == org_id,
         )
+        result = await db.execute(stmt)
         filenames_map = {row.id: row.filename for row in result.all()}
 
     # Enrich with progress for any PROCESSING files
