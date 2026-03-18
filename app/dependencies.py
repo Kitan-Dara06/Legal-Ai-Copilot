@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 import time
@@ -12,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import ApiKey, Invite, Organization, User, UserRole
+from app.models import ApiKey, Invite, Organization, User, UserOrgMembership, UserRole
 
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
@@ -65,7 +66,7 @@ async def get_auth_context(
     stmt = (
         select(ApiKey, User)
         .join(User, ApiKey.user_id == User.id)
-        .where(ApiKey.key_hash == hashed_key, ApiKey.is_active == True)
+        .where(ApiKey.key_hash == hashed_key, ApiKey.is_active.is_(True))
     )
     result = await db.execute(stmt)
     row = result.first()
@@ -110,7 +111,9 @@ def get_org_id_for_rate_limit(request: Request) -> str:
     """
     Custom key function for SlowAPI to rate limit by Org instead of IP.
     """
-    return getattr(request.state, "org_id", request.client.host if request.client else "127.0.0.1")
+    return getattr(
+        request.state, "org_id", request.client.host if request.client else "127.0.0.1"
+    )
 
 
 async def get_supabase_claims(
@@ -136,10 +139,51 @@ async def get_supabase_claims(
         )
 
     token = auth_header.split(" ", 1)[1].strip()
-    return _verify_supabase_token(token)
+    return await _verify_supabase_token(token)
 
 
-def _verify_supabase_token(token: str) -> dict:
+async def _refresh_supabase_jwks_if_needed() -> None:
+    """
+    Refreshes Supabase JWKS cache if empty or stale.
+    Uses run_in_executor so the blocking network call does not block the event loop.
+    """
+    global _supabase_jwks_cache, _supabase_jwks_fetched_at
+    now = time.monotonic()
+    if (
+        _supabase_jwks_cache is not None
+        and (now - _supabase_jwks_fetched_at) <= _JWKS_TTL_SECONDS
+    ):
+        return
+
+    headers = {}
+    if SUPABASE_ANON_KEY:
+        headers["apikey"] = SUPABASE_ANON_KEY
+
+    url = SUPABASE_JWKS_URL
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Supabase JWKS URL not configured on server.",
+        )
+
+    def _fetch():
+        resp = httpx.get(url, headers=headers, timeout=5.0)
+        resp.raise_for_status()
+        return resp.json()
+
+    try:
+        loop = asyncio.get_running_loop()
+        jwks = await loop.run_in_executor(None, _fetch)
+        _supabase_jwks_cache = jwks
+        _supabase_jwks_fetched_at = time.monotonic()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to fetch Supabase JWKS.",
+        )
+
+
+async def _verify_supabase_token(token: str) -> dict:
     """
     Verifies a Supabase JWT string; returns decoded claims or raises HTTPException.
     """
@@ -166,22 +210,7 @@ def _verify_supabase_token(token: str) -> dict:
             detail="Invalid Supabase token header.",
         )
 
-    global _supabase_jwks_cache, _supabase_jwks_fetched_at
-    now = time.monotonic()
-    if _supabase_jwks_cache is None or (now - _supabase_jwks_fetched_at) > _JWKS_TTL_SECONDS:
-        try:
-            headers = {}
-            if SUPABASE_ANON_KEY:
-                headers["apikey"] = SUPABASE_ANON_KEY
-            resp = httpx.get(SUPABASE_JWKS_URL, headers=headers, timeout=5.0)
-            resp.raise_for_status()
-            _supabase_jwks_cache = resp.json()
-            _supabase_jwks_fetched_at = now
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Unable to fetch Supabase JWKS.",
-            )
+    await _refresh_supabase_jwks_if_needed()
 
     keys = _supabase_jwks_cache.get("keys", []) if _supabase_jwks_cache else []
     key_data = next((k for k in keys if k.get("kid") == kid), None)
@@ -225,7 +254,9 @@ def _verify_supabase_token(token: str) -> dict:
     return claims
 
 
-async def _build_supabase_auth_context(claims: dict, db: AsyncSession) -> SupabaseAuthContext:
+async def _build_supabase_auth_context(
+    claims: dict, db: AsyncSession
+) -> SupabaseAuthContext:
     """
     Maps verified Supabase JWT claims to a local User + Organization.
     - If User exists for this Supabase sub → return their org.
@@ -248,7 +279,8 @@ async def _build_supabase_auth_context(claims: dict, db: AsyncSession) -> Supaba
     user = result.scalar_one_or_none()
 
     if user:
-        return SupabaseAuthContext(org_id=user.org_id, user=user, claims=claims)
+        resolved_org = user.personal_org_id or user.org_id
+        return SupabaseAuthContext(org_id=str(resolved_org), user=user, claims=claims)
 
     # No user by sub. Maybe they exist by email (e.g. legacy signup or another Supabase link).
     # Link this Supabase account to the existing user to avoid duplicate key on email.
@@ -259,7 +291,8 @@ async def _build_supabase_auth_context(claims: dict, db: AsyncSession) -> Supaba
         user.supabase_user_id = sub
         await db.commit()
         await db.refresh(user)
-        return SupabaseAuthContext(org_id=user.org_id, user=user, claims=claims)
+        resolved_org = user.personal_org_id or user.org_id
+        return SupabaseAuthContext(org_id=str(resolved_org), user=user, claims=claims)
 
     # First time we see this Supabase user. Check for a pending invite (magic-link flow).
     now = datetime.now(timezone.utc)
@@ -267,7 +300,7 @@ async def _build_supabase_auth_context(claims: dict, db: AsyncSession) -> Supaba
         select(Invite)
         .where(
             Invite.email == email,
-            Invite.is_accepted == False,
+            Invite.is_accepted.is_(False),
             Invite.expires_at > now,
         )
         .order_by(Invite.created_at.desc())
@@ -285,12 +318,15 @@ async def _build_supabase_auth_context(claims: dict, db: AsyncSession) -> Supaba
             hashed_password="!",
             org_id=org_id,
             role=UserRole.MEMBER,
+            personal_org_id=org_id,
         )
         db.add(user)
+        await db.flush()
+        db.add(UserOrgMembership(user_id=user.id, org_id=org_id, role=UserRole.MEMBER))
         invite.is_accepted = True
         await db.commit()
         await db.refresh(user)
-        return SupabaseAuthContext(org_id=org_id, user=user, claims=claims)
+        return SupabaseAuthContext(org_id=str(org_id), user=user, claims=claims)
 
     # No invite and no existing account: the user must register explicitly
     # so they can choose their own org_id. We return a structured 403 that
@@ -326,7 +362,7 @@ async def _get_auth_context_from_key(
     stmt = (
         select(ApiKey, User)
         .join(User, ApiKey.user_id == User.id)
-        .where(ApiKey.key_hash == hashed_key, ApiKey.is_active == True)
+        .where(ApiKey.key_hash == hashed_key, ApiKey.is_active.is_(True))
     )
     result = await db.execute(stmt)
     row = result.first()
@@ -345,20 +381,95 @@ async def get_org_id_unified(
     db: AsyncSession = Depends(get_db),
     authorization: str | None = Header(None),
     x_api_key: str | None = Header(None, alias="X-API-Key"),
+    x_active_org: str | None = Header(None, alias="X-Active-Org"),
 ) -> str:
     """
-    Returns org_id from either Authorization: Bearer <Supabase JWT> or X-API-Key.
-    Use this on routes that should accept both the Streamlit UI (Bearer) and API clients (API key).
+    Strict org resolution:
+    - Bearer (Supabase): require membership in X-Active-Org if provided; else choose single membership or personal_org_id; else 400.
+    - API key: allow optional X-Active-Org slug to assert namespace; must match key org.
     """
+
+    # Helper: resolve org_id from slug and membership
+    async def _resolve_for_user(user_id, personal_org_id):
+        if x_active_org:
+            org_res = await db.execute(
+                select(Organization).where(Organization.slug == x_active_org)
+            )
+            org = org_res.scalar_one_or_none()
+            if not org:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Organization not found.",
+                )
+            mem = await db.execute(
+                select(UserOrgMembership).where(
+                    UserOrgMembership.user_id == user_id,
+                    UserOrgMembership.org_id == org.id,
+                )
+            )
+            if mem.scalar_one_or_none() is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You are not a member of that organization.",
+                )
+            return str(org.id)
+        # No header: check memberships
+        mem_rows = (
+            (
+                await db.execute(
+                    select(UserOrgMembership.org_id).where(
+                        UserOrgMembership.user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not mem_rows:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No organization memberships found.",
+            )
+        if len(mem_rows) == 1:
+            return str(mem_rows[0])
+        if personal_org_id:
+            return str(personal_org_id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="X-Active-Org header is required for users in multiple organizations.",
+        )
+
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1].strip()
-        claims = _verify_supabase_token(token)
+        claims = await _verify_supabase_token(token)
         ctx = await _build_supabase_auth_context(claims, db)
-        request.state.org_id = ctx.org_id
-        return ctx.org_id
+        org_id = await _resolve_for_user(ctx.user.id, ctx.user.personal_org_id)
+        request.state.org_id = org_id
+        return org_id
+
     if x_api_key:
         ctx = await _get_auth_context_from_key(x_api_key, request, db)
-        return ctx.org_id
+        # API key is already scoped to an org; ensure slug matches when provided
+        if x_active_org:
+            org_res = await db.execute(
+                select(Organization).where(Organization.slug == x_active_org)
+            )
+            org = org_res.scalar_one_or_none()
+            if not org:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Organization not found.",
+                )
+            if str(org.id) != str(ctx.org_id):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="API key is not scoped to the requested organization.",
+                )
+            request.state.org_id = str(org.id)
+            return str(org.id)
+        request.state.org_id = str(ctx.org_id)
+        return str(ctx.org_id)
+
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Missing credentials. Provide Authorization: Bearer <token> or X-API-Key.",

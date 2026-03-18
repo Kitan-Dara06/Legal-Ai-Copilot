@@ -5,7 +5,17 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    PrimaryKeyConstraint,
+    String,
+    Text,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -33,7 +43,9 @@ class UserRole(str, enum.Enum):
 class Organization(Base):
     __tablename__ = "organizations"
 
-    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -52,8 +64,34 @@ class User(Base):
         String(255), unique=True, index=True, nullable=True
     )
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    org_id: Mapped[str] = mapped_column(
-        String(100), ForeignKey("organizations.id"), nullable=False, index=True
+    # Deprecated alias during migration: org_id remains for backward compatibility
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole), nullable=False, default=UserRole.MEMBER
+    )
+    personal_org_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("organizations.id"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class UserOrgMembership(Base):
+    __tablename__ = "user_org_memberships"
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "org_id", name="pk_user_org_memberships"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id"), nullable=False, index=True
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizations.id"), nullable=False, index=True
     )
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole), nullable=False, default=UserRole.MEMBER
@@ -76,8 +114,8 @@ class ApiKey(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("users.id"), nullable=False
     )
-    org_id: Mapped[str] = mapped_column(
-        String(100), ForeignKey("organizations.id"), nullable=False
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizations.id"), nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -92,8 +130,8 @@ class Invite(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(255), nullable=False)
-    org_id: Mapped[str] = mapped_column(
-        String(100), ForeignKey("organizations.id"), nullable=False
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizations.id"), nullable=False
     )
     token: Mapped[str] = mapped_column(
         String(255), unique=True, index=True, nullable=False
@@ -114,8 +152,8 @@ class File(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    org_id: Mapped[str] = mapped_column(
-        String(100), ForeignKey("organizations.id"), nullable=False, index=True
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizations.id"), nullable=False, index=True
     )
 
     # The original filename (e.g., "NDA_v1.pdf")

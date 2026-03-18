@@ -1,3 +1,4 @@
+import logging
 import os
 import ssl
 import time
@@ -22,7 +23,9 @@ _sentry_dsn = os.getenv("SENTRY_DSN")
 if _sentry_dsn:
     sentry_sdk.init(
         dsn=_sentry_dsn,
-        integrations=[LoggingIntegration(level="INFO", event_level="ERROR")],
+        integrations=[
+            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR)
+        ],
         send_default_pii=False,
     )
 
@@ -72,6 +75,8 @@ if "available_files" not in st.session_state:
     st.session_state.available_files = []
 if "is_recovering" not in st.session_state:
     st.session_state.is_recovering = False
+if "setup_required" not in st.session_state:
+    st.session_state.setup_required = False
 
 # Legacy: API key still works for get_headers if no Supabase token
 if "api_key" not in st.session_state:
@@ -146,6 +151,17 @@ def _supabase_login(email: str, password: str):
             data = me.json()
             st.session_state.org_id = data.get("org_id")
             st.session_state.app_role = data.get("app_role")
+            st.session_state.setup_required = False
+        elif me.status_code == 403:
+            err = {}
+            try:
+                err = me.json().get("detail", {})
+            except Exception:
+                err = {}
+            if isinstance(err, dict) and err.get("code") == "setup_required":
+                st.session_state.setup_required = True
+                st.session_state.app_role = None
+                st.session_state.org_id = None
     except Exception:
         pass
 
@@ -169,6 +185,17 @@ def _supabase_signup(email: str, password: str):
                 data = me.json()
                 st.session_state.org_id = data.get("org_id")
                 st.session_state.app_role = data.get("app_role")
+                st.session_state.setup_required = False
+            elif me.status_code == 403:
+                err = {}
+                try:
+                    err = me.json().get("detail", {})
+                except Exception:
+                    err = {}
+                if isinstance(err, dict) and err.get("code") == "setup_required":
+                    st.session_state.setup_required = True
+                    st.session_state.app_role = None
+                    st.session_state.org_id = None
         except Exception:
             pass
     else:
@@ -380,28 +407,37 @@ if not is_logged_in():
             else:
                 try:
                     _supabase_signup(signup_email, signup_password)
-                    # Register the org on the backend so the user gets a proper workspace
-                    try:
-                        reg = httpx.post(
-                            f"{API_URL}/auth/signup",
-                            json={
-                                "email": signup_email,
-                                "password": signup_password,
-                                "org_id": org_id_clean,
-                            },
-                            timeout=15.0,
-                        )
-                        if reg.status_code == 201:
-                            data = reg.json()
-                            st.session_state.org_id = data.get("org_id", org_id_clean)
-                            st.success(
-                                f"Organisation **{org_id_clean}** created! You're all set."
+                    # Register the org on the backend using setup-org with Bearer auth
+                    reg = httpx.post(
+                        f"{API_URL}/auth/setup-org",
+                        json={"org_id": org_id_clean},
+                        headers=get_headers(),
+                        timeout=15.0,
+                    )
+                    if reg.status_code in (200, 201):
+                        data = (
+                            reg.json()
+                            if reg.headers.get("content-type", "").startswith(
+                                "application/json"
                             )
-                        else:
-                            err = reg.json().get("detail", reg.text) if reg.headers.get("content-type", "").startswith("application/json") else reg.text
-                            st.warning(f"Supabase account created, but org setup failed: {err}")
-                    except Exception as org_err:
-                        st.warning(f"Supabase account created, but org setup failed: {org_err}")
+                            else {}
+                        )
+                        st.session_state.org_id = data.get("org_id", org_id_clean)
+                        st.session_state.setup_required = False
+                        st.success(
+                            f"Organisation **{org_id_clean}** created! You're all set."
+                        )
+                    else:
+                        err = (
+                            reg.json().get("detail", reg.text)
+                            if reg.headers.get("content-type", "").startswith(
+                                "application/json"
+                            )
+                            else reg.text
+                        )
+                        st.warning(
+                            f"Supabase account created, but org setup failed: {err}"
+                        )
                     st.rerun()
                 except Exception as e:
                     err_msg = str(e)
@@ -409,6 +445,67 @@ if not is_logged_in():
                         st.info(err_msg)
                     else:
                         st.error(err_msg)
+
+    if st.session_state.get("setup_required") and st.session_state.get("access_token"):
+        st.markdown("---")
+        st.subheader("Choose your workspace ID")
+        st.caption(
+            "Your account is authenticated, but no workspace is linked yet. Create one now."
+        )
+        setup_org_id = st.text_input(
+            "Workspace ID",
+            key="setup_required_org_id",
+            placeholder="e.g. acme-legal",
+        )
+        if st.button("Create workspace", key="create_workspace_setup_required"):
+            setup_org_id_clean = (setup_org_id or "").strip().lower()
+            if not setup_org_id_clean:
+                st.error("Please enter a workspace ID.")
+            else:
+                try:
+                    res = httpx.post(
+                        f"{API_URL}/auth/setup-org",
+                        json={"org_id": setup_org_id_clean},
+                        headers=get_headers(),
+                        timeout=15.0,
+                    )
+                    if res.status_code in (200, 201):
+                        data = (
+                            res.json()
+                            if res.headers.get("content-type", "").startswith(
+                                "application/json"
+                            )
+                            else {}
+                        )
+                        st.session_state.org_id = data.get("org_id", setup_org_id_clean)
+                        st.session_state.setup_required = False
+                        # Refresh profile to populate role/org from backend
+                        me = httpx.get(
+                            f"{API_URL}/auth/me",
+                            headers=get_headers(),
+                            timeout=10.0,
+                        )
+                        if me.status_code == 200:
+                            m = me.json()
+                            st.session_state.org_id = (
+                                m.get("org_id") or st.session_state.org_id
+                            )
+                            st.session_state.app_role = (
+                                m.get("app_role") or st.session_state.app_role
+                            )
+                        st.success("Workspace created successfully.")
+                        st.rerun()
+                    else:
+                        err = (
+                            res.json().get("detail", res.text)
+                            if res.headers.get("content-type", "").startswith(
+                                "application/json"
+                            )
+                            else res.text
+                        )
+                        st.error(f"Workspace setup failed: {err}")
+                except Exception as e:
+                    st.error(str(e))
 
     st.stop()
 
@@ -696,7 +793,7 @@ with st.sidebar:
                                     )
                             except Exception as e:
                                 st.error(f"Could not remove file: {e}")
-        except Exception as e:
+        except Exception:
             st.error("Could not load session files.")
 
         st.divider()
@@ -737,7 +834,7 @@ with st.sidebar:
                     f"{API_URL}/session/{st.session_state.session_id}",
                     headers=get_headers(),
                 )
-            except:
+            except Exception:
                 pass
             st.session_state.session_id = None
             st.session_state.messages = []

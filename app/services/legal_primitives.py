@@ -1,12 +1,11 @@
 import json
 import os
-import re
 from datetime import date
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from groq import Groq
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field
 
 from app.services.embedder import get_embedding
 from app.services.store import (
@@ -74,21 +73,18 @@ def generate_legal_concepts(question: str) -> List[str]:
     )
 
     try:
-        content = json.loads(response.choices[0].message.content)
-        concepts = content.get("concepts", [])
-        if not concepts and isinstance(content, list):
-            concepts = content
-        elif not concepts and "list" in content:
-            concepts = content["list"]
-
-        # Fallback if structure is weird but has keys
-        if not concepts:
-            concepts = list(content.values())[0] if content else []
-
-        # Handle case where LLM returns a comma-separated string instead of a list
+        raw = response.choices[0].message.content if response.choices else "{}"
+        parsed = json.loads(raw or "{}")
+        if isinstance(parsed, dict):
+            concepts = parsed.get("concepts") or parsed.get("list") or []
+            if not concepts and parsed:
+                concepts = next(iter(parsed.values()), [])
+        else:
+            concepts = parsed or []
         if isinstance(concepts, str):
             concepts = [c.strip() for c in concepts.split(",") if c.strip()]
-
+        if not concepts:
+            concepts = []
         print(f"\n🧠 CONCEPTS GENERATED: {concepts}")
         return concepts
     except Exception as e:
@@ -122,10 +118,16 @@ def generate_multi_queries(question: str) -> List[str]:
     )
 
     try:
-        content = json.loads(response.choices[0].message.content)
-        queries = list(content.values())[0] if content else []
+        raw = response.choices[0].message.content if response.choices else "{}"
+        parsed = json.loads(raw or "{}")
+        if isinstance(parsed, dict):
+            queries = parsed.get("queries") or next(iter(parsed.values()), [])
+        else:
+            queries = parsed or []
+        if isinstance(queries, str):
+            queries = [q.strip() for q in queries.split(",") if q.strip()]
         print(f"\n🧠 MULTI-QUERIES GENERATED: {queries}")
-        return queries
+        return queries or [question]
     except Exception:
         return [question]
 
@@ -178,7 +180,6 @@ def search_tool(
     # --- EXECUTION ---
 
     raw_results = []
-    seen_ids = set()
 
     for q_text in queries_to_run:
         print(f"\n   🏃 Running Hybrid Search for: '{q_text}'")
@@ -260,6 +261,17 @@ def search_tool(
     return final_chunks
 
 
+def _build_extraction_schema(target_fields: List[str]) -> Dict[str, Any]:
+    properties = {
+        field: {"type": "string", "nullable": True} for field in target_fields
+    }
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties.keys()),
+    }
+
+
 def read_tool(
     contract_name: str, target_fields: List[str], org_id: str
 ) -> Dict[str, Any]:
@@ -295,12 +307,7 @@ def read_tool(
     if len(context) > max_chars:
         context = context[:max_chars] + "\n\n[...truncated for length...]"
 
-    field_definitions = {
-        field: (Optional[str], Field(default=None)) for field in target_fields
-    }
-    ExtractionModel = create_model("ExtractionModel", **field_definitions)
-
-    schema_dict = ExtractionModel.model_json_schema()
+    schema_dict = _build_extraction_schema(target_fields)
 
     system_prompt = f"""You are a legal data extraction specialist.
 
@@ -334,8 +341,8 @@ CONTRACT TEXT:
             temperature=0,
         )
 
-        raw_output = response.choices[0].message.content
-        extracted = json.loads(raw_output)
+        raw_output = response.choices[0].message.content if response.choices else "{}"
+        extracted = json.loads(raw_output or "{}")
 
         print("   ✅ EXTRACTION SUCCESSFUL")
         for field, value in extracted.items():
@@ -365,11 +372,11 @@ def logic_tool(data: dict, question: str = "Is this contract currently valid?") 
     Evaluates logical conditions using an LLM reasoning engine
     and returns a strictly formatted 'verdict' and 'reasoning'.
     """
-    print(f"\n{'=' * 70}")
+    print("=" * 70)
     print("🧠 LOGIC_TOOL (Structured Reasoning Mode)")
     print(f"   Question: {question}")
     print(f"   Data keys: {list(data.keys())}")
-    print(f"{'=' * 70}")
+    print("=" * 70)
 
     code_prompt = f"""You are a legal reasoning engine.
 Given contract data and a question, determine the answer.
@@ -396,8 +403,11 @@ You MUST output strictly valid JSON matching this schema:
             temperature=0,
         )
 
-        raw_output = response.choices[0].message.content
-        result = json.loads(raw_output)
+        raw_output = response.choices[0].message.content if response.choices else "{}"
+        parsed = json.loads(raw_output or "{}") if raw_output else {}
+        result = parsed if isinstance(parsed, dict) else {}
+        result.setdefault("verdict", "UNDETERMINED")
+        result.setdefault("reasoning", "No reasoning provided.")
         result["code_used"] = None
 
         print(f"\n✅ LOGIC EVALUATION RESULT:")
@@ -423,13 +433,13 @@ def draft_tool(
 ) -> str:
     """Generates final output with optional CoT verification"""
 
-    print(f"\n{'=' * 70}")
+    print("\n" + "=" * 70)
     print("✍️ DRAFT_TOOL CALLED")
     print(f"   Original Question: {original_question}")
     print(f"   Output Format: {output_format}")
     print(f"   Use CoT: {use_cot}")  # ADDED f
     print(f"   Input Chunks: {len(context_chunks)}")  # ADDED f
-    print(f"{'=' * 70}")
+    print("=" * 70)
 
     if use_cot:
         return _draft_with_cot(context_chunks, output_format, original_question)
@@ -478,13 +488,17 @@ def _draft_simple(
         temperature=0,
     )
 
-    output = response.choices[0].message.content
-    tokens_used = response.usage.total_tokens
+    output = (response.choices[0].message.content or "") if response.choices else ""
+    usage = getattr(response, "usage", None)
+    tokens_used = (
+        usage.total_tokens if usage and hasattr(usage, "total_tokens") else None
+    )
 
     print("\n✅ API Response Received")
     print(f"   Tokens used: {tokens_used}")
-    print(f"   Output length: {len(output)} chars")
-    print(f"   First 200 chars: {output[:200]}...")
+    print(f"   Output length: {len(output) if output else 0} chars")
+    preview = output[:200] if output else ""
+    print(f"   First 200 chars: {preview}...")
 
     return output
 

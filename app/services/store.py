@@ -31,7 +31,7 @@ def get_global_qdrant() -> QdrantClient:
         _qdrant_client = QdrantClient(
             url=os.getenv("QDRANT_URL", "http://localhost:6333"),
             api_key=os.getenv("QDRANT_API_KEY"),
-            timeout=60.0,
+            timeout=60,
         )
     return _qdrant_client
 
@@ -131,8 +131,8 @@ def search_hybrid(
     query_text: str,
     query_vector: list[float],
     top_k: int = 5,
-    specific_contract: str = None,
-    org_id: str = None,
+    specific_contract: Optional[str] = None,
+    org_id: Optional[str] = None,
 ) -> List[Dict]:
     """
     Global Hybrid Search (filtered by org_id + optionally by specific_contract).
@@ -142,14 +142,17 @@ def search_hybrid(
 
     if not org_id:
         raise ValueError("org_id is required for tenant isolation.")
+    org_id_str = str(org_id)
 
-    must_conditions = [FieldCondition(key="org_id", match=MatchValue(value=org_id))]
+    must_conditions: List[FieldCondition] = [
+        FieldCondition(key="org_id", match=MatchValue(value=org_id_str))
+    ]
     if specific_contract:
         must_conditions.append(
             FieldCondition(key="filename", match=MatchValue(value=specific_contract))
         )
 
-    search_filter = Filter(must=must_conditions) if must_conditions else None
+    search_filter = Filter(must=list(must_conditions)) if must_conditions else None
 
     sparse_vec = compute_sparse_vector(query_text)
 
@@ -184,9 +187,9 @@ def search_hybrid(
 
     raw_results = []
     for hit in hits:
-        p = hit.payload
+        p = hit.payload or {}
         display_text = p.get("section_text") or p.get("chunk_text", "")
-        formatted_text = f"[Source: {p.get('filename', 'Unknown')}, Page: {p.get('page_number', '?')}]\nContent: {display_text}"
+        formatted_text = f"[Source: {p.get('filename', 'Unknown')}, Page: {p.get('page_number', '?')}]\\nContent: {display_text}"
 
         raw_results.append(
             {
@@ -327,7 +330,7 @@ def search_hybrid_qdrant(
     # ── Format into structural payload (mimicking the Chroma Output) ──────────
     raw_results = []
     for hit in hits:
-        p = hit.payload
+        p = hit.payload or {}
         display_text = p.get("section_text") or p.get("chunk_text", "")
         formatted_text = f"[Source: {p.get('filename', 'Unknown')}, Page: {p.get('page_number', '?')}]\nContent: {display_text}"
 
@@ -373,6 +376,7 @@ def search_hybrid_qdrant(
     except Exception as rerank_err:
         # Cohere unavailable — fall back to Qdrant RRF scores (already fused)
         import logging
+
         logging.getLogger(__name__).warning(
             "Cohere rerank failed, using Qdrant RRF scores as fallback",
             extra={"error": str(rerank_err)[:200]},

@@ -1,3 +1,4 @@
+import logging
 import os
 
 import sentry_sdk
@@ -33,6 +34,7 @@ if not rabbitmq_url:
     rq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
     rq_vhost = os.getenv("RABBITMQ_VHOST", "/")
     from urllib.parse import quote_plus
+
     rabbitmq_url = f"amqp://{rq_user}:{quote_plus(rq_password)}@{rq_host}:{rq_port}/{quote_plus(rq_vhost)}"
 
 BROKER_URL = rabbitmq_url
@@ -50,7 +52,6 @@ celery_app = Celery(
 )
 
 # Debug: log broker and backend (mask passwords)
-import logging
 logger = logging.getLogger(__name__)
 safe_broker = BROKER_URL.split("@")[-1] if "@" in BROKER_URL else BROKER_URL
 safe_redis = REDIS_URL.split("@")[-1] if "@" in REDIS_URL else "localhost"

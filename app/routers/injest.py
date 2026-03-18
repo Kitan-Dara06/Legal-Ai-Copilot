@@ -54,9 +54,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/files", tags=["Files"])
 limiter = Limiter(key_func=get_remote_address)
 
-MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024          # 50 MB — outer guard (checked before we read the body)
-MAX_SCANNED_PDF_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB — scanned PDFs are large image stacks
-MAX_DIGITAL_PDF_SIZE_BYTES = 50 * 1024 * 1024   # 50 MB — digital PDFs should be much smaller
+MAX_FILE_SIZE_BYTES = (
+    50 * 1024 * 1024
+)  # 50 MB — outer guard (checked before we read the body)
+MAX_SCANNED_PDF_SIZE_BYTES = (
+    100 * 1024 * 1024
+)  # 100 MB — scanned PDFs are large image stacks
+MAX_DIGITAL_PDF_SIZE_BYTES = (
+    50 * 1024 * 1024
+)  # 50 MB — digital PDFs should be much smaller
 
 
 # ── NOTE on org_id ────────────────────────────────────────────────────────────
@@ -271,7 +277,7 @@ async def upload_files(
                     {
                         "filename": upload.filename,
                         "status": "error",
-                        "message": f"Digital PDF exceeds the 10 MB limit ({actual_size / 1_048_576:.1f} MB).",
+                        "message": f"Digital PDF exceeds the 50 MB limit ({actual_size / 1_048_576:.1f} MB).",
                     }
                 )
                 continue

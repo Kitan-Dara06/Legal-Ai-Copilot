@@ -1,14 +1,18 @@
+import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from supabase import AuthApiError, create_client as create_supabase_client
 from passlib.context import CryptContext
-from pydantic import BaseModel, EmailStr, constr
+from pydantic import BaseModel, EmailStr, Field
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from supabase import AuthApiError
+from supabase import create_client as create_supabase_client
 
 from app.database import get_db
 from app.dependencies import (
@@ -19,9 +23,7 @@ from app.dependencies import (
     get_supabase_claims,
     hash_api_key,
 )
-from app.models import ApiKey, Invite, Organization, User, UserRole
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+from app.models import ApiKey, Invite, Organization, User, UserOrgMembership, UserRole
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -33,22 +35,26 @@ limiter = Limiter(key_func=get_remote_address)
 
 class SignupRequest(BaseModel):
     email: EmailStr
-    password: constr(min_length=8, max_length=72)
+    password: str = Field(..., min_length=8, max_length=72)
     org_id: str
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: constr(min_length=8, max_length=72)
+    password: str = Field(..., min_length=8, max_length=72)
 
 
 class InviteRequest(BaseModel):
     email: EmailStr
 
 
+class SetupOrgRequest(BaseModel):
+    org_id: str
+
+
 class AcceptInviteRequest(BaseModel):
     email: EmailStr
-    password: constr(min_length=8, max_length=72)
+    password: str = Field(..., min_length=8, max_length=72)
     token: str
 
 
@@ -73,25 +79,24 @@ def generate_api_key() -> tuple[str, str, str]:
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-import logging
-
 logger = logging.getLogger(__name__)
+
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
-async def signup(request: Request, payload: SignupRequest, db: AsyncSession = Depends(get_db)):
+async def signup(
+    request: Request, payload: SignupRequest, db: AsyncSession = Depends(get_db)
+):
     """
     Creates a new organization, admin user, and initial API key.
     Fails if the org_id already exists (to prevent org hijacking).
     """
-    stmt = select(Organization).where(Organization.id == payload.org_id)
+    stmt = select(Organization).where(Organization.slug == payload.org_id)
     org = (await db.execute(stmt)).scalar_one_or_none()
 
     # Extra safety: bcrypt has a 72-byte limit on the *encoded* password.
     if len(payload.password.encode("utf-8")) > 72:
-        logger.warning(
-            "Signup rejected: password too long for email=%s", payload.email
-        )
+        logger.warning("Signup rejected: password too long for email=%s", payload.email)
         raise HTTPException(
             status_code=400,
             detail="Password must be at most 72 characters long.",
@@ -106,15 +111,17 @@ async def signup(request: Request, payload: SignupRequest, db: AsyncSession = De
     if (await db.execute(stmt)).scalar_one_or_none():
         raise HTTPException(status_code=400, detail="User already exists.")
 
-    # 1. Create Organization
-    new_org = Organization(id=payload.org_id)
+    # 1. Create Organization (slug = human-readable org_id; UUID internal id)
+    new_org = Organization(slug=payload.org_id)
     db.add(new_org)
+    await db.flush()
 
-    # 2. Create Admin User
+    # 2. Create Admin User with personal_org_id + membership
     new_user = User(
         email=payload.email,
         hashed_password=pwd_context.hash(payload.password),
-        org_id=payload.org_id,
+        org_id=new_org.id,
+        personal_org_id=new_org.id,
         role=UserRole.ADMIN,
     )
     db.add(new_user)
@@ -126,6 +133,14 @@ async def signup(request: Request, payload: SignupRequest, db: AsyncSession = De
             status_code=400,
             detail="Organization already exists. You must be invited to join it.",
         )
+
+    db.add(
+        UserOrgMembership(
+            user_id=new_user.id,
+            org_id=new_org.id,
+            role=UserRole.ADMIN,
+        )
+    )
 
     # 3. Create API Key
     raw_key, prefix, hashed_key = generate_api_key()
@@ -148,14 +163,25 @@ async def signup(request: Request, payload: SignupRequest, db: AsyncSession = De
 
 @router.post("/login")
 @limiter.limit("5/minute")
-async def login(request: Request, payload: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(
+    request: Request, payload: LoginRequest, db: AsyncSession = Depends(get_db)
+):
     """
     Authenticates a user and issues a NEW API key.
     """
-    stmt = select(User).where(User.email == payload.email)
-    user = (await db.execute(stmt)).scalar_one_or_none()
-
-    if not user or not pwd_context.verify(payload.password, user.hashed_password):
+    stmt = (
+        select(User, Organization)
+        .join(Organization, User.org_id == Organization.id)
+        .where(User.email == payload.email)
+    )
+    row = (await db.execute(stmt)).first()
+    if not row:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password.",
+        )
+    user, org = row
+    if not pwd_context.verify(payload.password, user.hashed_password):
         raise HTTPException(
             status_code=401,
             detail="Invalid email or password.",
@@ -175,7 +201,135 @@ async def login(request: Request, payload: LoginRequest, db: AsyncSession = Depe
         "message": "Login successful. New API key issued.",
         "api_key": raw_key,
         "prefix": prefix,
-        "org_id": user.org_id,
+        "org_id": str(user.org_id),
+        "org_slug": org.slug if org else None,
+    }
+
+
+@router.post("/setup-org", status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
+async def setup_org(
+    request: Request,
+    payload: SetupOrgRequest,
+    claims: dict = Depends(get_supabase_claims),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Creates an organization for an authenticated Supabase user and sets them as ADMIN.
+    Intended for users who passed Supabase auth but have no local workspace yet.
+    """
+    sub = claims.get("sub")
+    email = claims.get("email")
+
+    if not sub or not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Supabase token missing required claims.",
+        )
+
+    org_id = (payload.org_id or "").strip().lower()
+    if not org_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="org_id is required.",
+        )
+
+    existing_org = (
+        await db.execute(select(Organization).where(Organization.slug == org_id))
+    ).scalar_one_or_none()
+    if existing_org:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization already exists. Choose a different org_id.",
+        )
+
+    user_by_sub = (
+        await db.execute(select(User).where(User.supabase_user_id == sub))
+    ).scalar_one_or_none()
+    if user_by_sub and user_by_sub.org_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This account is already linked to an organization.",
+        )
+
+    user_by_email = (
+        await db.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
+    if user_by_email and user_by_email.org_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This email is already linked to an organization.",
+        )
+
+    new_org = Organization(slug=org_id)
+    db.add(new_org)
+    await db.flush()
+
+    if user_by_sub:
+        user = user_by_sub
+    elif user_by_email:
+        user = user_by_email
+    else:
+        user = User(
+            email=email,
+            supabase_user_id=sub,
+            hashed_password="!",
+            org_id=new_org.id,
+            personal_org_id=new_org.id,
+            role=UserRole.ADMIN,
+        )
+        db.add(user)
+        await db.flush()
+        db.add(
+            UserOrgMembership(user_id=user.id, org_id=new_org.id, role=UserRole.ADMIN)
+        )
+        await db.commit()
+        await db.refresh(user)
+        return {
+            "message": "Organization created and account linked.",
+            "org_id": str(new_org.id),
+            "org_slug": new_org.slug,
+            "email": user.email,
+            "app_role": user.role.value,
+        }
+
+    user.supabase_user_id = user.supabase_user_id or sub
+    user.org_id = new_org.id
+    user.personal_org_id = user.personal_org_id or new_org.id
+    user.role = UserRole.ADMIN
+    await db.flush()
+    db.add(UserOrgMembership(user_id=user.id, org_id=new_org.id, role=UserRole.ADMIN))
+    await db.commit()
+    await db.refresh(user)
+
+    return {
+        "message": "Organization created and account linked.",
+        "org_id": str(new_org.id),
+        "org_slug": new_org.slug,
+        "email": user.email,
+        "app_role": user.role.value,
+    }
+
+
+@router.get("/my-orgs")
+async def my_orgs(
+    ctx=Depends(get_supabase_auth_context), db: AsyncSession = Depends(get_db)
+):
+    """
+    Returns all orgs the authenticated user belongs to with their roles.
+    """
+    rows = (
+        await db.execute(
+            select(Organization.slug, Organization.id, UserOrgMembership.role)
+            .join(UserOrgMembership, UserOrgMembership.org_id == Organization.id)
+            .where(UserOrgMembership.user_id == ctx.user.id)
+        )
+    ).all()
+    return {
+        "orgs": [
+            {"org_id": str(r.id), "org_slug": r.slug, "role": r.role.value}
+            for r in rows
+        ]
     }
 
 
@@ -282,7 +436,7 @@ async def invite_info(
     """
     stmt = select(Invite).where(
         Invite.token == token,
-        Invite.is_accepted == False,
+        Invite.is_accepted.is_(False),
         Invite.expires_at > datetime.now(timezone.utc),
     )
     invite = (await db.execute(stmt)).scalar_one_or_none()
@@ -303,7 +457,7 @@ async def accept_invite_by_token(
     """
     stmt = select(Invite).where(
         Invite.token == payload.token,
-        Invite.is_accepted == False,
+        Invite.is_accepted.is_(False),
         Invite.expires_at > datetime.now(timezone.utc),
     )
     invite = (await db.execute(stmt)).scalar_one_or_none()
@@ -314,14 +468,19 @@ async def accept_invite_by_token(
             status_code=403,
             detail="This invite was sent to a different email address.",
         )
-    ctx.user.org_id = invite.org_id
-    ctx.user.role = UserRole.MEMBER  # Joining via invite is always as member, not admin
+    ctx.user.personal_org_id = ctx.user.personal_org_id or invite.org_id
     invite.is_accepted = True
+    await db.flush()
+    db.add(
+        UserOrgMembership(
+            user_id=ctx.user.id, org_id=invite.org_id, role=UserRole.MEMBER
+        )
+    )
     await db.commit()
     await db.refresh(ctx.user)
     return {
         "message": "You have joined the organization.",
-        "org_id": invite.org_id,
+        "org_id": str(invite.org_id),
     }
 
 
@@ -335,7 +494,7 @@ async def accept_invite(
     stmt = select(Invite).where(
         Invite.token == payload.token,
         Invite.email == payload.email,
-        Invite.is_accepted == False,
+        Invite.is_accepted.is_(False),
         Invite.expires_at > datetime.now(timezone.utc),
     )
     invite = (await db.execute(stmt)).scalar_one_or_none()
@@ -355,13 +514,19 @@ async def accept_invite(
         email=payload.email,
         hashed_password=pwd_context.hash(payload.password),
         org_id=invite.org_id,
+        personal_org_id=invite.org_id,
         role=UserRole.MEMBER,
     )
     db.add(new_user)
 
-    # 2. Mark Invite Accepted
+    # 2. Mark Invite Accepted + membership
     invite.is_accepted = True
     await db.flush()
+    db.add(
+        UserOrgMembership(
+            user_id=new_user.id, org_id=invite.org_id, role=UserRole.MEMBER
+        )
+    )
 
     # 3. Issue API Key
     raw_key, prefix, hashed_key = generate_api_key()
@@ -378,7 +543,7 @@ async def accept_invite(
         "message": "Invite accepted. User created.",
         "api_key": raw_key,
         "prefix": prefix,
-        "org_id": invite.org_id,
+        "org_id": str(invite.org_id),
     }
 
 

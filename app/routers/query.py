@@ -1,20 +1,13 @@
 # app/router/query.py
+import logging
 import os
 
-import logging
-
 from dotenv import load_dotenv
-from fastapi import APIRouter, Query, Depends
+from fastapi import APIRouter, Depends, Query
 from groq import Groq
 from starlette.concurrency import run_in_threadpool
 
 from app.dependencies import get_org_id_unified
-from app.services.embedder import get_embedding
-from app.services.store import (
-    extract_sources_from_chunks,
-    get_all_contract_names,
-    search_hybrid,
-)
 from app.services.legal_primitives import search_tool
 
 load_dotenv()
@@ -84,11 +77,13 @@ router = APIRouter()
 async def ask(
     question: str,
     org_id: str = Depends(get_org_id_unified),
-    mode: str = Query(default="hybrid", description="Search strategy: hybrid, concept, or multiquery"),
+    mode: str = Query(
+        default="hybrid", description="Search strategy: hybrid, concept, or multiquery"
+    ),
 ):
     """
     Main query endpoint.
-    
+
     - mode=hybrid: Vector + BM25 keyword fusion (fast, balanced)
     - mode=concept: Expands legal terminology then hybrid search (better recall)
     - mode=multiquery: Rephrases question from 3 angles (broadest coverage)

@@ -1,14 +1,16 @@
 import glob
+import logging
 import os
 import time
+from typing import cast
 
 import sentry_sdk
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from starlette.types import ExceptionHandler
 
 from app.database import Base, engine
 from app.dependencies import get_org_id_for_rate_limit
@@ -23,7 +25,7 @@ if _sentry_dsn:
         dsn=_sentry_dsn,
         integrations=[
             FastApiIntegration(),
-            LoggingIntegration(level="INFO", event_level="ERROR"),
+            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
         ],
         send_default_pii=False,
     )
@@ -37,7 +39,10 @@ limiter = Limiter(key_func=get_org_id_for_rate_limit)
 #   uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=*
 app = FastAPI(title="Legal RAG API", version="2.0.0")
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(
+    RateLimitExceeded,
+    cast(ExceptionHandler, _rate_limit_exceeded_handler),
+)
 
 app.include_router(injest.router)
 app.include_router(query.router)
@@ -71,8 +76,9 @@ async def startup():
 
     if run_migrations:
         try:
-            from alembic import command
             from alembic.config import Config
+
+            from alembic import command
 
             alembic_cfg_path = os.getenv("ALEMBIC_CONFIG", "alembic.ini")
             alembic_cfg = Config(alembic_cfg_path)
