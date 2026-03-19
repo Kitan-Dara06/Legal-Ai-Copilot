@@ -164,7 +164,7 @@ class File(Base):
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
 
     status: Mapped[FileStatus] = mapped_column(
-        Enum(FileStatus), nullable=False, default=FileStatus.PENDING
+        Enum(FileStatus), nullable=False, default=FileStatus.PENDING, index=True
     )
 
     # The full extracted text from the PDF.
@@ -178,6 +178,7 @@ class File(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
+        index=True,
     )
 
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

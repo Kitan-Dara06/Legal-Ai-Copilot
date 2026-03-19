@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 
 import httpx
+import sentry_sdk
 from fastapi import Depends, Header, HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
 from jose import JWTError, jwk, jwt
@@ -12,7 +13,6 @@ from jose.utils import base64url_decode
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import sentry_sdk
 from app.database import get_db
 from app.models import ApiKey, Invite, Organization, User, UserOrgMembership, UserRole
 
@@ -84,11 +84,9 @@ async def get_auth_context(
     request.state.org_id = api_key.org_id
 
     # Set Sentry user context
-    sentry_sdk.set_user({
-        "id": str(user.id),
-        "email": user.email,
-        "org_id": str(api_key.org_id)
-    })
+    sentry_sdk.set_user(
+        {"id": str(user.id), "email": user.email, "org_id": str(api_key.org_id)}
+    )
 
     return AuthContext(org_id=api_key.org_id, user=user, api_key=api_key)
 
@@ -149,7 +147,16 @@ async def get_supabase_claims(
         )
 
     auth_header = request.headers.get("Authorization")
+    import logging
+
+    logger = logging.getLogger("app.dependencies")
+
     if not auth_header or not auth_header.startswith("Bearer "):
+        logger.warning(
+            "[get_supabase_claims] Missing or invalid Authorization header: %s. All headers: %s",
+            auth_header,
+            dict(request.headers),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid Authorization header.",
@@ -189,6 +196,7 @@ async def _refresh_supabase_jwks_if_needed() -> None:
         return resp.json()
 
     from typing import Any, Callable
+
     _fetch: Callable[[], Any] = _fetch_sync
 
     try:
@@ -301,11 +309,9 @@ async def _build_supabase_auth_context(
     if user:
         resolved_org = user.personal_org_id or user.org_id
         # Set Sentry user context
-        sentry_sdk.set_user({
-            "id": str(user.id),
-            "email": email,
-            "org_id": str(resolved_org)
-        })
+        sentry_sdk.set_user(
+            {"id": str(user.id), "email": email, "org_id": str(resolved_org)}
+        )
         return SupabaseAuthContext(org_id=str(resolved_org), user=user, claims=claims)
 
     # No user by sub. Maybe they exist by email (e.g. legacy signup or another Supabase link).
@@ -338,13 +344,16 @@ async def _build_supabase_auth_context(
     if invite:
         # Auto-accept: create user + membership for the inviting org
         import uuid as _uuid
+
         from passlib.hash import bcrypt as _bcrypt
 
         new_user = User(
             id=_uuid.uuid4(),
             email=email,
             supabase_user_id=sub,
-            hashed_password=_bcrypt.hash(_uuid.uuid4().hex),  # placeholder — login is via Supabase
+            hashed_password=_bcrypt.hash(
+                _uuid.uuid4().hex
+            ),  # placeholder — login is via Supabase
             org_id=invite.org_id,
             personal_org_id=invite.org_id,
             role=UserRole.MEMBER,
@@ -363,11 +372,9 @@ async def _build_supabase_auth_context(
         await db.refresh(new_user)
 
         # Set Sentry user context
-        sentry_sdk.set_user({
-            "id": str(new_user.id),
-            "email": email,
-            "org_id": str(invite.org_id)
-        })
+        sentry_sdk.set_user(
+            {"id": str(new_user.id), "email": email, "org_id": str(invite.org_id)}
+        )
 
         return SupabaseAuthContext(
             org_id=str(invite.org_id), user=new_user, claims=claims

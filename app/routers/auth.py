@@ -4,6 +4,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
 from slowapi import Limiter
@@ -93,8 +94,20 @@ async def signup(
     Creates a new organization, admin user, and initial API key.
     Fails if the org_id already exists (to prevent org hijacking).
     """
+    # 1. Check if user already exists first
+    stmt = select(User).where(User.email == payload.email)
+    if (await db.execute(stmt)).scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="User already exists.")
+
+    # 2. Check if Org slug already exists
     stmt = select(Organization).where(Organization.slug == payload.org_id)
     org = (await db.execute(stmt)).scalar_one_or_none()
+
+    if org:
+        raise HTTPException(
+            status_code=400,
+            detail="Organization already exists. Choose a different workspace slug or ask for an invite.",
+        )
 
     # Extra safety: bcrypt has a 72-byte limit on the *encoded* password.
     if len(payload.password.encode("utf-8")) > 72:
@@ -103,15 +116,6 @@ async def signup(
             status_code=400,
             detail="Password must be at most 72 characters long.",
         )
-    if org:
-        raise HTTPException(
-            status_code=400,
-            detail="Organization already exists. You must be invited to join it.",
-        )
-
-    stmt = select(User).where(User.email == payload.email)
-    if (await db.execute(stmt)).scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="User already exists.")
 
     # 1. Create Organization (slug = human-readable org_id; UUID internal id)
     new_org = Organization(slug=payload.org_id)
@@ -222,6 +226,7 @@ async def setup_org(
     """
     sub = claims.get("sub")
     email = claims.get("email")
+    logger.info("[setup_org] Starting setup for email=%s sub=%s", email, sub)
 
     if not sub or not email:
         raise HTTPException(
@@ -230,6 +235,7 @@ async def setup_org(
         )
 
     org_id = (payload.org_id or "").strip().lower()
+    logger.info("[setup_org] Requested org_slug=%s", org_id)
     if not org_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -248,6 +254,10 @@ async def setup_org(
     user_by_sub = (
         await db.execute(select(User).where(User.supabase_user_id == sub))
     ).scalar_one_or_none()
+    if user_by_sub:
+        logger.info(
+            "[setup_org] Found user by sub. Current org_id=%s", user_by_sub.org_id
+        )
     if user_by_sub and user_by_sub.org_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -257,6 +267,10 @@ async def setup_org(
     user_by_email = (
         await db.execute(select(User).where(User.email == email))
     ).scalar_one_or_none()
+    if user_by_email:
+        logger.info(
+            "[setup_org] Found user by email. Current org_id=%s", user_by_email.org_id
+        )
     if user_by_email and user_by_email.org_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -266,12 +280,20 @@ async def setup_org(
     new_org = Organization(slug=org_id, name=payload.org_name or org_id)
     db.add(new_org)
     await db.flush()
+    logger.info(
+        "[setup_org] Created new organization. internal_id=%s slug=%s",
+        new_org.id,
+        new_org.slug,
+    )
 
     if user_by_sub:
+        logger.info("[setup_org] Linking new org to existing user_by_sub")
         user = user_by_sub
     elif user_by_email:
+        logger.info("[setup_org] Linking new org to existing user_by_email")
         user = user_by_email
     else:
+        logger.info("[setup_org] Creating entirely new local user record")
         user = User(
             email=email,
             supabase_user_id=sub,
@@ -301,6 +323,7 @@ async def setup_org(
     user.personal_org_id = new_org.id
     user.role = UserRole.ADMIN
     await db.flush()
+    logger.info("[setup_org] Updated user record with new org_id=%s", new_org.id)
     db.add(UserOrgMembership(user_id=user.id, org_id=new_org.id, role=UserRole.ADMIN))
     await db.commit()
     await db.refresh(user)
@@ -364,6 +387,7 @@ async def invite_user(
 
 @router.post("/invite-by-email")
 async def invite_user_by_email(
+    request: Request,
     payload: InviteRequest,
     ctx=Depends(get_supabase_admin_context),
     db: AsyncSession = Depends(get_db),
@@ -372,6 +396,14 @@ async def invite_user_by_email(
     (Admin Only, Supabase JWT) Creates an invite and sends a magic link email via Supabase.
     The recipient signs in via the link and is added to your organization as a member.
     """
+    logger.info(
+        "[invite_user_by_email] Called by user: %s, org_id: %s, role: %s",
+        ctx.user.email,
+        ctx.org_id,
+        ctx.user.role,
+    )
+    logger.debug("[invite_user_by_email] Headers: %s", dict(request.headers))
+
     service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not service_role_key:
         logger.warning("SUPABASE_SERVICE_ROLE_KEY not set; cannot send invite email")
@@ -578,6 +610,77 @@ async def revoke_key(
     return {"message": f"API Key starting with '{payload.prefix}' has been revoked."}
 
 
+@router.get("/members")
+async def my_org_members(
+    ctx: AuthContext = Depends(get_supabase_admin_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    (Admin Only) Returns a list of all members in the current organization.
+    """
+    stmt = (
+        select(
+            User.id,
+            User.email,
+            User.full_name,
+            UserOrgMembership.role,
+            UserOrgMembership.created_at,
+        )
+        .join(UserOrgMembership, User.id == UserOrgMembership.user_id)
+        .where(UserOrgMembership.org_id == ctx.org_id)
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    return [
+        {
+            "user_id": str(row.id),
+            "email": row.email,
+            "full_name": row.full_name,
+            "role": row.role,
+            "joined_at": row.created_at.isoformat(),
+        }
+        for row in rows
+    ]
+
+
+@router.delete("/members/{user_id}")
+async def remove_member(
+    user_id: str,
+    ctx: AuthContext = Depends(get_supabase_admin_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    (Admin Only) Removes a user from the organization.
+    """
+    from uuid import UUID
+
+    target_user_id = UUID(user_id)
+
+    if target_user_id == ctx.user.id:
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot remove yourself from the organization.",
+        )
+
+    stmt = select(UserOrgMembership).where(
+        UserOrgMembership.user_id == target_user_id,
+        UserOrgMembership.org_id == ctx.org_id,
+    )
+    membership = (await db.execute(stmt)).scalar_one_or_none()
+
+    if not membership:
+        raise HTTPException(
+            status_code=404,
+            detail="Member not found in your organization.",
+        )
+
+    await db.delete(membership)
+    await db.commit()
+
+    return {"message": "Member removed successfully."}
+
+
 @router.get("/me")
 async def who_am_i(
     ctx=Depends(get_supabase_auth_context), db: AsyncSession = Depends(get_db)
@@ -610,3 +713,87 @@ async def who_am_i(
         "org_name": org_name,
         "app_role": ctx.user.role.value,
     }
+
+
+@router.post("/logout")
+async def logout():
+    """
+    Clears the session cookies for the frontend.
+    The frontend should also call supabase.auth.signOut().
+    """
+    response = JSONResponse(content={"message": "Logged out successfully."})
+    # List of common Supabase/Auth cookies to clear
+    cookies_to_clear = [
+        "sb-access-token",
+        "sb-refresh-token",
+        "supabase-auth-token",
+    ]
+    for cookie in cookies_to_clear:
+        response.delete_cookie(cookie)
+    return response
+
+
+@router.delete("/debug/cleanup-user/{email}")
+async def debug_cleanup_user(
+    email: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    (DEBUG ONLY) Completely removes a user and their memberships from the local DB.
+    Use this to fix organization crosstalk issues after deleting a user from Supabase.
+    """
+    from sqlalchemy import delete
+
+    # Find the user
+    stmt = select(User).where(User.email == email)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found in local database.")
+
+    # Delete memberships
+    await db.execute(
+        delete(UserOrgMembership).where(UserOrgMembership.user_id == user.id)
+    )
+    # Delete API keys
+    await db.execute(delete(ApiKey).where(ApiKey.user_id == user.id))
+    # Delete the user record
+    await db.execute(delete(User).where(User.id == user.id))
+
+    await db.commit()
+    return {
+        "message": f"User {email} and all associations cleared from local database."
+    }
+
+
+@router.get("/my-orgs")
+async def list_my_orgs(
+    ctx=Depends(get_supabase_auth_context), db: AsyncSession = Depends(get_db)
+):
+    """
+    Returns all organizations the current user is a member of.
+    """
+    stmt = (
+        select(
+            Organization.id,
+            Organization.slug,
+            Organization.name,
+            UserOrgMembership.role,
+        )
+        .join(UserOrgMembership, Organization.id == UserOrgMembership.org_id)
+        .where(UserOrgMembership.user_id == ctx.user.id)
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    return [
+        {
+            "org_id": str(row.id),
+            "org_slug": row.slug,
+            "org_name": row.name,
+            "role": row.role.value,
+            "is_active": str(row.id) == str(ctx.org_id),
+        }
+        for row in rows
+    ]

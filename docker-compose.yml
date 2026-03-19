@@ -18,6 +18,10 @@ services:
         build:
             context: ./frontend-next
             dockerfile: Dockerfile
+            args:
+                - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+                - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+                - NEXT_PUBLIC_API_URL=https://legalrag.codes/api
         env_file:
             - .env.production
         environment:
