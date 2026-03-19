@@ -63,6 +63,16 @@ export async function updateSession(request: NextRequest) {
         return NextResponse.redirect(url);
     }
 
+    // If user is logged in and hits /login, redirect to /chat
+    if (request.nextUrl.pathname.startsWith("/login") && user) {
+        console.log(
+            `[Middleware] Logged in user at /login. Redirecting to /chat`,
+        );
+        const url = request.nextUrl.clone();
+        url.pathname = "/chat";
+        return NextResponse.redirect(url);
+    }
+
     // If user is logged in, but hits root, redirect to chat
     if (request.nextUrl.pathname === "/" && user) {
         console.log(

@@ -28,10 +28,19 @@ export function SignupForm() {
         setError("");
 
         // 1. Sign up with Supabase
+        // Build the confirmation redirect URL so org info survives the email click.
+        const confirmRedirect = new URL("/auth/callback", window.location.origin);
+        confirmRedirect.searchParams.set("next", "/setup");
+        confirmRedirect.searchParams.set("org_id", orgId.toLowerCase().trim());
+        confirmRedirect.searchParams.set("org_name", orgName.trim());
+
         const { data: authData, error: authError } = await supabase.auth.signUp(
             {
                 email,
                 password,
+                options: {
+                    emailRedirectTo: confirmRedirect.toString(),
+                },
             },
         );
 
@@ -42,6 +51,7 @@ export function SignupForm() {
         }
 
         if (!authData.session) {
+            // Email confirmation required — org will be set up after they click the link.
             setSuccess(true);
             setIsLoading(false);
             return;

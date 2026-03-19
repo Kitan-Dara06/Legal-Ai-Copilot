@@ -2,7 +2,8 @@
 
 export const dynamic = "force-dynamic";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Card, CardContent } from "@/components/ui/Card";
@@ -10,9 +11,10 @@ import { Scale } from "lucide-react";
 import { setupOrg } from "@/lib/api";
 import { createClient } from "@/lib/supabase/client";
 
-export default function SetupPage() {
-    const [orgName, setOrgName] = useState("");
-    const [orgId, setOrgId] = useState("");
+function SetupContent() {
+    const searchParams = useSearchParams();
+    const [orgName, setOrgName] = useState(searchParams.get("org_name") ?? "");
+    const [orgId, setOrgId] = useState(searchParams.get("org_id") ?? "");
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState("");
 
@@ -113,5 +115,19 @@ export default function SetupPage() {
                 </CardContent>
             </Card>
         </div>
+    );
+}
+
+export default function SetupPage() {
+    return (
+        <Suspense
+            fallback={
+                <div className="min-h-screen bg-navy-950 flex items-center justify-center">
+                    <div className="w-8 h-8 rounded-full border-4 border-accent-blue border-t-transparent animate-spin"></div>
+                </div>
+            }
+        >
+            <SetupContent />
+        </Suspense>
     );
 }
