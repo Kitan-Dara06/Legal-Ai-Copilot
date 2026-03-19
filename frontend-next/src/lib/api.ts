@@ -19,6 +19,18 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type Headers = Record<string, string>;
 
+/** Custom error that carries the backend's structured `code` field (e.g. "setup_required"). */
+export class AppError extends Error {
+    code?: string;
+    status?: number;
+    constructor(message: string, code?: string, status?: number) {
+        super(message);
+        this.name = "AppError";
+        this.code = code;
+        this.status = status;
+    }
+}
+
 function buildHeaders(token?: string | null, orgSlug?: string | null): Headers {
     const h: Headers = {};
     if (token) h["Authorization"] = `Bearer ${token}`;
@@ -45,26 +57,34 @@ async function apiFetch<T>(
         throw err;
     });
 
-    if (res.status === 401) {
-        console.warn(`[apiFetch] 401 Unauthorized for ${url}`);
-        if (typeof window !== "undefined") window.location.href = "/login";
-        throw new Error("Unauthorized");
-    }
-
     if (!res.ok) {
         console.error(`[apiFetch] HTTP ${res.status} for ${url}`);
-        let detail = res.statusText;
+        let message = res.statusText;
+        let code: string | undefined;
         try {
             const body = await res.json();
-            detail = body.detail || JSON.stringify(body);
+            // detail can be a string or an object like {code, message}
+            if (body.detail && typeof body.detail === "object") {
+                code = body.detail.code;
+                message = body.detail.message || JSON.stringify(body.detail);
+            } else if (typeof body.detail === "string") {
+                message = body.detail;
+            }
         } catch {
             /* ignore */
         }
-        throw new Error(detail);
+
+        if (res.status === 401) {
+            console.warn(`[apiFetch] 401 Unauthorized for ${url}`);
+            if (typeof window !== "undefined") window.location.href = "/login";
+        }
+
+        throw new AppError(message, code, res.status);
     }
 
     return res.json() as Promise<T>;
 }
+
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 

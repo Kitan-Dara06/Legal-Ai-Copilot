@@ -19,6 +19,7 @@ import {
     deleteSession,
     askQuestion,
     askAgent,
+    AppError,
 } from "@/lib/api";
 import {
     type User,
@@ -85,10 +86,11 @@ export default function ChatPage() {
                             })
                             .catch((err: any) => {
                                 console.error("[ChatPage] getMe failed:", err);
-                                // If 403 (setup_required), we let the UI handle it or redirect
+                                // If backend says setup is required (no local account yet),
+                                // redirect to /setup so the user can create their org.
                                 if (
-                                    err.message?.includes("setup_required") ||
-                                    err.status === 403
+                                    err instanceof AppError &&
+                                    (err.code === "setup_required" || err.status === 403)
                                 ) {
                                     window.location.href = "/setup";
                                 } else {
