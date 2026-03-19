@@ -122,7 +122,9 @@ def _handle_supabase_connection_error(e: Exception) -> str:
     """Turn connection/timeout/SSL errors into a clear message."""
     if isinstance(e, httpx.HTTPStatusError):
         try:
-            err_data = e.response.json()
+            # Cast or use the specific error to help the linter
+            err_resp: httpx.Response = e.response
+            err_data = err_resp.json()
             msg = (
                 err_data.get("error_description")
                 or err_data.get("msg")
@@ -132,7 +134,8 @@ def _handle_supabase_connection_error(e: Exception) -> str:
                 return f"Supabase error: {msg}"
         except Exception:
             pass
-        return f"HTTP error {e.response.status_code}: {e.response.text}"
+        # Use the captured response to help the linter
+        return f"HTTP error {err_resp.status_code}: {err_resp.text}"
     if isinstance(e, (httpx.TimeoutException, ssl.SSLError, OSError, ConnectionError)):
         return (
             "Connection to Supabase timed out or failed. "
@@ -836,22 +839,115 @@ with st.sidebar:
         "Upload New Contracts", type=["pdf"], accept_multiple_files=True
     )
     if st.button("Upload to Backend", use_container_width=True) and uploaded_files:
-        with st.spinner("Uploading & Processing..."):
-            files_payload = [
-                ("files", (f.name, f.read(), "application/pdf")) for f in uploaded_files
-            ]
-            try:
-                res = httpx.post(
-                    f"{API_URL}/files/upload",
-                    files=files_payload,
-                    headers=get_headers(),
-                    timeout=120.0,
-                )
-                if res.status_code == 202:
-                    st.success("Uploaded successfully! Processing in background...")
-                    time.sleep(1)  # wait a moment for initial DB flush
-            except Exception as e:
-                st.error(f"Upload failed: {e}")
+        files_payload = [
+            ("files", (f.name, f.read(), "application/pdf")) for f in uploaded_files
+        ]
+        upload_placeholder = st.empty()
+        with upload_placeholder.container():
+            with st.spinner("Uploading files to server..."):
+                try:
+                    res = httpx.post(
+                        f"{API_URL}/files/upload",
+                        files=files_payload,
+                        headers=get_headers(),
+                        timeout=120.0,
+                    )
+                except Exception as e:
+                    st.error(f"❌ Upload failed: {e}")
+                    res = None
+
+        if res is not None:
+            if res.status_code == 202:
+                data = res.json()
+                file_results = data.get("results", [])
+
+                # Separate accepted files from errors/duplicates
+                accepted = [r for r in file_results if r.get("status") == "accepted"]
+                errors = [r for r in file_results if r.get("status") == "error"]
+                duplicates = [r for r in file_results if r.get("status") == "duplicate"]
+
+                for dup in duplicates:
+                    st.warning(f"⚠️ **{dup['filename']}**: {dup.get('message', 'Duplicate file')}")
+                for err in errors:
+                    st.error(f"❌ **{err['filename']}**: {err.get('message', 'Upload error')}")
+
+                if accepted:
+                    # Poll processing status for each accepted file
+                    st.info(f"📤 {len(accepted)} file(s) accepted — tracking processing...")
+
+                    # Create progress UI per file
+                    progress_bars = {}
+                    status_texts = {}
+                    for item in accepted:
+                        fname = item["filename"]
+                        status_texts[item["file_id"]] = st.empty()
+                        progress_bars[item["file_id"]] = st.progress(0, text=f"⏳ {fname}: Pending...")
+
+                    STATUS_PROGRESS = {
+                        "PENDING": 0.2,
+                        "PROCESSING": 0.6,
+                        "READY": 1.0,
+                        "FAILED": 0.0,
+                    }
+
+                    # Poll until all files are done (READY or FAILED) or timeout
+                    pending_ids = {item["file_id"]: item["filename"] for item in accepted}
+                    max_polls = 150  # 5 minutes at 2-second intervals
+                    poll_count = 0
+
+                    while pending_ids and poll_count < max_polls:
+                        time.sleep(2)
+                        poll_count += 1
+                        done_ids = []
+
+                        for fid, fname in list(pending_ids.items()):
+                            try:
+                                status_res = httpx.get(
+                                    f"{API_URL}/files/{fid}/status",
+                                    headers=get_headers(),
+                                    timeout=10.0,
+                                )
+                                if status_res.status_code == 200:
+                                    sdata = status_res.json()
+                                    file_status = sdata.get("status", "PENDING")
+                                    pct = STATUS_PROGRESS.get(file_status, 0.1)
+
+                                    if file_status == "READY":
+                                        progress_bars[fid].progress(1.0, text=f"✅ {fname}: Ready!")
+                                        done_ids.append(fid)
+                                    elif file_status == "FAILED":
+                                        err_msg = sdata.get("error") or "Processing failed"
+                                        progress_bars[fid].progress(0.0, text=f"❌ {fname}: {err_msg}")
+                                        done_ids.append(fid)
+                                    else:
+                                        label = "Uploading to storage..." if file_status == "PENDING" else "Processing document..."
+                                        progress_bars[fid].progress(pct, text=f"⏳ {fname}: {label}")
+                            except Exception:
+                                pass  # Retry on next poll
+
+                        for fid in done_ids:
+                            if fid in pending_ids:
+                                del pending_ids[fid]
+
+                    # Handle timeout
+                    for fid, fname in pending_ids.items():
+                        progress_bars[fid].progress(0.5, text=f"⏳ {fname}: Still processing (check back later)")
+
+                    # Refresh file list after processing
+                    refresh_files()
+
+            elif res.status_code == 401:
+                st.error("🔒 Authentication required. Please log in again.")
+            elif res.status_code == 413:
+                st.error("📦 File too large. Maximum file size is 50 MB for digital PDFs, 100 MB for scanned.")
+            elif res.status_code == 429:
+                st.error("⏱️ Too many uploads. Please wait a minute and try again.")
+            else:
+                try:
+                    err_detail = res.json().get("detail", res.text)
+                except Exception:
+                    err_detail = res.text
+                st.error(f"❌ Upload failed (HTTP {res.status_code}): {err_detail}")
 
     st.divider()
 

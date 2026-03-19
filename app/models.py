@@ -74,6 +74,7 @@ class User(Base):
     personal_org_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("organizations.id"), nullable=True, index=True
     )
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -126,12 +127,15 @@ class ApiKey(Base):
 
 
 class Invite(Base):
-    __tablename__ = "invites"
+    __tablename__ = "organization_invites"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(255), nullable=False)
     org_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("organizations.id"), nullable=False
+    )
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole), nullable=False, default=UserRole.MEMBER
     )
     token: Mapped[str] = mapped_column(
         String(255), unique=True, index=True, nullable=False

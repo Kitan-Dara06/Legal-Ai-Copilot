@@ -15,8 +15,11 @@ _sentry_dsn = os.getenv("SENTRY_DSN")
 if _sentry_dsn:
     sentry_sdk.init(
         dsn=_sentry_dsn,
+        environment=os.getenv("ENV", "development"),
         integrations=[CeleryIntegration()],
-        send_default_pii=False,
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
+        profiles_sample_rate=float(os.getenv("SENTRY_PROFILES_SAMPLE_RATE", "1.0")),
+        send_default_pii=True,
     )
 
 # 1. Broker: RabbitMQ (task queue). Result backend: Redis (results only).

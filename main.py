@@ -17,7 +17,7 @@ from starlette.types import ExceptionHandler
 from app.database import Base, engine
 from app.dependencies import get_org_id_for_rate_limit
 from app.logging_config import configure_logging
-from app.routers import agent_query, auth, health, injest, query, session
+from app.routers import agent_query, auth, health, injest, invites, query, session
 
 configure_logging()
 
@@ -25,11 +25,14 @@ _sentry_dsn = os.getenv("SENTRY_DSN")
 if _sentry_dsn:
     sentry_sdk.init(
         dsn=_sentry_dsn,
+        environment=os.getenv("ENV", "development"),
         integrations=[
             FastApiIntegration(),
-            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+            LoggingIntegration(level=logging.INFO, event_level=logging.WARNING),
         ],
-        send_default_pii=False,
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
+        profiles_sample_rate=float(os.getenv("SENTRY_PROFILES_SAMPLE_RATE", "1.0")),
+        send_default_pii=True,  # Changed to True to capture users, but we handle it via middleware
     )
 
 limiter = Limiter(key_func=get_org_id_for_rate_limit)
@@ -137,3 +140,4 @@ app.include_router(agent_query.router)
 app.include_router(session.router)
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(invites.router)

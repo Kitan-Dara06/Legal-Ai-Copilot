@@ -12,6 +12,7 @@ from jose.utils import base64url_decode
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import sentry_sdk
 from app.database import get_db
 from app.models import ApiKey, Invite, Organization, User, UserOrgMembership, UserRole
 
@@ -81,6 +82,13 @@ async def get_auth_context(
 
     # Attach org_id to the request state so SlowAPI can rate limit per-org
     request.state.org_id = api_key.org_id
+
+    # Set Sentry user context
+    sentry_sdk.set_user({
+        "id": str(user.id),
+        "email": user.email,
+        "org_id": str(api_key.org_id)
+    })
 
     return AuthContext(org_id=api_key.org_id, user=user, api_key=api_key)
 
@@ -175,10 +183,13 @@ async def _refresh_supabase_jwks_if_needed() -> None:
             detail="Supabase JWKS URL not configured on server.",
         )
 
-    def _fetch():
+    def _fetch_sync() -> dict:
         resp = httpx.get(url, headers=headers, timeout=5.0)
         resp.raise_for_status()
         return resp.json()
+
+    from typing import Any, Callable
+    _fetch: Callable[[], Any] = _fetch_sync
 
     try:
         loop = asyncio.get_running_loop()
@@ -289,6 +300,12 @@ async def _build_supabase_auth_context(
 
     if user:
         resolved_org = user.personal_org_id or user.org_id
+        # Set Sentry user context
+        sentry_sdk.set_user({
+            "id": str(user.id),
+            "email": email,
+            "org_id": str(resolved_org)
+        })
         return SupabaseAuthContext(org_id=str(resolved_org), user=user, claims=claims)
 
     # No user by sub. Maybe they exist by email (e.g. legacy signup or another Supabase link).
@@ -344,6 +361,13 @@ async def _build_supabase_auth_context(
         invite.is_accepted = True
         await db.commit()
         await db.refresh(new_user)
+
+        # Set Sentry user context
+        sentry_sdk.set_user({
+            "id": str(new_user.id),
+            "email": email,
+            "org_id": str(invite.org_id)
+        })
 
         return SupabaseAuthContext(
             org_id=str(invite.org_id), user=new_user, claims=claims
