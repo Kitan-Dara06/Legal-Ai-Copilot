@@ -15,6 +15,7 @@ import {
     getMembers,
     deleteFile,
     createSession,
+    getSession,
     uploadToSession,
     deleteSession,
     askQuestion,
