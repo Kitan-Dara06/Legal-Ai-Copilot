@@ -89,8 +89,8 @@ async function apiFetch<T>(
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
-export function getMe(token: string) {
-    return apiFetch<User>("/auth/me", { token });
+export function getMe(token: string, orgSlug?: string) {
+    return apiFetch<User>("/auth/me", { token, orgSlug });
 }
 
 export async function getMyOrgs(token: string) {

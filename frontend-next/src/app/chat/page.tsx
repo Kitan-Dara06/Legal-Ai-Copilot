@@ -177,15 +177,7 @@ export default function ChatPage() {
     const handleSwitchOrg = async (orgSlug: string) => {
         if (!token) return;
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/auth/me`, {
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    "X-Active-Org": orgSlug,
-                },
-            });
-            if (!res.ok) throw new Error("Failed to switch org");
-            const newUser = await res.json();
-            
+            const newUser = await getMe(token, orgSlug);
             setUser(newUser);
             setSession(null);
             setMessages([]);

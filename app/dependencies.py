@@ -396,14 +396,40 @@ async def _build_supabase_auth_context(
     )
 
 
+from fastapi import Header
 async def get_supabase_auth_context(
+    request: Request,
     claims: dict = Depends(get_supabase_claims),
     db: AsyncSession = Depends(get_db),
+    x_active_org: str | None = Header(None, alias="X-Active-Org"),
 ) -> SupabaseAuthContext:
     """
     Maps a verified Supabase JWT to a local User + Organization.
+    Respects X-Active-Org header for switching active workspaces.
     """
-    return await _build_supabase_auth_context(claims, db)
+    ctx = await _build_supabase_auth_context(claims, db)
+    
+    if x_active_org:
+        # Check if org exists
+        org_res = await db.execute(select(Organization).where(Organization.slug == x_active_org))
+        org = org_res.scalar_one_or_none()
+        
+        if org:
+            # Check user membership
+            mem_res = await db.execute(
+                select(UserOrgMembership)
+                .where(UserOrgMembership.user_id == ctx.user.id, UserOrgMembership.org_id == org.id)
+            )
+            if mem_res.scalar_one_or_none():
+                # valid membership in the requested org
+                ctx.org_id = str(org.id)
+                request.state.org_id = org.id
+                return ctx
+
+        # If not found or not a member, fallback to the default (or could raise 403)
+        # We stick to the default so the app doesn't hard crash
+        
+    return ctx
 
 
 async def _get_auth_context_from_key(
