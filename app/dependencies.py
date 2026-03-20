@@ -420,14 +420,22 @@ async def get_supabase_auth_context(
                 select(UserOrgMembership)
                 .where(UserOrgMembership.user_id == ctx.user.id, UserOrgMembership.org_id == org.id)
             )
-            if mem_res.scalar_one_or_none():
+            membership = mem_res.scalar_one_or_none()
+            if membership:
                 # valid membership in the requested org
                 ctx.org_id = str(org.id)
+                ctx.user.role = membership.role
                 request.state.org_id = org.id
                 return ctx
 
-        # If not found or not a member, fallback to the default (or could raise 403)
-        # We stick to the default so the app doesn't hard crash
+    # If x_active_org was omitted (or invalid), we should still load their real role for the resolved org
+    mem_res = await db.execute(
+        select(UserOrgMembership)
+        .where(UserOrgMembership.user_id == ctx.user.id, UserOrgMembership.org_id == ctx.org_id)
+    )
+    membership = mem_res.scalar_one_or_none()
+    if membership:
+        ctx.user.role = membership.role
         
     return ctx
 
