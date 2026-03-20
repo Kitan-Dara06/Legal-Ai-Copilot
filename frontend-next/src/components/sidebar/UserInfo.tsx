@@ -92,8 +92,11 @@ export function UserInfo({ user, token, onSwitchOrg }: UserInfoProps) {
 
             <div className="flex flex-col gap-4">
                 <button
-                    onClick={() => setIsMenuOpen(!isMenuOpen)}
-                    className="flex items-center gap-3 p-1 -m-1 rounded-lg hover:bg-slate-800/50 transition-colors text-left focus:outline-none"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        setIsMenuOpen(!isMenuOpen);
+                    }}
+                    className="flex w-full items-center gap-3 p-2 -m-2 rounded-lg hover:bg-slate-800/50 transition-colors text-left focus:outline-none"
                 >
                     <div className="w-10 h-10 rounded-full bg-slate-800 flex items-center justify-center shrink-0 border border-slate-700">
                         <span className="font-semibold text-sm text-slate-300">
@@ -118,7 +121,7 @@ export function UserInfo({ user, token, onSwitchOrg }: UserInfoProps) {
                             <p className="text-xs text-slate-400 truncate">{user.email}</p>
                         </div>
                         <ChevronUp
-                            className={`w-4 h-4 text-slate-500 shrink-0 transition-transform ${isMenuOpen ? "rotate-180" : ""}`}
+                            className={`w-4 h-4 text-slate-500 shrink-0 transition-transform duration-200 ${isMenuOpen ? "rotate-180" : ""}`}
                         />
                     </div>
                 </button>

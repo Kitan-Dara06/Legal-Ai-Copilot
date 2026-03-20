@@ -58,17 +58,8 @@ export function Sidebar({
 
     const handleInvite = async (e: React.FormEvent) => {
         e.preventDefault();
-        console.log("[Sidebar] handleInvite triggered", {
-            email: inviteEmail,
-            hasToken: !!token,
-            tokenPrefix: token ? `${token.substring(0, 10)}...` : "none",
-            orgSlug: user.org_slug,
-            appRole: user.app_role,
-        });
-
         if (!inviteEmail) return;
         if (user.app_role !== "ADMIN") {
-            console.warn("[Sidebar] User is not an ADMIN, cannot invite.");
             setInviteStatus("error");
             setInviteMsg("Only admins can invite users.");
             return;
@@ -76,16 +67,22 @@ export function Sidebar({
 
         setInviteStatus("loading");
         try {
-            console.log("[Sidebar] Calling inviteByEmail API...");
-            const res = await inviteByEmail(token, inviteEmail, user.org_slug);
-            console.log("[Sidebar] inviteByEmail API response:", res);
+            // Note: The backend response type might return already_registered
+            const res: any = await inviteByEmail(token, inviteEmail, user.org_slug);
             setInviteStatus("success");
             setInviteEmail("");
-            setInviteMsg("Invite sent successfully!");
-            setTimeout(() => setInviteStatus("idle"), 3000);
+            
+            if (res.already_registered && res.invite_link) {
+                // Keep the success state visible longer so they can copy the link
+                setInviteMsg(`User exists. Share this link for them to join:  ${res.invite_link}`);
+            } else {
+                setInviteMsg("Invite sent successfully!");
+                setTimeout(() => setInviteStatus("idle"), 3000);
+            }
         } catch (err: any) {
             setInviteStatus("error");
             setInviteMsg(err.message || "Failed to send invite");
+            setTimeout(() => setInviteStatus("idle"), 4000);
         }
     };
 
