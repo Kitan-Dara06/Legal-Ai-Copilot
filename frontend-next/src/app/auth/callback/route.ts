@@ -16,23 +16,34 @@ export async function GET(request: Request) {
     const supabase = await createClient()
     const { error } = await supabase.auth.exchangeCodeForSession(code)
     if (!error) {
-      const forwardedHost = request.headers.get('x-forwarded-host') // original origin before load balancer
-      const isLocalEnv = process.env.NODE_ENV === 'development'
+      const forwardedHost = request.headers.get('x-forwarded-host');
+      const isLocalEnv = process.env.NODE_ENV === 'development';
 
       const buildRedirectUrl = (base: string) => {
-        const url = new URL(`${base}${next}`)
-        if (orgId) url.searchParams.set('org_id', orgId)
-        if (orgName) url.searchParams.set('org_name', orgName)
-        return url.toString()
+        const url = new URL(`${base}${next}`);
+        if (orgId) url.searchParams.set('org_id', orgId);
+        if (orgName) url.searchParams.set('org_name', orgName);
+        return url.toString();
+      };
+
+      // Ensure we don't accidentally redirect to the internal docker network hostname
+      let resolvedBase = origin;
+      if (isLocalEnv) {
+          resolvedBase = origin;
+      } else {
+          // In production, prioritize explicit site config so Nginx internal upstream names don't leak
+          const explicitSiteUrl = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/api$/, '');
+          
+          if (forwardedHost && !forwardedHost.includes('upstream')) {
+              resolvedBase = `https://${forwardedHost}`;
+          } else if (explicitSiteUrl) {
+              resolvedBase = explicitSiteUrl;
+          } else if (origin.includes('upstream')) {
+              resolvedBase = 'https://legalrag.codes'; // Safe fallback
+          }
       }
 
-      if (isLocalEnv) {
-        return NextResponse.redirect(buildRedirectUrl(origin))
-      } else if (forwardedHost) {
-        return NextResponse.redirect(buildRedirectUrl(`https://${forwardedHost}`))
-      } else {
-        return NextResponse.redirect(buildRedirectUrl(origin))
-      }
+      return NextResponse.redirect(buildRedirectUrl(resolvedBase));
     }
   }
 
