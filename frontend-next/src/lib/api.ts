@@ -93,8 +93,9 @@ export function getMe(token: string) {
     return apiFetch<User>("/auth/me", { token });
 }
 
-export function getMyOrgs(token: string) {
-    return apiFetch<OrgEntry[]>("/auth/my-orgs", { token });
+export async function getMyOrgs(token: string) {
+    const res = await apiFetch<{ orgs: OrgEntry[] }>("/auth/my-orgs", { token });
+    return res.orgs;
 }
 
 export function setupOrg(
