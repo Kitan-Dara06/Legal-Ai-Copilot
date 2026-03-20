@@ -22,6 +22,7 @@ interface SidebarProps {
     onUploadToSession: (fileIds: number[]) => void;
     isCreatingSession: boolean;
     isUploadingToSession: boolean;
+    onSwitchOrg: (orgSlug: string) => void;
 }
 
 export function Sidebar({
@@ -37,6 +38,7 @@ export function Sidebar({
     onUploadToSession,
     isCreatingSession,
     isUploadingToSession,
+    onSwitchOrg,
 }: SidebarProps) {
     const [selectedFileIds, setSelectedFileIds] = useState<number[]>([]);
     const [inviteEmail, setInviteEmail] = useState("");
@@ -231,7 +233,7 @@ export function Sidebar({
             )}
 
             {/* User Info (Pinned to bottom) */}
-            <UserInfo user={user} />
+            <UserInfo user={user} token={token} onSwitchOrg={onSwitchOrg} />
 
             {/* Members Modal */}
             {showMembersModal && (

@@ -157,7 +157,6 @@ export default function ChatPage() {
         };
     }, []);
 
-    // Fetch files when user is available
     const fetchFiles = useCallback(
         (isSilent = false) => {
             if (!token || !user?.org_slug) return;
@@ -174,6 +173,27 @@ export default function ChatPage() {
         },
         [token, user?.org_slug],
     );
+
+    const handleSwitchOrg = async (orgSlug: string) => {
+        if (!token) return;
+        try {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/auth/me`, {
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    "X-Active-Org": orgSlug,
+                },
+            });
+            if (!res.ok) throw new Error("Failed to switch org");
+            const newUser = await res.json();
+            
+            setUser(newUser);
+            setSession(null);
+            setMessages([]);
+        } catch (err) {
+            console.error("Error switching org:", err);
+            alert("Failed to switch workspace.");
+        }
+    };
 
     useEffect(() => {
         // Initial load (shows spinner)
@@ -339,6 +359,7 @@ export default function ChatPage() {
                 onUploadToSession={handleUploadToSession}
                 isCreatingSession={isCreatingSession}
                 isUploadingToSession={isUploadingToSession}
+                onSwitchOrg={handleSwitchOrg}
             />
 
             {/* Main Content Area */}

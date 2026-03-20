@@ -8,6 +8,7 @@ import type {
     FileListResponse,
     FileStatusResponse,
     InviteVerifyResponse,
+    OrgEntry,
     SessionResponse,
     SetupOrgResponse,
     UploadResult,
@@ -90,6 +91,10 @@ async function apiFetch<T>(
 
 export function getMe(token: string) {
     return apiFetch<User>("/auth/me", { token });
+}
+
+export function getMyOrgs(token: string) {
+    return apiFetch<OrgEntry[]>("/auth/my-orgs", { token });
 }
 
 export function setupOrg(

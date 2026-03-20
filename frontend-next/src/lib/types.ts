@@ -20,6 +20,14 @@ export interface OrgMember {
     joined_at: string;
 }
 
+export interface OrgEntry {
+    org_id: string;
+    org_slug: string;
+    org_name: string;
+    role: "ADMIN" | "MEMBER";
+    is_active: boolean;
+}
+
 export interface FileItem {
     file_id: number;
     filename: string;
