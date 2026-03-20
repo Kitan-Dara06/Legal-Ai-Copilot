@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { createClient } from "@/lib/supabase/client";
+import { getMe, AppError } from "@/lib/api";
 
 export function LoginForm() {
     const [email, setEmail] = useState("");
@@ -18,16 +19,29 @@ export function LoginForm() {
         setIsLoading(true);
         setError("");
 
-        const { error } = await supabase.auth.signInWithPassword({
+        const { data, error: signInError } = await supabase.auth.signInWithPassword({
             email,
             password,
         });
 
-        if (error) {
-            setError(error.message);
+        if (signInError) {
+            setError(signInError.message);
             setIsLoading(false);
-        } else {
-            window.location.href = "/chat"; // Let middleware handle redirection
+            return;
+        }
+
+        // Check whether this user has a local DB record (org set up).
+        // Route to /setup if not, /chat if all good.
+        try {
+            await getMe(data.session!.access_token);
+            window.location.href = "/chat";
+        } catch (err) {
+            if (err instanceof AppError && (err.code === "setup_required" || err.status === 403)) {
+                window.location.href = "/setup";
+            } else {
+                // Unexpected error — still send to chat, which will handle it
+                window.location.href = "/chat";
+            }
         }
     };
 
