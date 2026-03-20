@@ -44,6 +44,7 @@ export default function ChatPage() {
     // Session
     const [session, setSession] = useState<SessionResponse | null>(null);
     const [isCreatingSession, setIsCreatingSession] = useState(false);
+    const [isUploadingToSession, setIsUploadingToSession] = useState(false);
     const [selectedFileIds, setSelectedFileIds] = useState<number[]>([]);
 
     // Chat
