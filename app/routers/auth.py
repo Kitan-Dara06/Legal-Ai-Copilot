@@ -473,8 +473,11 @@ async def invite_info(
     """
     Public: returns invite details for a token so the frontend can show "Invited to join org X".
     """
+    import hashlib
+    hashed_token = hashlib.sha256(token.encode("utf-8")).hexdigest()
+
     stmt = select(Invite).where(
-        Invite.token == token,
+        Invite.token == hashed_token,
         Invite.is_accepted.is_(False),
         Invite.expires_at > datetime.now(timezone.utc),
     )
@@ -494,8 +497,11 @@ async def accept_invite_by_token(
     (Supabase JWT) Accept an invite and switch to the inviter's organization.
     Invite email must match the logged-in user's email.
     """
+    import hashlib
+    hashed_token = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
+
     stmt = select(Invite).where(
-        Invite.token == payload.token,
+        Invite.token == hashed_token,
         Invite.is_accepted.is_(False),
         Invite.expires_at > datetime.now(timezone.utc),
     )
@@ -530,8 +536,11 @@ async def accept_invite(
     """
     Consumes an invite token, creates a MEMBER user, and issues an API key.
     """
+    import hashlib
+    hashed_token = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
+
     stmt = select(Invite).where(
-        Invite.token == payload.token,
+        Invite.token == hashed_token,
         Invite.email == payload.email,
         Invite.is_accepted.is_(False),
         Invite.expires_at > datetime.now(timezone.utc),
