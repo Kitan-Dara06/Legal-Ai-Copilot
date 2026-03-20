@@ -442,7 +442,7 @@ async def invite_user_by_email(
     except AuthApiError as e:
         # Already registered in Supabase: still add them via invite link (they accept in-app).
         if "already been registered" in (str(e).lower() or ""):
-            invite_link = f"{frontend_url}/invite?token={new_invite.token}"
+            invite_link = f"{frontend_url}/invite?token={invite_token}"
             return {
                 "message": "This email already has an account. Share the link below so they can join your organization.",
                 "invite_link": invite_link,
