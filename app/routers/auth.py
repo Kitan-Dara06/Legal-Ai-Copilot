@@ -412,11 +412,14 @@ async def invite_user_by_email(
             detail="Invite-by-email not configured. Set SUPABASE_SERVICE_ROLE_KEY.",
         )
 
+    import hashlib
     invite_token = secrets.token_urlsafe(32)
+    hashed_token = hashlib.sha256(invite_token.encode("utf-8")).hexdigest()
+    
     new_invite = Invite(
         email=payload.email,
         org_id=ctx.org_id,
-        token=invite_token,
+        token=hashed_token,
         expires_at=datetime.now(timezone.utc) + timedelta(days=7),
     )
     db.add(new_invite)
