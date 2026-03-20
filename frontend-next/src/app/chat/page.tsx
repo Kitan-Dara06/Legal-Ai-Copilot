@@ -49,6 +49,35 @@ export default function ChatPage() {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [isAnswering, setIsAnswering] = useState(false);
 
+    // Initialize Local Storage State
+    useEffect(() => {
+        try {
+            const savedSession = localStorage.getItem("legalrag_active_session");
+            const savedMessages = localStorage.getItem("legalrag_active_messages");
+            if (savedSession) setSession(JSON.parse(savedSession));
+            if (savedMessages) setMessages(JSON.parse(savedMessages));
+        } catch (e) {
+            console.error("Failed to restore session from local storage", e);
+        }
+    }, []);
+
+    // Sync to Local Storage
+    useEffect(() => {
+        if (session) {
+            localStorage.setItem("legalrag_active_session", JSON.stringify(session));
+        } else {
+            localStorage.removeItem("legalrag_active_session");
+        }
+    }, [session]);
+
+    useEffect(() => {
+        if (messages.length > 0) {
+            localStorage.setItem("legalrag_active_messages", JSON.stringify(messages));
+        } else {
+            localStorage.removeItem("legalrag_active_messages");
+        }
+    }, [messages]);
+
     // Initialize Auth
     useEffect(() => {
         let mounted = true;
@@ -72,7 +101,8 @@ export default function ChatPage() {
                         setToken(authSession.access_token);
 
                         // Force a refresh of the user data to ensure we are in the correct org
-                        getMe(authSession.access_token)
+                        const savedOrg = localStorage.getItem("legalrag_active_org") || undefined;
+                        getMe(authSession.access_token, savedOrg)
                             .then((u) => {
                                 console.log(
                                     "[ChatPage] getMe success:",
@@ -117,6 +147,9 @@ export default function ChatPage() {
                 if (event === "SIGNED_OUT") {
                     setUser(null);
                     setToken("");
+                    localStorage.removeItem("legalrag_active_session");
+                    localStorage.removeItem("legalrag_active_messages");
+                    localStorage.removeItem("legalrag_active_org");
                     window.location.href = "/login";
                     return;
                 }
@@ -126,7 +159,8 @@ export default function ChatPage() {
                     // If we just signed in or the session refreshed, verify identity
                     if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
                         try {
-                            const u = await getMe(authSession.access_token);
+                            const savedOrg = localStorage.getItem("legalrag_active_org") || undefined;
+                            const u = await getMe(authSession.access_token, savedOrg);
                             setUser(u);
                         } catch (e) {
                             console.error(
@@ -181,6 +215,9 @@ export default function ChatPage() {
             setUser(newUser);
             setSession(null);
             setMessages([]);
+            localStorage.setItem("legalrag_active_org", orgSlug);
+            localStorage.removeItem("legalrag_active_session");
+            localStorage.removeItem("legalrag_active_messages");
         } catch (err) {
             console.error("Error switching org:", err);
             alert("Failed to switch workspace.");
@@ -267,14 +304,16 @@ export default function ChatPage() {
     };
 
     const handleTerminateSession = async () => {
-        if (!token || !session?.session_id || !user?.org_slug) return;
+        if (!token || !user?.org_slug || !session) return;
         try {
             await deleteSession(token, session.session_id, user.org_slug);
+            setSession(null);
+            setMessages([]);
+            localStorage.removeItem("legalrag_active_session");
+            localStorage.removeItem("legalrag_active_messages");
         } catch (e) {
-            console.error("Failed to cleanly terminate session", e);
+            alert("Failed to terminate session");
         }
-        setSession(null);
-        setMessages([]);
     };
 
     // Upload multiple file IDs at once (simplified since we have IDs)
@@ -359,7 +398,7 @@ export default function ChatPage() {
                 <TopBar sessionActive={!!session} />
 
                 {/* Chat Thread Area (starts below top bar (64px) and above input (96px max)) */}
-                <div className="flex-1 mt-16 relative">
+                <div className="flex-1 mt-16 relative overflow-hidden flex flex-col">
                     <ChatThread messages={messages} isLoading={isAnswering} />
 
                     {/* Floating Input aligned to bottom */}
