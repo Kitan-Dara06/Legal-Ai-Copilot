@@ -437,8 +437,10 @@ export default function ChatPage() {
 
             {/* Sidebar Container */}
             <div className={`
-                fixed inset-y-0 left-0 z-40 transform transition-transform duration-300 ease-in-out md:relative md:translate-x-0
+                fixed inset-y-0 left-0 z-40 transform transition-all duration-300 ease-in-out
                 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+                md:relative md:translate-x-0 md:flex-shrink-0 overflow-hidden
+                ${isSidebarOpen ? 'md:w-[320px]' : 'md:w-0'}
             `}>
                 <Sidebar
                     user={user}

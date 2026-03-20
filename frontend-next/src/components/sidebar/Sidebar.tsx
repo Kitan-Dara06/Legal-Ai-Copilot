@@ -111,7 +111,7 @@ export function Sidebar({
     };
 
     return (
-        <div className="w-[320px] shrink-0 bg-navy-950 border-r border-slate-800 flex flex-col h-screen fixed left-0 top-0 z-20 overflow-hidden shadow-2xl">
+        <div className="w-[320px] shrink-0 bg-navy-950 border-r border-slate-800 flex flex-col h-full overflow-hidden shadow-2xl">
             {/* Header */}
             <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-navy-950 sticky top-0 z-10">
                 <div className="flex items-center gap-2">

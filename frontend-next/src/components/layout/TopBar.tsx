@@ -7,11 +7,11 @@ interface TopBarProps {
 
 export function TopBar({ sessionActive, onMenuClick }: TopBarProps) {
     return (
-        <div className="h-16 border-b border-slate-800 bg-navy-950/80 backdrop-blur fixed top-0 right-0 left-0 md:left-[320px] z-20 px-4 md:px-6 flex items-center justify-between">
+        <div className="h-16 border-b border-slate-800 bg-navy-950/80 backdrop-blur sticky top-0 z-20 px-4 md:px-6 flex items-center justify-between w-full">
             <div className="flex items-center gap-3">
                 <button 
                     onClick={onMenuClick}
-                    className="md:hidden p-2 -ml-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
+                    className="p-2 -ml-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
                     aria-label="Toggle Sidebar"
                 >
                     <Menu className="w-5 h-5" />
