@@ -33,15 +33,17 @@ export function ChatMessage({ message, isLast }: ChatMessageProps) {
         </div>
 
         {/* Content */}
-        <div className="flex-1 space-y-2 overflow-hidden w-full">
+        <div className="flex-1 space-y-2 overflow-hidden w-full min-w-0">
           <div className="font-semibold text-sm text-slate-400">
             {isAi ? "Legal AI Copilot" : "You"}
           </div>
           <div className={cn(
-            "prose prose-invert max-w-none break-words",
+            "prose prose-invert max-w-full break-words overflow-x-auto",
             "prose-p:leading-relaxed prose-pre:bg-navy-900 prose-pre:border prose-pre:border-slate-800",
             "prose-a:text-accent-blue prose-a:no-underline hover:prose-a:underline",
             "prose-strong:text-white prose-code:text-accent-gold prose-code:bg-accent-gold/10 prose-code:px-1 prose-code:py-0.5 prose-code:rounded",
+            "prose-table:w-full prose-table:overflow-x-auto",
+            "scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent",
             isAi ? "text-slate-300" : "text-white text-lg" // specific styling requested in the mockup
           )}>
             {isAi ? (

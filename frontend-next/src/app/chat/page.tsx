@@ -50,6 +50,7 @@ export default function ChatPage() {
     // Chat
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [isAnswering, setIsAnswering] = useState(false);
+    const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
     // Initialize Local Storage State for messages and selections
     useEffect(() => {
@@ -425,29 +426,42 @@ export default function ChatPage() {
     }
 
     return (
-        <div className="flex h-screen bg-navy-950 overflow-hidden">
-            {/* Sidebar - fixed 320px width */}
-            <Sidebar
-                user={user}
-                token={token}
-                files={files}
-                filesLoading={filesLoading}
-                onUploadSuccess={fetchFiles}
-                onDeleteFile={handleDeleteFile}
-                session={session}
-                selectedFileIds={selectedFileIds}
-                onToggleSelection={handleToggleSelection}
-                onCreateSession={handleCreateSession}
-                onTerminate={handleTerminateSession}
-                onUploadToSession={handleUploadToSession}
-                isCreatingSession={isCreatingSession}
-                isUploadingToSession={isUploadingToSession}
-                onSwitchOrg={handleSwitchOrg}
-            />
+        <div className="flex h-screen bg-navy-950 overflow-hidden relative">
+            {/* Mobile Sidebar Overlay */}
+            {isSidebarOpen && (
+                <div 
+                    className="fixed inset-0 bg-black/60 z-30 md:hidden backdrop-blur-sm transition-opacity"
+                    onClick={() => setIsSidebarOpen(false)}
+                />
+            )}
+
+            {/* Sidebar Container */}
+            <div className={`
+                fixed inset-y-0 left-0 z-40 transform transition-transform duration-300 ease-in-out md:relative md:translate-x-0
+                ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+            `}>
+                <Sidebar
+                    user={user}
+                    token={token}
+                    files={files}
+                    filesLoading={filesLoading}
+                    onUploadSuccess={fetchFiles}
+                    onDeleteFile={handleDeleteFile}
+                    session={session}
+                    selectedFileIds={selectedFileIds}
+                    onToggleSelection={handleToggleSelection}
+                    onCreateSession={handleCreateSession}
+                    onTerminate={handleTerminateSession}
+                    onUploadToSession={handleUploadToSession}
+                    isCreatingSession={isCreatingSession}
+                    isUploadingToSession={isUploadingToSession}
+                    onSwitchOrg={handleSwitchOrg}
+                />
+            </div>
 
             {/* Main Content Area */}
-            <div className="flex-1 ml-[320px] flex flex-col relative">
-                <TopBar sessionActive={!!session} />
+            <div className="flex-1 flex flex-col relative w-full md:w-auto min-w-0 md:ml-0">
+                <TopBar sessionActive={!!session} onMenuClick={() => setIsSidebarOpen(true)} />
 
                 {/* Chat Thread Area (starts below top bar (64px) and above input (96px max)) */}
                 <div className="flex-1 mt-16 relative overflow-hidden flex flex-col">

@@ -31,6 +31,7 @@ celery[redis]                  # Task queue; RabbitMQ broker + Redis result back
 qdrant-client         # Python client for Qdrant
 
 pypdf                 # Read PDFs, detect if scanned or digital
+pdfplumber            # High-fidelity digital PDF extraction (preserves tables)
 
 boto3                          # S3-compatible API (Cloudflare R2)
 pydantic-ai           # Strictly-typed agent frameworks

@@ -51,7 +51,7 @@ celery_app = Celery(
     "legal_rag_worker",
     broker=BROKER_URL,
     backend=REDIS_URL,
-    include=["app.tasks"],  # Where our task functions live
+    include=["app.tasks", "app.tasks_map_reduce"],  # Where our task functions live
 )
 
 # Debug: log broker and backend (mask passwords)
@@ -75,7 +75,7 @@ celery_app.conf.update(
     result_serializer="json",
     accept_content=["json"],
     # Don't store task results in Redis — status is in Postgres; avoids "Connection closed by server" when Redis drops idle connections (e.g. Upstash).
-    task_ignore_result=True,
+    task_ignore_result=False,
     # Broker robustness (CloudAMQP / RabbitMQ).
     broker_connection_retry_on_startup=True,
     broker_connection_timeout=30,
@@ -100,6 +100,11 @@ celery_app.conf.update(
     task_default_routing_key="default",
     # Route specific tasks to specific queues
     task_routes={
+        "app.tasks.map_reduce.dispatch_digital_pdf": {"queue": "default"},
+        "app.tasks.map_reduce.dispatch_scanned_pdf": {"queue": "ocr"},
+        "app.tasks.map_reduce.embed_and_upsert_chunk_batch": {"queue": "default"},
+        "app.tasks.map_reduce.ocr_and_embed_scanned_batch": {"queue": "ocr"},
+        "app.tasks.map_reduce.finalize_pdf_processing": {"queue": "default"},
         "app.tasks.process_digital_pdf": {"queue": "default"},
         "app.tasks.process_scanned_pdf": {"queue": "ocr"},
     },

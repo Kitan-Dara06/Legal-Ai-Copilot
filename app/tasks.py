@@ -124,29 +124,16 @@ def ensure_collection_exists(client: QdrantClient):
 
 
 # ── Sparse Vector builder ────────────────────────────────────────────────────
+from app.utils.vector_utils import compute_sparse_vector as _compute_sparse_dict
+
 def compute_sparse_vector(text: str) -> SparseVector:
-    """Creates a basic Term Frequency sparse vector for Qdrant (which applies IDF)"""
-    import hashlib
-    import re
-
-    # Simple tokenization: lowercase, alpha-numeric
-    tokens = re.findall(r"\w+", text.lower())
-    freq = {}
-    for t in tokens:
-        # Stable hash token to a 32-bit integer for sparse index
-        hex_digest = hashlib.md5(t.encode("utf-8")).hexdigest()
-        idx = int(hex_digest, 16) % (2**31 - 1)
-        freq[idx] = freq.get(idx, 0) + 1
-
-    indices = []
-    values = []
-    for k, v in freq.items():
-        indices.append(k)
-        values.append(float(v))
-    return SparseVector(indices=indices, values=values)
+    """Creates a SparseVector object for Qdrant using the shared dictionary builder."""
+    d = _compute_sparse_dict(text)
+    return SparseVector(indices=d["indices"], values=d["values"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+
 # PDF Inspector — Detects if a PDF is digital or scanned
 # ─────────────────────────────────────────────────────────────────────────────
 def is_scanned_pdf(file_bytes: bytes) -> bool:

@@ -4,14 +4,24 @@ from datetime import date
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from groq import Groq
+from groq import AsyncGroq
 from pydantic import BaseModel, Field
 
+import re
 from app.services.embedder import get_embedding
 from app.services.store import (
     search_hybrid,
     search_hybrid_qdrant,  # Session-scoped Qdrant search
 )
+
+def _clean_json_output(raw: str) -> str:
+    """Removes markdown code blocks commonly hallucinated by Qwen/Llama models around JSON."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    return raw
+
 
 
 class Claim(BaseModel):
@@ -37,10 +47,10 @@ class FinalAnswer(BaseModel):
 
 load_dotenv()
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
 
 
-def generate_legal_concepts(question: str) -> List[str]:
+async def generate_legal_concepts(question: str) -> List[str]:
     """
     Generates relevant legal terms of art, synonyms, and latin maxims.
     Used to bridge the vocabulary gap.
@@ -62,7 +72,7 @@ def generate_legal_concepts(question: str) -> List[str]:
     - Focus on formal legal terminology
     """
 
-    response = groq_client.chat.completions.create(
+    response = await groq_client.chat.completions.create(
         model="qwen/qwen3-32b",
         messages=[
             {"role": "system", "content": system_prompt},
@@ -74,6 +84,7 @@ def generate_legal_concepts(question: str) -> List[str]:
 
     try:
         raw = response.choices[0].message.content if response.choices else "{}"
+        raw = _clean_json_output(raw)
         parsed = json.loads(raw or "{}")
         if isinstance(parsed, dict):
             concepts = parsed.get("concepts") or parsed.get("list") or []
@@ -92,7 +103,7 @@ def generate_legal_concepts(question: str) -> List[str]:
         return []
 
 
-def generate_multi_queries(question: str) -> List[str]:
+async def generate_multi_queries(question: str) -> List[str]:
     """
     Generates different phrasings/angles of the same question.
     Used to bridge the phrasing gap.
@@ -107,7 +118,7 @@ def generate_multi_queries(question: str) -> List[str]:
     OUTPUT ONLY a valid JSON object with a single key "queries" containing a list of strings.
     """
 
-    response = groq_client.chat.completions.create(
+    response = await groq_client.chat.completions.create(
         model="qwen/qwen3-32b",
         messages=[
             {"role": "system", "content": system_prompt},
@@ -119,6 +130,7 @@ def generate_multi_queries(question: str) -> List[str]:
 
     try:
         raw = response.choices[0].message.content if response.choices else "{}"
+        raw = _clean_json_output(raw)
         parsed = json.loads(raw or "{}")
         if isinstance(parsed, dict):
             queries = parsed.get("queries") or next(iter(parsed.values()), [])
@@ -132,7 +144,7 @@ def generate_multi_queries(question: str) -> List[str]:
         return [question]
 
 
-def search_tool(
+async def search_tool(
     query: str,
     specific_contracts: Optional[List[str]] = None,
     keyword_filter: Optional[str] = None,
@@ -163,12 +175,12 @@ def search_tool(
 
     if mode == "multiquery":
         print("\n📝 MULTI-QUERY MODE DETECTED")
-        variations = generate_multi_queries(query)
+        variations = await generate_multi_queries(query)
         queries_to_run = [query] + variations[:2]  # Run original + 2 variations
 
     elif mode == "concept":
         print("\n📝 CONCEPT EXPANSION MODE DETECTED")
-        concepts = generate_legal_concepts(query)
+        concepts = await generate_legal_concepts(query)
         # Augment the query string with concepts for BM25 to catch
         expanded_query = f"{query} {' '.join(concepts)}"
         print(f"   ► Expanded Query: {expanded_query}")
@@ -272,7 +284,7 @@ def _build_extraction_schema(target_fields: List[str]) -> Dict[str, Any]:
     }
 
 
-def read_tool(
+async def read_tool(
     contract_name: str, target_fields: List[str], org_id: str
 ) -> Dict[str, Any]:
     """Extracts structured data (dates, parties, amounts) from a contract.
@@ -328,7 +340,7 @@ CONTRACT TEXT:
 {context}
 """
     try:
-        response = groq_client.chat.completions.create(
+        response = await groq_client.chat.completions.create(
             model="qwen/qwen3-32b",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -367,7 +379,7 @@ class LogicResult(BaseModel):
     )
 
 
-def logic_tool(data: dict, question: str = "Is this contract currently valid?") -> dict:
+async def logic_tool(data: dict, question: str = "Is this contract currently valid?") -> dict:
     """
     Evaluates logical conditions using an LLM reasoning engine
     and returns a strictly formatted 'verdict' and 'reasoning'.
@@ -393,7 +405,7 @@ You MUST output strictly valid JSON matching this schema:
 """
 
     try:
-        response = groq_client.chat.completions.create(
+        response = await groq_client.chat.completions.create(
             model="qwen/qwen3-32b",
             messages=[
                 {"role": "system", "content": "You are a logical deduction engine."},
@@ -425,7 +437,7 @@ You MUST output strictly valid JSON matching this schema:
         }
 
 
-def draft_tool(
+async def draft_tool(
     context_chunks: List[str],
     output_format: str = "prose",
     use_cot: bool = True,
@@ -442,12 +454,12 @@ def draft_tool(
     print("=" * 70)
 
     if use_cot:
-        return _draft_with_cot(context_chunks, output_format, original_question)
+        return await _draft_with_cot(context_chunks, output_format, original_question)
     else:
-        return _draft_simple(context_chunks, original_question, output_format)
+        return await _draft_simple(context_chunks, original_question, output_format)
 
 
-def _draft_simple(
+async def _draft_simple(
     context_chunks: List[str], original_question: str, output_format: str
 ) -> str:
     """Simple draft without CoT"""
@@ -479,7 +491,7 @@ def _draft_simple(
     print("   Temperature: 0")
 
     user_message = f"USER QUESTION: {original_question}\n\nBased strictly on the provided context, answer the question above."
-    response = groq_client.chat.completions.create(
+    response = await groq_client.chat.completions.create(
         model="qwen/qwen3-32b",
         messages=[
             {"role": "system", "content": system_prompt},
@@ -503,7 +515,7 @@ def _draft_simple(
     return output
 
 
-def _draft_with_cot(
+async def _draft_with_cot(
     context_chunks: List[str], output_format: str, original_question: str
 ) -> str:
     """Draft with rigorous schema validation via Pydantic AI"""
@@ -564,7 +576,7 @@ def _draft_with_cot(
     print("\n🤖 Calling Groq API (Pydantic Agent)...")
 
     try:
-        result = agent.run_sync(user_prompt)
+        result = await agent.run(user_prompt)
         print("\n✅ Pydantic Validation Passed!")
         print(f"   Extracted {len(result.output.claims_list)} strictly-cited claims:")
 
@@ -586,7 +598,7 @@ def _draft_with_cot(
     except Exception as e:
         print(f"\n❌ Pydantic AI failed after retries: {e}")
         print("   -> Falling back to _draft_simple() for a plain-prose answer...")
-        return _draft_simple(unique_chunks, original_question, output_format)
+        return await _draft_simple(unique_chunks, original_question, output_format)
 
 
 def _get_format_instruction(output_format: str) -> str:

@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { createClient } from "@/lib/supabase/client";
+import { checkOrgAvailable } from "@/lib/api";
 
 export function SignupForm() {
     const [email, setEmail] = useState("");
@@ -27,11 +28,21 @@ export function SignupForm() {
         setIsLoading(true);
         setError("");
 
+        const slug = orgId.toLowerCase().trim();
+
+        // 0. Check if Workspace Slug is available BEFORE making Supabase account
+        const isOrgAvailable = await checkOrgAvailable(slug);
+        if (!isOrgAvailable) {
+            setError(`The workspace slug "${slug}" is already taken. Please choose another.`);
+            setIsLoading(false);
+            return;
+        }
+
         // 1. Sign up with Supabase
         // Build the confirmation redirect URL so org info survives the email click.
         const confirmRedirect = new URL("/auth/callback", window.location.origin);
         confirmRedirect.searchParams.set("next", "/setup");
-        confirmRedirect.searchParams.set("org_id", orgId.toLowerCase().trim());
+        confirmRedirect.searchParams.set("org_id", slug);
         confirmRedirect.searchParams.set("org_name", orgName.trim());
 
         const { data: authData, error: authError } = await supabase.auth.signUp(

@@ -30,7 +30,7 @@ from app.services.legal_primitives import groq_client
 
 logger = logging.getLogger(__name__)
 
-def _classify_intent(question: str) -> str:
+async def _classify_intent(question: str) -> str:
     """LLM-based classification to route query to the right toolchain"""
     
     system_prompt = """You are a legal intent classifier.
@@ -45,7 +45,7 @@ You must output strictly valid JSON matching this schema:
 """
 
     try:
-        response = groq_client.chat.completions.create(
+        response = await groq_client.chat.completions.create(
             model="qwen/qwen3-32b",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -67,12 +67,12 @@ You must output strictly valid JSON matching this schema:
         return "search"
 
 
-def create_execution_plan(question: str) -> Dict[str, Any]:
+async def create_execution_plan(question: str) -> Dict[str, Any]:
     """
     Deterministic Planner.
     Returns a static list of tools to execute based on intent.
     """
-    intent = _classify_intent(question)
+    intent = await _classify_intent(question)
     tools = []
 
     if intent == "logic_check":
@@ -101,7 +101,7 @@ def create_execution_plan(question: str) -> Dict[str, Any]:
     }
 
 
-def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file_ids: list = None, *, org_id: str) -> Dict[str, Any]:
+async def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file_ids: list = None, *, org_id: str) -> Dict[str, Any]:
     """
     Executes the static plan sequentially.
     Passes context between steps (Found chunks -> Read -> Logic -> Draft).
@@ -127,7 +127,7 @@ def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file
             params["org_id"] = org_id  # Always scope by org, even without a session
             if file_ids:
                 params["file_ids"] = file_ids
-            result = search_tool(**params)
+            result = await search_tool(**params)
             context["chunks"].extend(result)
             
             # Collect all unique contract sources from the chunks
@@ -152,7 +152,7 @@ def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file
                     params_copy = params.copy()
                     params_copy["contract_name"] = contract
                     params_copy["org_id"] = org_id  # Enforce org isolation in read_tool
-                    res = read_tool(**params_copy)
+                    res = await read_tool(**params_copy)
                     all_extracted[contract] = res
                 
                 context["structured_data"] = all_extracted
@@ -168,7 +168,7 @@ def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file
             data = context.get("structured_data")
             if data:
                 # PAL Logic Tool: Passes data + question to LLM
-                result = logic_tool(data=data, question=question)
+                result = await logic_tool(data=data, question=question)
                 # Add verdict to chunks
                 context["chunks"].append(f"Logic Analysis: {result['verdict']} because {result['reasoning']}")
             else:
@@ -179,7 +179,7 @@ def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file
         elif tool_name == "draft_tool":
             params["context_chunks"] = context["chunks"]
             params["original_question"] = question
-            result = draft_tool(**params)
+            result = await draft_tool(**params)
             final_output = result
 
         trace.append({"step": tool_name, "output": "Executed"})

@@ -105,9 +105,9 @@ async def ask_agent(
             raise HTTPException(status_code=425, detail="No files are ready yet in this session.")
 
     # ── Execute Plan ──────────────────────────────────────────────────────────
-    plan = await run_in_threadpool(create_execution_plan, question)
-    result = await run_in_threadpool(
-        execute_plan, plan, question, mode=mode, file_ids=file_ids, org_id=org_id
+    plan = await create_execution_plan(question)
+    result = await execute_plan(
+        plan, question, mode=mode, file_ids=file_ids, org_id=org_id
     )
 
     response = {

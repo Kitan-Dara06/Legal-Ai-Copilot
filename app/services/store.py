@@ -46,31 +46,16 @@ def get_cohere_client() -> cohere.ClientV2:
     return _cohere_client
 
 
+from app.utils.vector_utils import compute_sparse_vector as _compute_sparse_dict
+
 def compute_sparse_vector(text: str):
     """
     Creates a Term Frequency sparse vector for Qdrant (which applies IDF at index time).
-    Uses hashlib.md5 for stable, deterministic token → index mapping across all processes.
-    IMPORTANT: Must stay in sync with the identical function in tasks.py so that
-    query-time sparse vectors align with the index-time sparse vectors stored in Qdrant.
+    Uses the shared vector_utils dictionary builder to ensure index/query consistency.
     """
-    import hashlib
-    import re
-
     from qdrant_client.models import SparseVector
-
-    tokens = re.findall(r"\w+", text.lower())
-    freq = {}
-    for t in tokens:
-        hex_digest = hashlib.md5(t.encode("utf-8")).hexdigest()
-        idx = int(hex_digest, 16) % (2**31 - 1)
-        freq[idx] = freq.get(idx, 0) + 1
-
-    indices = []
-    values = []
-    for k, v in freq.items():
-        indices.append(k)
-        values.append(float(v))
-    return SparseVector(indices=indices, values=values)
+    d = _compute_sparse_dict(text)
+    return SparseVector(indices=d["indices"], values=d["values"])
 
 
 def _deduplicate_by_parent(

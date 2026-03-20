@@ -89,6 +89,17 @@ async function apiFetch<T>(
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
+export async function checkOrgAvailable(orgId: string): Promise<boolean> {
+    try {
+        const res = await fetch(`${API_URL}/auth/check-org?org_id=${encodeURIComponent(orgId)}`);
+        if (!res.ok) return false;
+        const data = await res.json();
+        return !!data.available;
+    } catch {
+        return false;
+    }
+}
+
 export function getMe(token: string, orgSlug?: string) {
     return apiFetch<User>("/auth/me", { token, orgSlug });
 }

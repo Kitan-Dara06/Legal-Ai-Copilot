@@ -43,10 +43,10 @@ from app.dependencies import get_org_id_unified
 from app.models import File as FileModel
 from app.models import FileStatus
 from app.services.object_storage import upload_local_file_to_gcs
+from app.tasks_map_reduce import dispatch_digital_pdf, dispatch_scanned_pdf
 from app.tasks import (
     is_scanned_pdf,
-    process_digital_pdf,
-    process_scanned_pdf,
+    
     update_postgres_status_sync,
 )
 
@@ -130,9 +130,9 @@ def _upload_to_r2_and_enqueue(
     try:
         upload_local_file_to_gcs(temp_file_path, blob_name)
         if scanned:
-            process_scanned_pdf.delay(file_id, org_id, filename, blob_name)
+            dispatch_scanned_pdf.delay(file_id, org_id, filename, blob_name)
         else:
-            process_digital_pdf.delay(file_id, org_id, filename, blob_name)
+            dispatch_digital_pdf.delay(file_id, org_id, filename, blob_name)
     except Exception as e:
         logger.exception(
             "Background R2 upload or enqueue failed for file_id=%s: %s", file_id, e
@@ -190,11 +190,15 @@ async def upload_files(
 
         # ── Step 1: Stream bytes to disk and calculate hash simultaneously ───
         try:
+            total_bytes = 0
             with open(temp_file_path, "wb") as f:
                 while True:
                     chunk = await upload.read(1024 * 1024)  # Read in 1MB chunks
                     if not chunk:
                         break
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_SCANNED_PDF_SIZE_BYTES:
+                        raise ValueError(f"File exceeds maximum allowed size of {MAX_SCANNED_PDF_SIZE_BYTES / 1_048_576:.1f} MB.")
                     file_hash_obj.update(chunk)
                     f.write(chunk)
         except Exception as e:
@@ -393,22 +397,26 @@ async def reprocess_file(
     # Re-dispatch to the appropriate queue
     # Re-detect scan type from stored object
     try:
-        import tempfile
-
+        import uuid
+        import os
         from app.services.object_storage import download_file_from_gcs
 
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-            download_file_from_gcs(blob_name, tmp.name)
-            with open(tmp.name, "rb") as f:
+        temp_path = f"app/uploads/reprocess_{uuid.uuid4().hex}.pdf"
+        try:
+            download_file_from_gcs(blob_name, temp_path)
+            with open(temp_path, "rb") as f:
                 scanned = is_scanned_pdf(f.read(1024 * 1024 * 5))
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
     except Exception:
         scanned = False  # Default to digital on detection failure
 
     if scanned:
-        process_scanned_pdf.delay(file_id, org_id, file.filename, blob_name)
+        dispatch_scanned_pdf.delay(file_id, org_id, file.filename, blob_name)
         queue_name = "ocr"
     else:
-        process_digital_pdf.delay(file_id, org_id, file.filename, blob_name)
+        dispatch_digital_pdf.delay(file_id, org_id, file.filename, blob_name)
         queue_name = "default"
 
     return {

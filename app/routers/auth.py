@@ -85,6 +85,20 @@ def generate_api_key() -> tuple[str, str, str]:
 logger = logging.getLogger(__name__)
 
 
+@router.get("/check-org")
+async def check_org(
+    org_id: str = Query(..., min_length=3, max_length=50),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Checks if an organization slug is available before proceeding with user signup.
+    Returns 200 { "available": bool }
+    """
+    stmt = select(Organization).where(Organization.slug == org_id.lower())
+    existing = (await db.execute(stmt)).scalar_one_or_none()
+    return {"available": existing is None}
+
+
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
 async def signup(

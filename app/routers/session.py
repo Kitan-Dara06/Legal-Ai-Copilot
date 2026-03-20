@@ -59,6 +59,12 @@ async def create_new_session(
     Create a new working session with a list of READY file IDs.
     Returns a session_id to use in subsequent queries.
     """
+    if len(file_ids) > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot exceed 100 files per session to ensure system performance.",
+        )
+
     # Verify all files exist, belong to this org, and are READY
     result = await db.execute(
         select(FileModel).where(
