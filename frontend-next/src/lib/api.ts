@@ -152,6 +152,18 @@ export function acceptInvite(payload: {
     });
 }
 
+export function acceptExistingInvite(token: string, inviteToken: string) {
+    return apiFetch<{ message: string; org_id: string }>(
+        "/auth/accept-invite-by-token",
+        {
+            token,
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: inviteToken }),
+        },
+    );
+}
+
 // ── Files ────────────────────────────────────────────────────────────────────
 
 export function listFiles(token: string, orgSlug?: string) {

@@ -4,11 +4,11 @@ export const dynamic = 'force-dynamic';
 
 import { Suspense, useState, useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { verifyInviteToken, acceptInvite } from "@/lib/api";
+import { verifyInviteToken, acceptInvite, acceptExistingInvite } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
-import { Scale, ShieldCheck, Mail, User, Lock, ArrowRight } from "lucide-react";
+import { Scale, ShieldCheck, Mail, User, Lock, ArrowRight, LogIn } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
 function InviteContent() {
@@ -25,7 +25,18 @@ function InviteContent() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
 
+  const [activeSessionToken, setActiveSessionToken] = useState<string | null>(null);
+
   useEffect(() => {
+    // Check if user is already logged in
+    const checkSession = async () => {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        setActiveSessionToken(session.access_token);
+      }
+    };
+    checkSession();
     if (!token) {
       setError("Invalid or missing invitation token. Please check your email link.");
       setIsLoading(false);
@@ -45,7 +56,27 @@ function InviteContent() {
 
   const handleAccept = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!token || !password || !fullName) return;
+    if (!token) return;
+
+    // For existing users
+    if (activeSessionToken) {
+      setIsSubmitting(true);
+      setError("");
+      try {
+        await acceptExistingInvite(activeSessionToken, token);
+        setSuccess(true);
+        setTimeout(() => {
+          router.push("/chat");
+        }, 1500);
+      } catch (err: any) {
+        setError(err.message || "Failed to accept invitation. Make sure you are logged in with the invited email.");
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
+    // For new users
+    if (!password || !fullName) return;
 
     setIsSubmitting(true);
     setError("");
@@ -169,51 +200,81 @@ function InviteContent() {
                     </div>
                   </div>
 
-                  <div className="space-y-2.5">
-                    <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider ml-1">Full Name</label>
-                    <div className="relative group">
-                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                        <User className="h-4 w-4 text-slate-500 group-focus-within:text-blue-500 transition-colors" />
-                      </div>
-                      <Input
-                        placeholder="Counselor Name"
-                        value={fullName}
-                        onChange={(e) => setFullName(e.target.value)}
-                        required
-                        autoComplete="name"
-                        className="pl-10 h-12 bg-slate-950/50 border-slate-800 transition-all hover:border-slate-700 focus:border-blue-500/50 focus:ring-blue-500/20 text-white placeholder:text-slate-600"
-                      />
+                  {activeSessionToken ? (
+                    <div className="pt-4">
+                      <Button 
+                        type="submit" 
+                        className="w-full h-12 bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-lg shadow-blue-600/20 group"
+                        isLoading={isSubmitting}
+                      >
+                        Accept Invitation <ArrowRight className="ml-2 h-4 w-4 group-hover:translate-x-1 transition-transform" />
+                      </Button>
+                      <p className="text-center text-xs text-slate-400 mt-4">
+                        You are already logged in. Click above to join the workspace.
+                      </p>
                     </div>
-                  </div>
-
-                  <div className="space-y-2.5">
-                    <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider ml-1">Security Credentials</label>
-                    <div className="relative group">
-                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                        <Lock className="h-4 w-4 text-slate-500 group-focus-within:text-blue-500 transition-colors" />
+                  ) : (
+                    <>
+                      <div className="space-y-2.5">
+                        <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider ml-1">Full Name</label>
+                        <div className="relative group">
+                          <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                            <User className="h-4 w-4 text-slate-500 group-focus-within:text-blue-500 transition-colors" />
+                          </div>
+                          <Input
+                            placeholder="Counselor Name"
+                            value={fullName}
+                            onChange={(e) => setFullName(e.target.value)}
+                            required
+                            autoComplete="name"
+                            className="pl-10 h-12 bg-slate-950/50 border-slate-800 transition-all hover:border-slate-700 focus:border-blue-500/50 focus:ring-blue-500/20 text-white placeholder:text-slate-600"
+                          />
+                        </div>
                       </div>
-                      <Input
-                        type="password"
-                        placeholder="••••••••••••"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        required
-                        minLength={8}
-                        autoComplete="new-password"
-                        className="pl-10 h-12 bg-slate-950/50 border-slate-800 transition-all hover:border-slate-700 focus:border-blue-500/50 focus:ring-blue-500/20 text-white placeholder:text-slate-600"
-                      />
-                    </div>
-                  </div>
 
-                  <Button 
-                    type="submit" 
-                    className="w-full h-12 mt-4 bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-lg shadow-blue-600/20 group"
-                    isLoading={isSubmitting}
-                  >
-                    Complete Registration <ArrowRight className="ml-2 h-4 w-4 group-hover:translate-x-1 transition-transform" />
-                  </Button>
+                      <div className="space-y-2.5">
+                        <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider ml-1">Security Credentials</label>
+                        <div className="relative group">
+                          <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                            <Lock className="h-4 w-4 text-slate-500 group-focus-within:text-blue-500 transition-colors" />
+                          </div>
+                          <Input
+                            type="password"
+                            placeholder="••••••••••••"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            required
+                            minLength={8}
+                            autoComplete="new-password"
+                            className="pl-10 h-12 bg-slate-950/50 border-slate-800 transition-all hover:border-slate-700 focus:border-blue-500/50 focus:ring-blue-500/20 text-white placeholder:text-slate-600"
+                          />
+                        </div>
+                      </div>
 
-                  <p className="text-center text-[10px] text-slate-600 px-4 leading-relaxed">
+                      <Button 
+                        type="submit" 
+                        className="w-full h-12 mt-4 bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-lg shadow-blue-600/20 group"
+                        isLoading={isSubmitting}
+                      >
+                        Complete Registration <ArrowRight className="ml-2 h-4 w-4 group-hover:translate-x-1 transition-transform" />
+                      </Button>
+
+                      <div className="text-center pt-2">
+                        <p className="text-sm text-slate-400">
+                          Already have an account?{" "}
+                          <button
+                            type="button"
+                            onClick={() => router.push(`/login?redirect=/invite?token=${token}`)}
+                            className="text-blue-400 hover:text-blue-300 font-medium transition-colors"
+                          >
+                            Log in first
+                          </button>
+                        </p>
+                      </div>
+                    </>
+                  )}
+
+                  <p className="text-center text-[10px] text-slate-600 px-4 leading-relaxed pt-2">
                     By accepting this invitation, you agree to the Terms of Service and Privacy Policy of the Legal AI Copilot platform.
                   </p>
                 </form>

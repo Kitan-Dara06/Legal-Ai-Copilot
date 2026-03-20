@@ -5,6 +5,7 @@ import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { createClient } from "@/lib/supabase/client";
 import { getMe, AppError } from "@/lib/api";
+import { useSearchParams } from "next/navigation";
 
 export function LoginForm() {
     const [email, setEmail] = useState("");
@@ -13,6 +14,8 @@ export function LoginForm() {
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState("");
     const supabase = createClient();
+    const searchParams = useSearchParams();
+    const redirectUrl = searchParams?.get("redirect");
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -31,16 +34,17 @@ export function LoginForm() {
         }
 
         // Check whether this user has a local DB record (org set up).
-        // Route to /setup if not, /chat if all good.
+        // Route to /setup if not, /chat or custom redirect if all good.
         try {
             await getMe(data.session!.access_token);
-            window.location.href = "/chat";
+            window.location.href = redirectUrl || "/chat";
         } catch (err) {
             if (err instanceof AppError && (err.code === "setup_required" || err.status === 403)) {
+                // Ignore redirect for setup because they strictly must do setup
                 window.location.href = "/setup";
             } else {
-                // Unexpected error — still send to chat, which will handle it
-                window.location.href = "/chat";
+                // Unexpected error 
+                window.location.href = redirectUrl || "/chat";
             }
         }
     };
