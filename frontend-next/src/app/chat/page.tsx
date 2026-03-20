@@ -43,23 +43,54 @@ export default function ChatPage() {
     // Session
     const [session, setSession] = useState<SessionResponse | null>(null);
     const [isCreatingSession, setIsCreatingSession] = useState(false);
-    const [isUploadingToSession, setIsUploadingToSession] = useState(false);
+    const [selectedFileIds, setSelectedFileIds] = useState<number[]>([]);
 
     // Chat
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [isAnswering, setIsAnswering] = useState(false);
 
-    // Initialize Local Storage State
+    // Initialize Local Storage State for messages and selections
     useEffect(() => {
         try {
-            const savedSession = localStorage.getItem("legalrag_active_session");
             const savedMessages = localStorage.getItem("legalrag_active_messages");
-            if (savedSession) setSession(JSON.parse(savedSession));
+            const savedSelections = localStorage.getItem("legalrag_selected_files");
+            
             if (savedMessages) setMessages(JSON.parse(savedMessages));
+            if (savedSelections) setSelectedFileIds(JSON.parse(savedSelections));
         } catch (e) {
-            console.error("Failed to restore session from local storage", e);
+            console.error("Failed to restore state from local storage", e);
         }
     }, []);
+
+    // Hydrate Session from API once user/token are ready
+    useEffect(() => {
+        if (!token || !user?.org_slug) return;
+        
+        try {
+            const savedSessionStr = localStorage.getItem("legalrag_active_session");
+            if (savedSessionStr) {
+                const savedSession = JSON.parse(savedSessionStr);
+                if (savedSession?.session_id) {
+                    // Fetch full session details so we get the .files array
+                    getSession(token, savedSession.session_id, user.org_slug)
+                        .then(fullSession => {
+                            setSession(fullSession);
+                            // Verify selections match the hydrated session if they were lost
+                            if (fullSession.files && fullSession.files.length > 0 && selectedFileIds.length === 0) {
+                                setSelectedFileIds(fullSession.files.map(f => f.file_id));
+                            }
+                        })
+                        .catch(err => {
+                            console.error("Failed to restore session details, it may have expired", err);
+                            setSession(null);
+                            localStorage.removeItem("legalrag_active_session");
+                        });
+                }
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    }, [token, user?.org_slug]);
 
     // Sync to Local Storage
     useEffect(() => {
@@ -77,6 +108,10 @@ export default function ChatPage() {
             localStorage.removeItem("legalrag_active_messages");
         }
     }, [messages]);
+
+    useEffect(() => {
+        localStorage.setItem("legalrag_selected_files", JSON.stringify(selectedFileIds));
+    }, [selectedFileIds]);
 
     // Initialize Auth
     useEffect(() => {
@@ -273,12 +308,17 @@ export default function ChatPage() {
             }
 
             console.log(
-                "[ChatPage] Updating state with new session:",
+                "[ChatPage] Fetching full session details for:",
                 res.session_id,
             );
+            const fullSession = await getSession(
+                token,
+                res.session_id,
+                user.org_slug,
+            );
 
-            // Critical: Update state
-            setSession(res);
+            // Critical: Update state with the FULL session (includes .files)
+            setSession(fullSession);
 
             console.log("[ChatPage] Setting initial messages...");
             const initialMessage: ChatMessage = {
@@ -309,11 +349,19 @@ export default function ChatPage() {
             await deleteSession(token, session.session_id, user.org_slug);
             setSession(null);
             setMessages([]);
+            setSelectedFileIds([]);
             localStorage.removeItem("legalrag_active_session");
             localStorage.removeItem("legalrag_active_messages");
+            localStorage.removeItem("legalrag_selected_files");
         } catch (e) {
             alert("Failed to terminate session");
         }
+    };
+
+    const handleToggleSelection = (id: number) => {
+        setSelectedFileIds((prev) =>
+            prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+        );
     };
 
     // Upload multiple file IDs at once (simplified since we have IDs)
@@ -385,6 +433,8 @@ export default function ChatPage() {
                 onUploadSuccess={fetchFiles}
                 onDeleteFile={handleDeleteFile}
                 session={session}
+                selectedFileIds={selectedFileIds}
+                onToggleSelection={handleToggleSelection}
                 onCreateSession={handleCreateSession}
                 onTerminate={handleTerminateSession}
                 onUploadToSession={handleUploadToSession}

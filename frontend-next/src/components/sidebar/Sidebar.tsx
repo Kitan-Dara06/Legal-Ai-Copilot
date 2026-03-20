@@ -23,6 +23,8 @@ interface SidebarProps {
     isCreatingSession: boolean;
     isUploadingToSession: boolean;
     onSwitchOrg: (orgSlug: string) => void;
+    selectedFileIds: number[];
+    onToggleSelection: (id: number) => void;
 }
 
 export function Sidebar({
@@ -39,8 +41,9 @@ export function Sidebar({
     isCreatingSession,
     isUploadingToSession,
     onSwitchOrg,
+    selectedFileIds,
+    onToggleSelection,
 }: SidebarProps) {
-    const [selectedFileIds, setSelectedFileIds] = useState<number[]>([]);
     const [inviteEmail, setInviteEmail] = useState("");
     const [inviteStatus, setInviteStatus] = useState<
         "idle" | "loading" | "success" | "error"
@@ -49,12 +52,6 @@ export function Sidebar({
     const [showMembersModal, setShowMembersModal] = useState(false);
     const [members, setMembers] = useState<OrgMember[]>([]);
     const [membersLoading, setMembersLoading] = useState(false);
-
-    const handleToggleSelection = (id: number) => {
-        setSelectedFileIds((prev) =>
-            prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-        );
-    };
 
     const handleInvite = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -169,7 +166,7 @@ export function Sidebar({
                         <FileList
                             files={files}
                             selectedIds={selectedFileIds}
-                            onToggleSelection={handleToggleSelection}
+                            onToggleSelection={onToggleSelection}
                             onDeleteFile={onDeleteFile}
                             isLoading={filesLoading}
                         />
@@ -183,10 +180,7 @@ export function Sidebar({
                             onCreateSession={() =>
                                 onCreateSession(selectedFileIds)
                             }
-                            onTerminate={() => {
-                                onTerminate();
-                                setSelectedFileIds([]); // Clear selection when terminating
-                            }}
+                            onTerminate={onTerminate}
                             onUploadToSession={() =>
                                 onUploadToSession(selectedFileIds)
                             }
