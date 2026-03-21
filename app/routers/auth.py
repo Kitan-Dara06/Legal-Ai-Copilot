@@ -450,10 +450,9 @@ async def invite_user_by_email(
 
     try:
         admin_client = create_supabase_client(supabase_url, service_role_key)
-        encoded_next = urllib.parse.quote("/login?type=recovery")
         admin_client.auth.admin.invite_user_by_email(
             payload.email,
-            options={"redirect_to": f"{frontend_url}/auth/callback?next={encoded_next}"},
+            options={"redirect_to": f"{frontend_url}/login?type=recovery"},
         )
     except AuthApiError as e:
         # Already registered in Supabase: still add them via invite link (they accept in-app).
