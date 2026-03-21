@@ -292,6 +292,7 @@ def search_hybrid_qdrant(
             prefetch=[
                 Prefetch(
                     query=query_vector,
+                    using="dense",
                     filter=search_filter,
                     limit=top_k * 5,
                 ),

@@ -94,10 +94,12 @@ def ensure_collection_exists(client: QdrantClient):
     if QDRANT_COLLECTION not in existing:
         client.create_collection(
             collection_name=QDRANT_COLLECTION,
-            vectors_config=VectorParams(
-                size=1024,  # BGE-M3 output size via OpenRouter
-                distance=Distance.COSINE,
-            ),
+            vectors_config={
+                "dense": VectorParams(
+                    size=1024,  # BGE-M3 output size via OpenRouter
+                    distance=Distance.COSINE,
+                )
+            },
             sparse_vectors_config={
                 "text-sparse": SparseVectorParams(modifier=Modifier.IDF)
             },

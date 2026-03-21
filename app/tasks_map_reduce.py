@@ -144,7 +144,7 @@ def embed_and_upsert_chunk_batch(file_id: int, org_id: str, filename: str, chunk
         batch_points.append(
             PointStruct(
                 id=point_id,
-                vector={"": vector, "text-sparse": sparse_vec},
+                vector={"dense": vector, "text-sparse": sparse_vec},
                 payload={
                     "file_id": file_id,
                     "org_id": org_id,
@@ -160,7 +160,7 @@ def embed_and_upsert_chunk_batch(file_id: int, org_id: str, filename: str, chunk
         
     if batch_points:
         qdrant.upsert(
-            collection_name=os.getenv("QDRANT_COLLECTION", "legal_contracts"),
+            collection_name="legal_chunks",
             points=batch_points
         )
     return {"status": "success", "upserted": len(batch_points)}
