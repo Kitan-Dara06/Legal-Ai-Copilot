@@ -14,24 +14,6 @@ services:
         restart: always
         networks: [internal]
 
-    frontend:
-        build:
-            context: ./frontend-next
-            dockerfile: Dockerfile
-            args:
-                - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
-                - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
-                - NEXT_PUBLIC_API_URL=https://legalrag.codes/api
-        env_file:
-            - .env.production
-        environment:
-            - NEXT_PUBLIC_API_URL=https://legalrag.codes/api
-            - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
-            - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
-        restart: always
-        depends_on: [api]
-        networks: [internal]
-
     worker_pdf:
         build:
             context: .
@@ -76,7 +58,6 @@ services:
         # Note: upload size limits are enforced in nginx.conf (client_max_body_size)
         depends_on:
             - api
-            - frontend
         restart: always
         networks: [internal]
 
