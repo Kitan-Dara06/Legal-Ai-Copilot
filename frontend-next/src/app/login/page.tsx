@@ -18,14 +18,40 @@ function LoginContent() {
   const [isRecovering, setIsRecovering] = useState(false);
   const [error, setError] = useState("");
 
-  const supabase = createClient();
+  const [supabase] = useState(() => createClient());
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
-    // If we're redirected back from auth/callback with a recovery flag
+    // 1. Manually intercept and force the session from the URL hash
+    // This solves situations where SSR hydration drops the Implicit Flow session
+    if (typeof window !== "undefined" && window.location.hash) {
+      const hashParams = new URLSearchParams(window.location.hash.substring(1));
+      const accessToken = hashParams.get("access_token");
+      const refreshToken = hashParams.get("refresh_token");
+      const type = hashParams.get("type");
+
+      if (accessToken && refreshToken) {
+        supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken })
+          .then(({ error }) => {
+            if (error) console.error("Error setting session from hash:", error);
+            else {
+              // Strip the hash from the URL dynamically so we don't leak it
+              window.history.replaceState(null, "", window.location.pathname + window.location.search);
+            }
+          });
+      }
+      
+      // Auto-trigger recovery tab if the hash explicitly declares invite recovery
+      if (type === "invite" || type === "recovery") {
+        setActiveTab("recovery");
+      }
+    }
+
+    // 2. Fallback to standard URL query checking
     if (searchParams?.get("type") === "recovery") {
       setActiveTab("recovery");
     }
-  }, [searchParams]);
+  }, [searchParams, supabase]);
 
   const handleUpdatePassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -68,16 +94,29 @@ function LoginContent() {
               <form onSubmit={handleUpdatePassword} className="space-y-4">
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-slate-300">New Password</label>
-                  <input
-                    type="password"
-                    key="recovery_new_pw"
-                    className="flex h-10 w-full rounded-md border text-sm px-3 py-2 glass-input focus:glass-input-focus text-white border-slate-800"
-                    placeholder="••••••••"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    required
-                    minLength={8}
-                  />
+                  <div className="relative">
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      key="recovery_new_pw"
+                      className="flex h-10 w-full rounded-md border text-sm px-3 py-2 pr-10 glass-input focus:glass-input-focus text-white border-slate-800"
+                      placeholder="••••••••"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      required
+                      minLength={8}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-300"
+                    >
+                      {showPassword ? (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
+                      ) : (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                      )}
+                    </button>
+                  </div>
                 </div>
                 {error && <div className="text-sm text-red-500">{error}</div>}
                 
