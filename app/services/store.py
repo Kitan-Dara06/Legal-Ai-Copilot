@@ -150,6 +150,7 @@ def search_hybrid(
             prefetch=[
                 Prefetch(
                     query=query_vector,
+                    using="dense",
                     filter=search_filter,
                     limit=top_k * 3,
                 ),

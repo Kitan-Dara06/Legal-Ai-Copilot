@@ -84,9 +84,17 @@ export default function ChatPage() {
                             }
                         })
                         .catch(err => {
-                            console.error("Failed to restore session details, it may have expired", err);
-                            setSession(null);
-                            localStorage.removeItem("legalrag_active_session");
+                            console.error("Failed to restore session details:", err);
+                            
+                            // Only clear local storage if the session explicitly doesn't exist anymore (404)
+                            // or if the error indicates an invalid workspace.
+                            if (err instanceof AppError && (err.status === 404 || err.status === 400)) {
+                                console.warn("Session expired or invalid, cleaning up state...");
+                                setSession(null);
+                                localStorage.removeItem("legalrag_active_session");
+                            }
+                            // Otherwise, we keep the session_id in localStorage so it can be retried 
+                            // later or after the backend recover.
                         });
                 }
             }
