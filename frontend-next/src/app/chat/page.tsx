@@ -107,21 +107,19 @@ export default function ChatPage() {
     useEffect(() => {
         if (session) {
             localStorage.setItem("legalrag_active_session", JSON.stringify(session));
-        } else {
-            localStorage.removeItem("legalrag_active_session");
         }
     }, [session]);
 
     useEffect(() => {
         if (messages.length > 0) {
             localStorage.setItem("legalrag_active_messages", JSON.stringify(messages));
-        } else {
-            localStorage.removeItem("legalrag_active_messages");
         }
     }, [messages]);
 
     useEffect(() => {
-        localStorage.setItem("legalrag_selected_files", JSON.stringify(selectedFileIds));
+        if (selectedFileIds.length > 0) {
+            localStorage.setItem("legalrag_selected_files", JSON.stringify(selectedFileIds));
+        }
     }, [selectedFileIds]);
 
     // Initialize Auth
