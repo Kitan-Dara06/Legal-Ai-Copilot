@@ -11,7 +11,7 @@ __pycache__/
 *.log
 logs/
 results/
-scripts/
+# scripts/ (Whitelisted for maintenance)
 tests/
 *.egg-info/
 .mypy_cache/
