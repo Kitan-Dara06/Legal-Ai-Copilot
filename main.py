@@ -122,6 +122,7 @@ if not _allowed_origins:
     _allowed_origins = [
         "https://legalrag.codes",
         "https://www.legalrag.codes",
+        "https://legal-ai-copilot-xi.vercel.app",
         "http://localhost:8501",
         "http://localhost:3000",
     ]
