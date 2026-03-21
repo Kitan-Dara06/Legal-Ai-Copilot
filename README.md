@@ -85,7 +85,7 @@ celery -A app.worker.celery_app worker -Q ocr --loglevel=info
 ```bash
 streamlit run frontend/app.py
 ```
-*UI available at `http://localhost:8501`*
+*UI available at `[https://legal-ai-copilot-xi.vercel.app/login]`*
 
 ---
 
