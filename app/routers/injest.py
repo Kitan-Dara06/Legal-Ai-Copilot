@@ -73,7 +73,11 @@ MAX_DIGITAL_PDF_SIZE_BYTES = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@router.get("/list")  # MUST be before /{file_id} to avoid route conflict
+@router.get(
+    "/list",
+    summary="List Organization Files",
+    response_description="A paginated list of documents that are ready for AI queries.",
+)  # MUST be before /{file_id} to avoid route conflict
 async def list_files(
     org_id: str = Depends(get_org_id_unified),
     limit: int = 50,
@@ -151,7 +155,12 @@ def _upload_to_r2_and_enqueue(
             logger.warning("Could not remove temp file %s: %s", temp_file_path, e)
 
 
-@router.post("/upload", status_code=202)
+@router.post(
+    "/upload",
+    status_code=202,
+    summary="Upload & Ingest PDFs",
+    response_description="Returns the immediate ingestion status of each uploaded file while background workers process the arrays.",
+)
 @limiter.limit("10/minute")
 async def upload_files(
     request: Request,

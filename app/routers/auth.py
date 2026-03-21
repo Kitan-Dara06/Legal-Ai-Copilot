@@ -227,7 +227,12 @@ async def login(
     }
 
 
-@router.post("/setup-org", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/setup-org",
+    status_code=status.HTTP_201_CREATED,
+    summary="Initialize User Workspace",
+    response_description="Binds a Supabase user to a new internal organization.",
+)
 @limiter.limit("10/minute")
 async def setup_org(
     request: Request,
@@ -400,7 +405,11 @@ async def invite_user(
     }
 
 
-@router.post("/invite-by-email")
+@router.post(
+    "/invite-by-email",
+    summary="Send Magic Link Invite",
+    response_description="Dispatches a Supabase Magic Link to add a coworker to your organization.",
+)
 async def invite_user_by_email(
     request: Request,
     payload: InviteRequest,
@@ -637,7 +646,11 @@ async def revoke_key(
     return {"message": f"API Key starting with '{payload.prefix}' has been revoked."}
 
 
-@router.get("/members")
+@router.get(
+    "/members",
+    summary="List Organization Members",
+    response_description="Returns all users currently attached to your workspace.",
+)
 async def my_org_members(
     ctx: AuthContext = Depends(get_supabase_admin_context),
     db: AsyncSession = Depends(get_db),
@@ -708,7 +721,11 @@ async def remove_member(
     return {"message": "Member removed successfully."}
 
 
-@router.get("/me")
+@router.get(
+    "/me",
+    summary="Get Current User Identity",
+    response_description="Returns the user's role and their active organization ID.",
+)
 async def who_am_i(
     ctx=Depends(get_supabase_auth_context), db: AsyncSession = Depends(get_db)
 ):

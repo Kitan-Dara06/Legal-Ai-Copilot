@@ -47,7 +47,11 @@ MAX_DIGITAL_FILE_SIZE_BYTES = 10 * 1024 * 1024
 MAX_SCANNED_FILE_SIZE_BYTES = 100 * 1024 * 1024
 
 
-@router.post("/")
+@router.post(
+    "/",
+    summary="Create Workspace Session",
+    response_description="Returns a temporary session_id for a selected group of files.",
+)
 @limiter.limit("20/minute")
 async def create_new_session(
     request: Request,
@@ -100,7 +104,11 @@ async def create_new_session(
     }
 
 
-@router.get("/{session_id}")
+@router.get(
+    "/{session_id}",
+    summary="Get Session Details",
+    response_description="Returns the list of files currently active in the session.",
+)
 async def get_session_info(
     session_id: str,
     org_id: str = Depends(get_org_id_unified),
@@ -151,7 +159,11 @@ async def get_session_info(
     }
 
 
-@router.post("/{session_id}/upload")
+@router.post(
+    "/{session_id}/upload",
+    summary="Upload Direct to Session",
+    response_description="Uploads a file and immediately associates it with your active session.",
+)
 @limiter.limit("10/minute")
 async def upload_into_session(
     request: Request,
@@ -322,7 +334,11 @@ async def upload_into_session(
     }
 
 
-@router.delete("/{session_id}/files/{file_id}")
+@router.delete(
+    "/{session_id}/files/{file_id}",
+    summary="Remove File from Session",
+    response_description="Unlinks a document from your active workspace without deleting it permanently.",
+)
 async def remove_file_from_session(
     session_id: str,
     file_id: int,
@@ -357,7 +373,11 @@ async def remove_file_from_session(
     }
 
 
-@router.post("/{session_id}/renew")
+@router.post(
+    "/{session_id}/renew",
+    summary="Renew Session TTL",
+    response_description="Resets the 48-hour expiration timer on the workspace.",
+)
 async def renew_session(
     session_id: str,
     org_id: str = Depends(get_org_id_unified),
@@ -391,7 +411,11 @@ async def renew_session(
     return {"message": "Session renewed for another 48 hours."}
 
 
-@router.delete("/{session_id}")
+@router.delete(
+    "/{session_id}",
+    summary="Close Session",
+    response_description="Terminates the workspace array entirely.",
+)
 async def close_session(
     session_id: str,
     org_id: str = Depends(get_org_id_unified),

@@ -21,7 +21,11 @@ router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
 
 
-@router.post("/ask-agent")
+@router.post(
+    "/ask-agent",
+    summary="Query AI Agent (RAG)",
+    response_description="Returns the execution trace and final synthesized answer from the agentic RAG pipeline.",
+)
 @limiter.limit("30/minute")
 async def ask_agent(
     request: Request,

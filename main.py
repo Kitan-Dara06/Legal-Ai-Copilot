@@ -98,12 +98,56 @@ async def lifespan(app: FastAPI):
     # Shutdown (nothing to clean up currently)
 
 
+# ── OpenAPI Description & Tags ───────────────────────────────────────────────
+description = """
+# Legal AI Copilot API 🚀
+
+An intelligent, vector-backed RAG (Retrieval-Augmented Generation) engine designed specifically for analyzing and questioning corporate contracts.
+
+## Features
+* **Authentication**: Multi-tenant isolation and user management via Supabase.
+* **Document Ingestion**: Supports fast uploaded chunks and async Map-Reduce OCR for complex PDFs.
+* **Workspace Sessions**: "Filing Cabinet" metaphor for grouping documents together for a specific task.
+* **Hybrid Search**: Fuses semantic vector search (Cohere embeddings) with sparse keyword retrieval (Qdrant).
+* **AI Agent**: Orchestrates multi-step reasoning plans to extract and synthesize legal facts.
+"""
+
+tags_metadata = [
+    {
+        "name": "Authentication & Orgs",
+        "description": "Tenant isolation, login state, and workspace membership management.",
+    },
+    {
+        "name": "Files & Ingestion",
+        "description": "Upload pipelines, asynchronous document processing, and storage management.",
+    },
+    {
+        "name": "Session Management",
+        "description": "Create ad-hoc groupings of files for scoped questions and analysis.",
+    },
+    {
+        "name": "Queries & AI Agents",
+        "description": "Run standard and agentic RAG searches across your organized legal content.",
+    },
+]
+
 # NOTE (proxy headers):
 # This app is intended to run behind Nginx (see deploy/nginx.conf).
 # Uvicorn should be started with proxy headers enabled so the app sees the real client IP/scheme.
 # In Docker Compose, update the api command to include:
 #   uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=*
-app = FastAPI(title="Legal RAG API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Legal RAG API",
+    version="2.0.0",
+    description=description,
+    openapi_tags=tags_metadata,
+    contact={
+        "name": "API Support",
+        "url": "https://legalrag.codes/support",
+        "email": "support@legalrag.codes",
+    },
+    lifespan=lifespan,
+)
 app.state.limiter = limiter
 app.add_exception_handler(
     RateLimitExceeded,
