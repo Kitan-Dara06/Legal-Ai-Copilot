@@ -243,8 +243,23 @@ export default function ChatPage() {
             if (!isSilent) setFilesLoading(true);
             listFiles(token, user.org_slug)
                 .then((res) => {
-                    // Update the list silently to avoid UI flickering
-                    setFiles(res.files || []);
+                    const currentFiles = res.files || [];
+                    setFiles(currentFiles);
+
+                    // Sync selection: remove any IDs that are no longer in the file list
+                    if (currentFiles.length > 0) {
+                        const validIds = new Set(currentFiles.map(f => f.file_id));
+                        setSelectedFileIds(prev => {
+                            const filtered = prev.filter(id => validIds.has(id));
+                            if (filtered.length !== prev.length) {
+                                console.log("[ChatPage] Pruned orphaned file selections", { before: prev.length, after: filtered.length });
+                            }
+                            return filtered;
+                        });
+                    } else {
+                        // If library is now empty, clear selections entirely
+                        setSelectedFileIds([]);
+                    }
                 })
                 .catch(console.error)
                 .finally(() => {
