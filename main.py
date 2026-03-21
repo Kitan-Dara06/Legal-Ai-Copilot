@@ -127,6 +127,10 @@ if not _allowed_origins:
         "http://localhost:3000",
     ]
 
+# HARD OVERRIDE: Ensure Vercel is always permitted regardless of .env configuration.
+if "https://legal-ai-copilot-xi.vercel.app" not in _allowed_origins:
+    _allowed_origins.append("https://legal-ai-copilot-xi.vercel.app")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
