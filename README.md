@@ -69,7 +69,7 @@ In a production or local environment, you need to spin up the backend, the backg
 ```bash
 uvicorn main:app --reload --env-file .env
 ```
-*API docs available at `http://localhost:8000/docs`*
+*API docs available at `https://legalrag.codes/docs`*
 
 **Terminal 2: Celery Worker (PDF Processor)**
 ```bash
@@ -85,7 +85,7 @@ celery -A app.worker.celery_app worker -Q ocr --loglevel=info
 ```bash
 streamlit run frontend/app.py
 ```
-*UI available at `[https://legal-ai-copilot-xi.vercel.app/login]`*
+*UI available at `https://legal-ai-copilot-xi.vercel.app/login`*
 
 ---
 
