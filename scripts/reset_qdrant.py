@@ -1,7 +1,11 @@
-import os, asyncio
+import os, asyncio, sys
 from qdrant_client import QdrantClient
 from dotenv import load_dotenv
 from sqlalchemy import text
+
+# Force current directory into path so 'app' is findable
+sys.path.append(os.getcwd())
+
 from app.database import engine
 
 load_dotenv()
