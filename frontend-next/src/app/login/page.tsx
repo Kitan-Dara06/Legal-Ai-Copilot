@@ -32,7 +32,7 @@ function LoginContent() {
 
       if (accessToken && refreshToken) {
         supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken })
-          .then(({ error }) => {
+          .then(({ error }: { error: any }) => {
             if (error) console.error("Error setting session from hash:", error);
             else {
               // Strip the hash from the URL dynamically so we don't leak it
