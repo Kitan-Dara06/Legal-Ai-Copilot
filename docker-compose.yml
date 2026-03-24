@@ -46,6 +46,19 @@ services:
             - api
         networks: [internal]
 
+    rabbitmq:
+        image: rabbitmq:3-management-alpine
+        ports:
+            - "5672:5672"
+            - "15672:15672"
+        environment:
+            RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+            RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+        restart: always
+        networks: [internal]
+        volumes:
+            - rabbitmq_data:/var/lib/rabbitmq
+
     nginx:
         image: nginx:alpine
         volumes:
@@ -64,3 +77,6 @@ services:
 networks:
     internal:
         driver: bridge
+
+volumes:
+    rabbitmq_data:

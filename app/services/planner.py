@@ -1,14 +1,14 @@
 """
-ReAct Agent for Legal RAG
-Replaces the deterministic classify→build→execute pipeline with a
-Thought/Action/Observation loop that adapts based on tool outputs.
+Deterministic Planner for Legal RAG.
+Classifies query intent, builds a tool execution plan, and runs it sequentially.
+Context (chunks, file IDs, structured data) is passed between steps.
 """
 
 # app/services/planner.py
 import json
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from app.services.legal_primitives import (
     draft_tool,
@@ -16,6 +16,8 @@ from app.services.legal_primitives import (
     read_tool,
     search_tool,
 )
+
+logger = logging.getLogger(__name__)
 
 # Map tool names to functions
 LEGAL_TOOLS = {
@@ -25,14 +27,12 @@ LEGAL_TOOLS = {
     "draft_tool": draft_tool,
 }
 
-
 from app.services.legal_primitives import groq_client
 
-logger = logging.getLogger(__name__)
 
 async def _classify_intent(question: str) -> str:
     """LLM-based classification to route query to the right toolchain"""
-    
+
     system_prompt = """You are a legal intent classifier.
 Analyze the user's question and classify it into EXACTLY ONE of these three categories:
 1. "logic_check": Questions about validity, expiration, termination, active dates, or if a contract is currently in force.
@@ -54,12 +54,13 @@ You must output strictly valid JSON matching this schema:
             response_format={"type": "json_object"},
             temperature=0,
         )
-        
+
         raw_output = response.choices[0].message.content
         result = json.loads(raw_output)
         intent = result.get("intent", "search")
         if intent not in ["logic_check", "extraction", "search"]:
             intent = "search"
+        logger.info("Intent classified as: %s", intent)
         return intent
 
     except Exception as e:
@@ -77,9 +78,9 @@ async def create_execution_plan(question: str) -> Dict[str, Any]:
 
     if intent == "logic_check":
         tools = [
-            {"name": "search_tool", "params": {"top_k": 3}},  # Find relevant contract
+            {"name": "search_tool", "params": {"top_k": 3}},
             {"name": "read_tool", "params": {"target_fields": ["effective_date", "end_date", "termination_date", "parties"]}},
-            {"name": "logic_tool", "params": {}},  # Uses extracted data
+            {"name": "logic_tool", "params": {}},
             {"name": "draft_tool", "params": {"output_format": "prose"}},
         ]
     elif intent == "extraction":
@@ -101,88 +102,120 @@ async def create_execution_plan(question: str) -> Dict[str, Any]:
     }
 
 
-async def execute_plan(plan: Dict[str, Any], question: str, mode: str = "hybrid", file_ids: list = None, *, org_id: str) -> Dict[str, Any]:
+async def execute_plan(
+    plan: Dict[str, Any],
+    question: str,
+    mode: str = "hybrid",
+    file_ids: Optional[List[int]] = None,
+    *,
+    org_id: str,
+) -> Dict[str, Any]:
     """
     Executes the static plan sequentially.
-    Passes context between steps (Found chunks -> Read -> Logic -> Draft).
+    Passes context (chunks, file_ids, structured_data) between steps.
     file_ids: if provided, restricts search to those Qdrant file IDs (session scope).
     """
-    logger.info("EXECUTING DETERMINISTIC PLAN: %s", plan['query_type'])
-    
-    context = {"chunks": [], "structured_data": {}}
+    logger.info("EXECUTING PLAN: %s | mode=%s | scoped_files=%s", plan["query_type"], mode, len(file_ids) if file_ids else "all")
+
+    context: Dict[str, Any] = {
+        "chunks": [],          # List[str] — text for the drafter
+        "result_objects": [],  # List[Dict] — rich objects from search (includes file_id)
+        "structured_data": {},
+        "file_ids_found": [],  # file_ids extracted from search results
+        "filenames_found": [], # filenames for display / logging
+    }
     trace = []
     final_output = ""
 
     for step in plan["tools"]:
         tool_name = step["name"]
         params = step["params"].copy()
-        logger.info("STEP: %s", tool_name)
+        logger.info("EXECUTING STEP: %s", tool_name)
 
         # --- DYNAMIC PARAMETER INJECTION ---
-        
-        # 1. Search Tool
+
         if tool_name == "search_tool":
             params["query"] = question
             params["mode"] = mode
-            params["org_id"] = org_id  # Always scope by org, even without a session
+            params["org_id"] = org_id
             if file_ids:
                 params["file_ids"] = file_ids
-            result = await search_tool(**params)
-            context["chunks"].extend(result)
-            
-            # Collect all unique contract sources from the chunks
-            if result:
-                sources = []
-                for chunk in result:
-                    match = re.search(r"\[Source: (.+?),", chunk)
-                    if match and match.group(1) not in sources:
-                        sources.append(match.group(1))
-                
-                context["current_contracts"] = sources
-                if sources:
-                    logger.info("Context: Focused on %d contracts: %s", len(sources), sources)
 
-        # 2. Read Tool
+            result_objects: List[Dict] = await search_tool(**params)
+
+            # Extract text for the drafter
+            context["chunks"].extend(r["text"] for r in result_objects)
+            context["result_objects"].extend(result_objects)
+
+            # Collect unique file_ids and filenames for the read_tool
+            for r in result_objects:
+                meta = r.get("metadata", {})
+                fid = meta.get("file_id")
+                fname = meta.get("source", "")
+                if fid and fid not in context["file_ids_found"]:
+                    context["file_ids_found"].append(fid)
+                if fname and fname not in context["filenames_found"]:
+                    context["filenames_found"].append(fname)
+
+            trace.append({
+                "step": tool_name,
+                "chunks_found": len(result_objects),
+                "file_ids": context["file_ids_found"],
+                "filenames": context["filenames_found"],
+            })
+            logger.info(
+                "search_tool: found %d chunks from files: %s",
+                len(result_objects),
+                context["filenames_found"],
+            )
+
         elif tool_name == "read_tool":
-            # Needs contract names. If search found them, use them.
-            contracts = context.get("current_contracts", [])
-            if contracts:
-                all_extracted = {}
-                for contract in contracts:
-                    params_copy = params.copy()
-                    params_copy["contract_name"] = contract
-                    params_copy["org_id"] = org_id  # Enforce org isolation in read_tool
-                    res = await read_tool(**params_copy)
-                    all_extracted[contract] = res
-                
-                context["structured_data"] = all_extracted
-                # Add structured data to chunks for the drafter to see
-                context["chunks"].append(f"Extracted Data: {json.dumps(all_extracted)}")
+            # Use the real file_ids surfaced by search, not fragile regex on filename strings
+            found_file_ids = context.get("file_ids_found", [])
+            if found_file_ids:
+                params_copy = params.copy()
+                params_copy["file_ids"] = found_file_ids
+                params_copy["org_id"] = org_id
+                params_copy["filenames"] = context.get("filenames_found", [])
+
+                extracted = await read_tool(**params_copy)
+                context["structured_data"] = extracted
+                context["chunks"].append(f"Extracted Data: {json.dumps(extracted)}")
+
+                trace.append({
+                    "step": tool_name,
+                    "file_ids_used": found_file_ids,
+                    "fields_extracted": list(extracted.keys()) if isinstance(extracted, dict) else [],
+                })
             else:
-                logger.info("SKIPPED read_tool: No contracts identified from search results")
+                logger.info("SKIPPED read_tool: no file_ids found in search results")
+                trace.append({"step": tool_name, "skipped": True, "reason": "No file_ids from search"})
                 continue
 
-        # 3. Logic Tool
         elif tool_name == "logic_tool":
-            # Needs extracted data + question
             data = context.get("structured_data")
-            if data:
-                # PAL Logic Tool: Passes data + question to LLM
+            if data and not data.get("error"):
                 result = await logic_tool(data=data, question=question)
-                # Add verdict to chunks
-                context["chunks"].append(f"Logic Analysis: {result['verdict']} because {result['reasoning']}")
+                context["chunks"].append(f"Logic Analysis: {result['verdict']} — {result['reasoning']}")
+                trace.append({
+                    "step": tool_name,
+                    "verdict": result.get("verdict"),
+                    "reasoning": result.get("reasoning", "")[:200],
+                })
             else:
-                logger.info("SKIPPED logic_tool: No structured data available")
+                logger.info("SKIPPED logic_tool: no structured data available")
+                trace.append({"step": tool_name, "skipped": True, "reason": "No structured data"})
                 continue
 
-        # 4. Draft Tool
         elif tool_name == "draft_tool":
             params["context_chunks"] = context["chunks"]
             params["original_question"] = question
             result = await draft_tool(**params)
             final_output = result
-
-        trace.append({"step": tool_name, "output": "Executed"})
+            trace.append({
+                "step": tool_name,
+                "output_chars": len(final_output),
+            })
 
     return {
         "plan": plan,

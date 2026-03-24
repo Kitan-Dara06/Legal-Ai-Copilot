@@ -1,0 +1,50 @@
+# docker-compose.override.yml
+# Local development overrides — NOT used in production.
+# Automatically merged by "docker compose up" when this file is present.
+#
+# Usage:
+#   cp .env.example .env        # create your local env file
+#   docker compose up -d        # override is automatically loaded
+#
+# Key differences from production:
+#   - Loads .env (not .env.production)
+#   - API runs with --reload for live code changes
+#   - Nginx is replaced by a simple HTTP-only proxy (no SSL required)
+#   - Exposes the API directly on port 8000 for easy local curl/testing
+
+version: "3.9"
+
+services:
+  api:
+    env_file:
+      - .env
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --proxy-headers --forwarded-allow-ips=*
+    ports:
+      - "8000:8000"   # Expose FastAPI directly for local development
+    volumes:
+      - .:/app        # Mount source code for hot-reload
+
+  worker_pdf:
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+
+  worker_ocr:
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+
+  celery_beat:
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+
+  nginx:
+    # Use a simple HTTP-only config for local dev (no SSL certs needed)
+    volumes:
+      - ./deploy/nginx.dev.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"

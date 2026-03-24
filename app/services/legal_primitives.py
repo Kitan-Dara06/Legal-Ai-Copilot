@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -14,6 +15,9 @@ from app.services.store import (
     search_hybrid_qdrant,  # Session-scoped Qdrant search
 )
 
+logger = logging.getLogger(__name__)
+
+
 def _clean_json_output(raw: str) -> str:
     """Removes markdown code blocks commonly hallucinated by Qwen/Llama models around JSON."""
     raw = raw.strip()
@@ -21,7 +25,6 @@ def _clean_json_output(raw: str) -> str:
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
     return raw
-
 
 
 class Claim(BaseModel):
@@ -96,10 +99,10 @@ async def generate_legal_concepts(question: str) -> List[str]:
             concepts = [c.strip() for c in concepts.split(",") if c.strip()]
         if not concepts:
             concepts = []
-        print(f"\n🧠 CONCEPTS GENERATED: {concepts}")
+        logger.info("Legal concepts generated: %s", concepts)
         return concepts
     except Exception as e:
-        print(f"⚠️ Error parsing concepts: {e}")
+        logger.warning("Error parsing legal concepts: %s", e)
         return []
 
 
@@ -138,7 +141,7 @@ async def generate_multi_queries(question: str) -> List[str]:
             queries = parsed or []
         if isinstance(queries, str):
             queries = [q.strip() for q in queries.split(",") if q.strip()]
-        print(f"\n🧠 MULTI-QUERIES GENERATED: {queries}")
+        logger.info("Multi-queries generated: %s", queries)
         return queries or [question]
     except Exception:
         return [question]
@@ -153,63 +156,54 @@ async def search_tool(
     file_ids: Optional[
         List[int]
     ] = None,  # Session scope: search only these Qdrant file IDs
-    org_id: str = "default_org",  # Required for Qdrant tenant isolation
+    org_id: str,  # Required — no default to prevent accidental cross-tenant leakage
     **kwargs,  # Absorbs legacy params
-) -> List[str]:
+) -> List[Dict]:
     """
     Finds relevant chunks using the specified retrieval strategy.
+    Returns a list of rich result dicts: {"text", "score", "metadata": {"file_id", "source", "page"}}.
 
     Modes:
     - 'hybrid': Standard Vector + BM25 fusion
     - 'concept': Expands extra keywords -> joins them to query -> Hybrid Search
     - 'multiquery': Generates 3 questions -> Hybrid Search for each -> Pools results
     """
-    if not org_id or org_id == "default_org":
+    if not org_id:
         raise ValueError("org_id must be provided for tenant isolation.")
 
-    final_chunks = []
-
     # --- STRATEGY SELECTION ---
-
     queries_to_run = []
 
     if mode == "multiquery":
-        print("\n📝 MULTI-QUERY MODE DETECTED")
+        logger.info("Running multi-query search")
         variations = await generate_multi_queries(query)
-        queries_to_run = [query] + variations[:2]  # Run original + 2 variations
+        queries_to_run = [query] + variations[:2]  # original + 2 variations
 
     elif mode == "concept":
-        print("\n📝 CONCEPT EXPANSION MODE DETECTED")
+        logger.info("Running concept-expansion search")
         concepts = await generate_legal_concepts(query)
-        # Augment the query string with concepts for BM25 to catch
         expanded_query = f"{query} {' '.join(concepts)}"
-        print(f"   ► Expanded Query: {expanded_query}")
+        logger.info("Expanded query: %s", expanded_query)
         queries_to_run = [expanded_query]
 
     else:  # Default 'hybrid'
         queries_to_run = [query]
 
     # --- EXECUTION ---
-
-    raw_results = []
+    raw_results: List[List[Dict]] = []
 
     for q_text in queries_to_run:
-        print(f"\n   🏃 Running Hybrid Search for: '{q_text}'")
+        logger.info("Running hybrid search for query: %.80s", q_text)
 
-        # Embed the INDIVIDUAL query (for vector search)
-        # Note: For 'concept' mode, we might want to embed the ORIGINAL query
-        # but search BM25 with EXPANDED. For simplicity, we embed the expanded one here.
-        # This is a debated research topic. Embed-Expanded usually works fine if concepts are relevant.
         embeddings = get_embedding([q_text])
         if not embeddings:
-            print(f"   ⚠️ Embedding failed for query: '{q_text[:50]}...' - Skipping")
+            logger.warning("Embedding failed for query: %.50s — skipping", q_text)
             continue
         q_vector = embeddings[0]
 
-        # ── Route: Qdrant (session-scoped) vs ChromaDB (all files) ───────────
+        # Route: session-scoped (by file_ids) vs. org-wide
         if file_ids:
-            # Session is active — search only selected files in Qdrant
-            print(f"   🔒 Session-scoped: searching {len(file_ids)} file(s) in Qdrant")
+            logger.info("Session-scoped search: %d file(s)", len(file_ids))
             results = search_hybrid_qdrant(
                 q_text, q_vector, file_ids=file_ids, org_id=org_id, top_k=top_k
             )
@@ -223,54 +217,43 @@ async def search_tool(
                     specific_contract=contract,
                     org_id=org_id,
                 )
-                for r in results:
-                    raw_results.append(r)
+                raw_results.append(results)
         else:
             results = search_hybrid(q_text, q_vector, top_k=top_k, org_id=org_id)
             raw_results.append(results)
 
-    # Flatten logic if needed (search_hybrid returns list of dicts)
-    flat_results = []
-
-    # Regardless of which branch we took, `raw_results` is always a List[List[dict]]
-    # because we did raw_results.append(results) or raw_results.append(r) where `r` was a list of dicts.
+    # Flatten
+    flat_results: List[Dict] = []
     for batch in raw_results:
         if isinstance(batch, list):
             flat_results.extend(batch)
         else:
             flat_results.append(batch)
 
-    # --- DEDUPLICATION (Simple text based) ---
-    unique_results = []
-    seen_texts = set()
-
+    # Deduplicate by text
+    unique_results: List[Dict] = []
+    seen_texts: set = set()
     for item in flat_results:
         text = item.get("text", "")
         if text not in seen_texts:
             seen_texts.add(text)
             unique_results.append(item)
 
-    # Sort by Score (Descending) logic if we mixed multiple queries
-    # Since scores are RRF (roughly 0-1), they are comparable.
-    unique_results.sort(key=lambda x: x["score"], reverse=True)
+    # Sort by score and take top_k
+    unique_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    final_output = unique_results[:top_k]
 
-    # Take Top K
-    final_output_objs = unique_results[:top_k]
-
-    # Extract just text for return (keeping backward compatibility with original tool signature)
-    final_chunks = [obj["text"] for obj in final_output_objs]
-
-    # --- KEYWORD FILTERING (Legacy support) ---
+    # Keyword post-filter (legacy support)
     if keyword_filter:
-        print(f"\n🔻 FILTERING: '{keyword_filter}'")
-        filtered = [c for c in final_chunks if keyword_filter.lower() in c.lower()]
+        logger.debug("Applying keyword filter: %s", keyword_filter)
+        filtered = [r for r in final_output if keyword_filter.lower() in r.get("text", "").lower()]
         if filtered:
-            final_chunks = filtered
+            final_output = filtered
         else:
-            print("   ⚠️ Filter removed everything. Returning original results.")
+            logger.warning("Keyword filter '%s' removed all results — returning unfiltered.", keyword_filter)
 
-    print(f"\n✅ SEARCH COMPLETE: Returned {len(final_chunks)} chunks")
-    return final_chunks
+    logger.info("Search complete: %d chunks returned", len(final_output))
+    return final_output
 
 
 def _build_extraction_schema(target_fields: List[str]) -> Dict[str, Any]:
@@ -285,36 +268,47 @@ def _build_extraction_schema(target_fields: List[str]) -> Dict[str, Any]:
 
 
 async def read_tool(
-    contract_name: str, target_fields: List[str], org_id: str
+    file_ids: List[int],
+    target_fields: List[str],
+    org_id: str,
+    filenames: Optional[List[str]] = None,  # For display purposes only
 ) -> Dict[str, Any]:
-    """Extracts structured data (dates, parties, amounts) from a contract.
-    Uses Hybrid Search (Vector + BM25) and Structured Outputs."""
+    """Extracts structured data (dates, parties, amounts) from scoped files.
+    Uses Hybrid Search (Vector + BM25) filtered by file_id for precise tenant isolation.
+    """
 
     if not org_id:
         raise ValueError("org_id is required for tenant isolation.")
+
+    if not file_ids:
+        logger.warning("read_tool called with empty file_ids — skipping")
+        return {"error": "No file_ids provided"}
 
     query_text = "Keywords: " + ", ".join(target_fields)
 
     embeddings = get_embedding([query_text])
     if not embeddings:
-        print(f"\n❌ EMBEDDING FAILED: Could not embed target fields")
+        logger.error("read_tool: Embedding failed for target fields")
         return {"error": "Failed to generate search embeddings"}
 
-    chunks = search_hybrid(
+    # Search scoped to the specific file IDs from the session
+    from app.services.store import search_hybrid_qdrant
+    results = search_hybrid_qdrant(
         query_text,
         embeddings[0],
-        top_k=10,
-        specific_contract=contract_name,
+        file_ids=file_ids,
         org_id=org_id,
+        top_k=10,
     )
 
-    if not chunks:
-        print(f"\n❌ CONTRACT NOT FOUND: {contract_name}")
-        return {"error": f"Contract {contract_name} not found in database"}
+    if not results:
+        label = ", ".join(filenames) if filenames else f"file_ids={file_ids}"
+        logger.warning("read_tool: No results for %s", label)
+        return {"error": f"No content found for files: {label}"}
 
-    print(f"   ✓ Retrieved {len(chunks)} chunks")
+    logger.debug("read_tool: Retrieved %d chunks", len(results))
 
-    context = "\n\n".join(c["text"] if isinstance(c, dict) else c for c in chunks)
+    context = "\n\n".join(r["text"] if isinstance(r, dict) else r for r in results)
     max_chars = 12000
     if len(context) > max_chars:
         context = context[:max_chars] + "\n\n[...truncated for length...]"
@@ -356,17 +350,11 @@ CONTRACT TEXT:
         raw_output = response.choices[0].message.content if response.choices else "{}"
         extracted = json.loads(raw_output or "{}")
 
-        print("   ✅ EXTRACTION SUCCESSFUL")
-        for field, value in extracted.items():
-            print(f"   • {field}: {value}")
-
+        logger.info("read_tool extraction successful: %s", list(extracted.keys()))
         return extracted
 
     except Exception as e:
-        print(f"\n❌ READ_TOOL FAILED: {str(e)}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception("read_tool failed: %s", e)
         return {"error": f"Extraction failed: {str(e)}"}
 
 
@@ -384,11 +372,7 @@ async def logic_tool(data: dict, question: str = "Is this contract currently val
     Evaluates logical conditions using an LLM reasoning engine
     and returns a strictly formatted 'verdict' and 'reasoning'.
     """
-    print("=" * 70)
-    print("🧠 LOGIC_TOOL (Structured Reasoning Mode)")
-    print(f"   Question: {question}")
-    print(f"   Data keys: {list(data.keys())}")
-    print("=" * 70)
+    logger.info("logic_tool called | question=%.80s | data_keys=%s", question, list(data.keys()))
 
     code_prompt = f"""You are a legal reasoning engine.
 Given contract data and a question, determine the answer.
@@ -422,14 +406,11 @@ You MUST output strictly valid JSON matching this schema:
         result.setdefault("reasoning", "No reasoning provided.")
         result["code_used"] = None
 
-        print(f"\n✅ LOGIC EVALUATION RESULT:")
-        print(f"   Verdict: {result['verdict']}")
-        print(f"   Reasoning: {result['reasoning']}")
-
+        logger.info("logic_tool result | verdict=%s | reasoning=%.80s", result["verdict"], result["reasoning"])
         return result
 
     except Exception as e:
-        print(f"   ❌ Logic evaluation failed: {e}")
+        logger.exception("logic_tool failed: %s", e)
         return {
             "verdict": "UNDETERMINED",
             "reasoning": f"Logic reasoning failed: {str(e)}",
@@ -445,13 +426,10 @@ async def draft_tool(
 ) -> str:
     """Generates final output with optional CoT verification"""
 
-    print("\n" + "=" * 70)
-    print("✍️ DRAFT_TOOL CALLED")
-    print(f"   Original Question: {original_question}")
-    print(f"   Output Format: {output_format}")
-    print(f"   Use CoT: {use_cot}")  # ADDED f
-    print(f"   Input Chunks: {len(context_chunks)}")  # ADDED f
-    print("=" * 70)
+    logger.info(
+        "draft_tool called | format=%s | use_cot=%s | chunks=%d",
+        output_format, use_cot, len(context_chunks),
+    )
 
     if use_cot:
         return await _draft_with_cot(context_chunks, output_format, original_question)
@@ -463,13 +441,12 @@ async def _draft_simple(
     context_chunks: List[str], original_question: str, output_format: str
 ) -> str:
     """Simple draft without CoT"""
-    print("\n📝 SIMPLE DRAFT MODE")
+    logger.debug("draft_tool: simple mode")
 
     unique_chunks = list(set(context_chunks))
-    print(f"   Deduplicated: {len(context_chunks)} → {len(unique_chunks)} chunks")
+    logger.debug("draft_tool: deduplicated %d -> %d chunks", len(context_chunks), len(unique_chunks))
 
     context_text = "\n\n".join(unique_chunks)
-    print(f"   Context length: {len(context_text)} chars")
 
     format_instruction = _get_format_instruction(output_format)
 
@@ -485,10 +462,6 @@ async def _draft_simple(
     CONTEXT:
     {context_text}
     """
-
-    print("\n🤖 Calling OpenAI API (simple mode)...")
-    print("   Model: gpt-4o-mini")
-    print("   Temperature: 0")
 
     user_message = f"USER QUESTION: {original_question}\n\nBased strictly on the provided context, answer the question above."
     response = await groq_client.chat.completions.create(
@@ -506,12 +479,7 @@ async def _draft_simple(
         usage.total_tokens if usage and hasattr(usage, "total_tokens") else None
     )
 
-    print("\n✅ API Response Received")
-    print(f"   Tokens used: {tokens_used}")
-    print(f"   Output length: {len(output) if output else 0} chars")
-    preview = output[:200] if output else ""
-    print(f"   First 200 chars: {preview}...")
-
+    logger.info("draft_tool (simple): %d tokens used, %d chars output", tokens_used or 0, len(output))
     return output
 
 
@@ -519,7 +487,7 @@ async def _draft_with_cot(
     context_chunks: List[str], output_format: str, original_question: str
 ) -> str:
     """Draft with rigorous schema validation via Pydantic AI"""
-    print("\n🧠 PYDANTIC AI FAITHFULNESS MODE")
+    logger.info("draft_tool: pydantic faithfulness mode")
 
     # Ensure all chunks are strings and deduplicate (order-preserving)
     seen = set()
@@ -529,24 +497,15 @@ async def _draft_with_cot(
         if chunk_str not in seen:
             seen.add(chunk_str)
             unique_chunks.append(chunk_str)
-    print(f"   Deduplicated: {len(context_chunks)} → {len(unique_chunks)} chunks")
+    logger.debug("draft_tool: deduplicated %d -> %d chunks", len(context_chunks), len(unique_chunks))
 
     context_text = "\n\n".join(unique_chunks)
-    print(f"   Context length: {len(context_text)} chars")
 
     format_instruction = _get_format_instruction(output_format)
 
     system_prompt = f"""
     You are a Senior Legal Analyst who produces precise, citation-rich answers.
     Your goal is to answer the user's question by FIRST extracting exact claims from the context, and THEN synthesizing a response.
-
-    ANSWER QUALITY RULES:
-    - QUOTE exact contract language using quotation marks: "verbatim text from contract"
-    - Do NOT paraphrase or summarize when exact language is available
-    - Every claim MUST cite (filename.pdf, Page X)
-    - Stay focused on answering the user's question.
-    - Use ONLY provided context — absolutely no external knowledge.
-    - If context empty/irrelevant: "Information not found in provided documents"
 
     {format_instruction}
     """
@@ -561,10 +520,7 @@ async def _draft_with_cot(
     from pydantic_ai import Agent
     from pydantic_ai.models.groq import GroqModel
 
-    # We use the native GroqModel so Pydantic AI knows how to parse Groq's custom API responses
-    model = GroqModel(
-        "qwen/qwen3-32b",
-    )
+    model = GroqModel("qwen/qwen3-32b")
 
     agent = Agent(
         model=model,
@@ -573,31 +529,17 @@ async def _draft_with_cot(
         retries=3,
     )
 
-    print("\n🤖 Calling Groq API (Pydantic Agent)...")
-
     try:
         result = await agent.run(user_prompt)
-        print("\n✅ Pydantic Validation Passed!")
-        print(f"   Extracted {len(result.output.claims_list)} strictly-cited claims:")
-
-        for i, c in enumerate(result.output.claims_list):
-            snippet = (
-                c.exact_quote[:60].replace("\n", " ") + "..."
-                if len(c.exact_quote) > 60
-                else c.exact_quote
-            )
-            print(f'     [{i + 1}] "{snippet}" -> {c.source_document}')
-
-        print(
-            "\n   Synthesized Final Response length:",
+        logger.info(
+            "draft_tool: Pydantic validation passed. %d claims extracted, %d chars output",
+            len(result.output.claims_list),
             len(result.output.synthesized_response),
         )
-        print("=" * 70 + "\n")
         return result.output.synthesized_response
 
     except Exception as e:
-        print(f"\n❌ Pydantic AI failed after retries: {e}")
-        print("   -> Falling back to _draft_simple() for a plain-prose answer...")
+        logger.warning("draft_tool: Pydantic AI failed after retries (%s) — falling back to simple mode", e)
         return await _draft_simple(unique_chunks, original_question, output_format)
 
 
@@ -613,7 +555,7 @@ def _get_format_instruction(output_format: str) -> str:
     return instructions.get(output_format, instructions["prose"])
 
 
-# Tool registry unchanged
+# Tool registry
 LEGAL_TOOLS = {
     "search_tool": {"function": search_tool},
     "read_tool": {"function": read_tool},

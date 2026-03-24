@@ -1,18 +1,17 @@
 import logging
-import pdfplumber
+import pypdf
 
 logger = logging.getLogger(__name__)
 
 def extract_from_pdf(file_file):
     """
-    Extracts text from a digital PDF using pdfplumber for higher fidelity
-    layout preservation (e.g., maintaining table structures and columns).
+    Extracts text from a digital PDF using pypdf.
     """
     documents = []
-    with pdfplumber.open(file_file) as pdf:
-        logger.info("Extracting text from %d PDF pages using pdfplumber", len(pdf.pages))
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text(layout=True)
-            if text and text.strip():
-                documents.append({"page": i + 1, "text": text.strip()})
+    reader = pypdf.PdfReader(file_file)
+    logger.info("Extracting text from %d PDF pages using pypdf", len(reader.pages))
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text()
+        if text and text.strip():
+            documents.append({"page": i + 1, "text": text.strip()})
     return documents

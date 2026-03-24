@@ -1,14 +1,11 @@
 rank_bm25
 numpy
-chromadb
-openai
 python-dotenv
 tiktoken
 tabulate
 fastapi
 uvicorn[standard]
 python-multipart
-streamlit
 httpx
 groq
 sentry-sdk[fastapi,celery]
@@ -33,7 +30,7 @@ qdrant-client         # Python client for Qdrant
 pypdf                 # Read PDFs, detect if scanned or digital
 pdfplumber            # High-fidelity digital PDF extraction (preserves tables)
 
-boto3                          # S3-compatible API (Cloudflare R2)
+boto3                          # S3-compatible API (Cloudflare R2 object storage)
 pydantic-ai           # Strictly-typed agent frameworks
 
 cohere                # Semantic Reranking API
