@@ -41,3 +41,4 @@ results/
 
 # OS / editor
 .DS_Store
+docker-compose.override.yml

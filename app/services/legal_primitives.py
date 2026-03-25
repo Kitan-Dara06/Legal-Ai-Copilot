@@ -156,6 +156,7 @@ async def search_tool(
     file_ids: Optional[
         List[int]
     ] = None,  # Session scope: search only these Qdrant file IDs
+    *,
     org_id: str,  # Required — no default to prevent accidental cross-tenant leakage
     **kwargs,  # Absorbs legacy params
 ) -> List[Dict]:
