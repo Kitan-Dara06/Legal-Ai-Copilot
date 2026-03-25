@@ -120,7 +120,7 @@ async def accept_invite(
 ):
     """
     Endpoint 3: Accept & Consume (The Magic Transaction)
-    Creates user, membership, marks invite accepted, and returns JWT.
+    Creates user (or verifies existing user), adds membership, marks invite accepted, and returns JWT.
     """
     hashed_token = hash_token(payload.token)
     stmt = select(Invite).where(
@@ -138,65 +138,78 @@ async def accept_invite(
 
     # Check if user already exists
     stmt = select(User).where(User.email == invite.email)
-    if (await db.execute(stmt)).scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User with this email already exists."
-        )
+    existing_user = (await db.execute(stmt)).scalar_one_or_none()
 
-    async with db.begin_nested(): # Transaction starts
-        # 1. Create the new row in the Users table
+    if existing_user:
+        # User already exists, verify their password
+        if not pwd_context.verify(payload.password, existing_user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User with this email already exists. Please enter your correct existing password to accept the invite."
+            )
+        target_user = existing_user
+    else:
+        # Create new user
         new_user = User(
             email=invite.email,
             full_name=payload.full_name,
             hashed_password=pwd_context.hash(payload.password),
-            org_id=invite.org_id,
+            org_id=invite.org_id,        # Set their primary org
             personal_org_id=invite.org_id,
             role=invite.role,
         )
         db.add(new_user)
-        await db.flush() # Get user id
+        target_user = new_user
 
-        # 2. Create the row in user_org_memberships
-        membership = UserOrgMembership(
-            user_id=new_user.id,
-            org_id=invite.org_id,
-            role=invite.role,
+    async with db.begin_nested(): # Transaction starts
+        if not existing_user:
+            await db.flush() # Get the new_user.id
+            
+        # Create the row in user_org_memberships if it doesn't exist
+        stmt_mem = select(UserOrgMembership).where(
+            UserOrgMembership.user_id == target_user.id,
+            UserOrgMembership.org_id == invite.org_id
         )
-        db.add(membership)
+        membership = (await db.execute(stmt_mem)).scalar_one_or_none()
+        
+        if not membership:
+            membership = UserOrgMembership(
+                user_id=target_user.id,
+                org_id=invite.org_id,
+                role=invite.role,
+            )
+            db.add(membership)
 
-        # 3. Mark the invite row as is_accepted = True
+        # Mark the invite row as is_accepted = True
         invite.is_accepted = True
 
     await db.commit()
     
-    # 4. Generate and return JWT
-    # We use the SUPABASE_JWT_SECRET to sign a JWT that the Supabase client will accept.
+    # Generate and return JWT
     import os
     from jose import jwt as jose_jwt
     
     jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
     if not jwt_secret:
-        # Fallback for dev if secret is missing
         jwt_secret = "placeholder_secret"
     
     now = datetime.now(timezone.utc)
     payload_jwt = {
-        "sub": str(new_user.id),
-        "email": new_user.email,
+        "sub": str(target_user.id),
+        "email": target_user.email,
         "role": "authenticated",
         "aud": "authenticated",
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(hours=24)).timestamp()),
         "app_metadata": {"provider": "email", "providers": ["email"]},
-        "user_metadata": {"full_name": payload.full_name},
+        "user_metadata": {"full_name": payload.full_name if not existing_user else target_user.full_name},
     }
     
     token = jose_jwt.encode(payload_jwt, jwt_secret, algorithm="HS256")
     
     return {
         "message": "Invitation accepted successfully.",
-        "user_id": str(new_user.id),
+        "user_id": str(target_user.id),
         "org_id": str(invite.org_id),
         "access_token": token,
     }
