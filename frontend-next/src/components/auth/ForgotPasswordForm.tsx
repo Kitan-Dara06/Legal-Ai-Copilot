@@ -18,7 +18,7 @@ export function ForgotPasswordForm() {
     setError("");
 
     // The callback route will handle the token exchange securely on the server
-    const redirectUrl = `${window.location.origin}/auth/callback?next=/login?type=recovery`;
+    const redirectUrl = `${window.location.origin}/auth/callback?type=recovery`;
 
     const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
       redirectTo: redirectUrl,
