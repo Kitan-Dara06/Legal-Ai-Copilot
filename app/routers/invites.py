@@ -149,9 +149,32 @@ async def accept_invite(
             )
         target_user = existing_user
     else:
-        # Create new user
+        # 1. Create the user in Supabase Auth first
+        import os
+        from supabase import create_client as create_supabase_client
+        
+        supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        supabase_user_id = None
+        
+        if supabase_url and service_role_key:
+            try:
+                admin_client = create_supabase_client(supabase_url, service_role_key)
+                res = admin_client.auth.admin.create_user({
+                    "email": invite.email,
+                    "password": payload.password,
+                    "email_confirm": True,
+                    "user_metadata": {"full_name": payload.full_name}
+                })
+                supabase_user_id = res.user.id
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("Supabase user creation failed: %s", e)
+
+        # 2. Create the user in our local Postgres database
         new_user = User(
             email=invite.email,
+            supabase_user_id=supabase_user_id,
             full_name=payload.full_name,
             hashed_password=pwd_context.hash(payload.password),
             org_id=invite.org_id,        # Set their primary org
