@@ -56,7 +56,7 @@ celery_app = Celery(
     "legal_rag_worker",
     broker=BROKER_URL,
     backend=REDIS_URL,
-    include=["app.tasks", "app.tasks_map_reduce"],  # Where our task functions live
+    include=["app.tasks"],
 )
 
 # Debug: log broker and backend (mask passwords)
@@ -105,21 +105,9 @@ celery_app.conf.update(
     task_default_routing_key="default",
     # Route specific tasks to specific queues
     task_routes={
-        "app.tasks.map_reduce.dispatch_digital_pdf": {"queue": "default"},
-        "app.tasks.map_reduce.dispatch_scanned_pdf": {"queue": "ocr"},
-        "app.tasks.map_reduce.embed_and_upsert_chunk_batch": {"queue": "default"},
-        "app.tasks.map_reduce.ocr_and_embed_scanned_batch": {"queue": "ocr"},
-        "app.tasks.map_reduce.finalize_pdf_processing": {"queue": "default"},
         "app.tasks.process_digital_pdf": {"queue": "default"},
         "app.tasks.process_scanned_pdf": {"queue": "ocr"},
         "app.tasks.cleanup_stale_data": {"queue": "default"},
-    },
-    # ── Periodic Maintenance ─────────────────────────────────────────────────
-    beat_schedule={
-        "cleanup-stale-data-hourly": {
-            "task": "app.tasks.cleanup_stale_data",
-            "schedule": 3600.0, # Every hour
-        },
     },
     # Retry failed tasks up to 3 times with a 60-second delay
     task_acks_late=True,
