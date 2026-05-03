@@ -13,6 +13,15 @@ from fastapi.responses import JSONResponse
 router = APIRouter(tags=["Health"])
 
 
+@router.get("/live")
+async def live():
+    """
+    Liveness probe.
+    Keeps container health checks lightweight and independent of downstream services.
+    """
+    return {"status": "alive"}
+
+
 async def _check_postgres() -> dict:
     try:
         from sqlalchemy import text
