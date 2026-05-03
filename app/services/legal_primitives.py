@@ -76,7 +76,7 @@ async def generate_legal_concepts(question: str) -> List[str]:
     """
 
     response = await groq_client.chat.completions.create(
-        model="qwen/qwen3-32b",
+        model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": question},
@@ -122,7 +122,7 @@ async def generate_multi_queries(question: str) -> List[str]:
     """
 
     response = await groq_client.chat.completions.create(
-        model="qwen/qwen3-32b",
+        model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": question},
@@ -336,7 +336,7 @@ CONTRACT TEXT:
 """
     try:
         response = await groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -391,7 +391,7 @@ You MUST output strictly valid JSON matching this schema:
 
     try:
         response = await groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": "You are a logical deduction engine."},
                 {"role": "user", "content": code_prompt},
@@ -466,7 +466,7 @@ async def _draft_simple(
 
     user_message = f"USER QUESTION: {original_question}\n\nBased strictly on the provided context, answer the question above."
     response = await groq_client.chat.completions.create(
-        model="qwen/qwen3-32b",
+        model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},

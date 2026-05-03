@@ -14,20 +14,16 @@ export async function GET(request: Request) {
     const supabase = await createClient()
     const { error } = await supabase.auth.exchangeCodeForSession(code)
     if (!error) {
-      const forwardedHost = request.headers.get('x-forwarded-host');
       const isLocalEnv = process.env.NODE_ENV === 'development';
 
-      // In production, prioritize explicit site config so Nginx internal upstream names don't leak
+      // In production, strictly require explicit site config
       let resolvedBase = origin;
       if (!isLocalEnv) {
           const explicitSiteUrl = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/api$/, '');
-          if (forwardedHost && !forwardedHost.includes('upstream')) {
-              resolvedBase = `https://${forwardedHost}`;
-          } else if (explicitSiteUrl) {
-              resolvedBase = explicitSiteUrl;
-          } else if (origin.includes('upstream')) {
-              resolvedBase = 'https://legalrag.codes';
+          if (!explicitSiteUrl) {
+              throw new Error("NEXT_PUBLIC_API_URL is required in production environment.");
           }
+          resolvedBase = explicitSiteUrl;
       }
 
       // Password recovery → always send to the update-password page
@@ -36,10 +32,22 @@ export async function GET(request: Request) {
       }
 
       // Default: forward with any extra params
-      const next = searchParams.get('next') ?? '/'
+      let next = searchParams.get('next') ?? '/'
+      
+      // STRICT OPEN-REDIRECT PROTECTION
+      // 1. Ensure it's a relative path (starts with /)
+      // 2. Prevent protocol-relative URLs (starts with //)
+      // 3. Prevent any string containing '://' (absolute URLs)
+      if (!next.startsWith('/') || next.startsWith('//') || next.includes('://')) {
+          console.warn(`[AuthCallback] Blocked potentially unsafe redirect attempt to: ${next}`);
+          next = '/';
+      }
+      
       const url = new URL(`${resolvedBase}${next}`)
       if (orgId) url.searchParams.set('org_id', orgId)
       if (orgName) url.searchParams.set('org_name', orgName)
+      
+      console.log(`[AuthCallback] Redirecting to: ${url.toString()}`);
       return NextResponse.redirect(url.toString())
     }
   }

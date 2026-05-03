@@ -102,3 +102,143 @@ export interface AcceptInviteResponse {
     org_id: string;
     access_token: string;
 }
+
+// ── Due Diligence (legaltech agentic pipeline) ────────────────────────────────
+
+export interface PlanTask {
+    task_id: number;
+    task_type: string;
+    description: string;
+    search_target: string;
+    reason: string;
+}
+
+export interface PlanResponse {
+    goal: string;
+    tasks: PlanTask[];
+}
+
+export interface CitationRef {
+    document_name: string;
+    clause_reference: string;
+    exact_text: string;
+}
+
+export interface Escalation {
+    trigger_name: string;
+    severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+    message: string;
+    recommendation: string;
+}
+
+export interface DDFinding {
+    task_id: string;
+    task_description: string;
+    analysis: string;
+    risk_level: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+    citations: CitationRef[];
+    escalations: Escalation[];
+}
+
+export interface DefinitionalConflict {
+    term: string;
+    definitions: { term: string; definition: string; document_name: string; hierarchy_path: string }[];
+}
+
+export interface DueDiligenceReport {
+    goal: string;
+    session_id?: string;
+    generated_at: string;
+    embedding_model_used: string;
+    findings: DDFinding[];
+    pre_ingestion_conflicts: DefinitionalConflict[];
+    cross_document_contradictions: Escalation[];
+    escalations: Escalation[];
+    documents_analysed: { document_name: string; file_type: string; chunk_count: number; page_count: number }[];
+}
+
+export interface IngestJobQueued {
+    job_id: string;
+    status: "queued";
+    document_name: string;
+}
+
+export interface IngestJobStatus {
+    job_id: string;
+    status: "queued" | "running" | "parsing" | "chunking" | "extracting_terms" | "parsing_references" | "building_graph" | "embedding" | "finalising" | "complete" | "failed";
+    progress: number;  // 0-100
+    result?: IngestResult | null;
+    error?: string | null;
+}
+
+export interface IngestResult {
+    document: { document_name: string; file_type: string; chunk_count: number; page_count: number };
+    pre_ingestion_conflicts: DefinitionalConflict[];
+    graph_nodes: number;
+    graph_edges: number;
+}
+
+// ── Master Orchestrator (Action Agent) ───────────────────────────────────────
+
+export type WorkflowStatus = 
+    | "CLASSIFYING"
+    | "AWAITING_INTENT_CONFIRMATION"
+    | "RETRIEVING"
+    | "EXPANDING"
+    | "REASONING"
+    | "DRAFTING"
+    | "AWAITING_APPROVAL"
+    | "EXECUTING"
+    | "REVISING"
+    | "COMPLETED"
+    | "FAILED";
+
+export interface LexAction {
+    id: string;
+    action_type: string;
+    description: string;
+    status: string;
+    urgency: number;
+}
+
+export interface LexToolCallLog {
+    id: string;
+    tool_name: string;
+    status: string;
+    summary: string;
+    created_at: string;
+}
+
+export interface StartWorkflowResponse {
+    workflow_id: string;
+    status: WorkflowStatus;
+    primary_intent?: string;
+    intent_confidence?: number;
+    findings_summary?: string;
+}
+
+export interface ConfirmIntentResponse {
+    workflow_id: string;
+    status: WorkflowStatus;
+}
+
+export interface ApproveWorkflowResponse {
+    workflow_id: string;
+    status: WorkflowStatus;
+}
+
+export interface WorkflowStatusResponse {
+    workflow_id: string;
+    status: WorkflowStatus;
+    created_at: string;
+    completed_at?: string;
+}
+
+export interface GetActionsResponse {
+    actions: LexAction[];
+}
+
+export interface GetLogsResponse {
+    logs: LexToolCallLog[];
+}
+

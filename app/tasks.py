@@ -2,158 +2,48 @@
 #
 # PURPOSE: The "Paralegal" — background tasks that process uploaded files.
 #
-# Uses the EXISTING pipeline:
-#   parser.py        → extract_from_pdf()                    — extracts text per page (digital PDFs)
-#   ocr_gemini.py    → ocr_pdf_path_to_markdown_pages()      — OCR scanned PDFs to MARKDOWN per page
-#   chunker.py       → chunk_text()                          — hierarchical chunking (parent/child)
-#   embedder.py      → get_embedding()                       — Cloudflare BGE-M3 / OpenRouter fallback
-#
-# For scanned PDFs (no extractable text), we use Gemini to extract structured Markdown
-# that preserves document hierarchy (# Article, ## Clause, tables). This enables better
-# semantic chunk boundaries and fewer hallucinations.
-#
-# Then upserts to Qdrant with file_id + org_id for isolation.
-#
-# Flow:
-#   1. API uploads file → saves to Postgres (PENDING) → triggers this task
-#   2. This task: Parse/OCR → Chunk → Embed → Upsert to Qdrant
-#   3. Updates Postgres status to READY (or FAILED)
-#   4. Updates Redis progress every batch so the UI can show "45% done"
+# Unified Lex Pipeline (Stage 2):
+#   1. Parses with LegalDocumentParser (or Gemini OCR for scans)
+#   2. Chunks with ClauseChunker
+#   3. Runs parallel intelligence extraction via asyncio.gather:
+#      - Multi-vector embedding (Voyage + BGE + SPLADE)
+#      - Defined terms extraction
+#      - Cross-reference graph extraction (Neo4j)
+#      - Deadline extraction
 
 import io
 import logging
 import os
+import uuid
+import asyncio
 from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
-from pypdf import PdfReader
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance,
-    Modifier,
-    PayloadSchemaType,
-    PointStruct,
-    SparseVector,
-    SparseVectorParams,
-    VectorParams,
-)
 
 from app.config import get_database_url_sync, redis_disable_tls_verify
 from app.logging_config import configure_logging
-from app.services.chunker import chunk_text
-from app.services.embedder import get_embedding
 from app.services.ocr_gemini import GeminiOcrError, ocr_pdf_path_to_markdown_pages
-
-# ── Your existing services (unchanged) ───────────────────────────────────────
-from app.services.parser import extract_from_pdf
 from app.worker import celery_app
+
+# ── New Stage 2 Intelligence Extractors ──────────────────────────────────────
+from app.services.ingestion.parser import LegalDocumentParser
+from app.services.ingestion.chunker import ClauseChunker
+from app.services.ingestion.embedder import LegalEmbedder
+from app.services.ingestion.terms_extractor import DefinedTermExtractor
+from app.services.ingestion.graph_extractor import LLMReferenceParser, DependencyGraph
+from app.services.ingestion.deadline_extractor import DeadlineExtractor
 
 configure_logging()
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")  # Required for Qdrant Cloud
-QDRANT_COLLECTION = "legal_chunks"
-# Keep this as int for SDK typing (and because QdrantClient.timeout expects int-like seconds).
-QDRANT_TIMEOUT_SECONDS = int(float(os.getenv("QDRANT_TIMEOUT_SECONDS", "30")))
-
 host = os.getenv("UPSTASH_HOST")
 port = os.getenv("UPSTASH_PORT", "6379")
 password = (os.getenv("UPSTASH_PASSWORD") or "").strip()
 
-# ── Gemini OCR Configuration ──────────────────────────────────────────────────
-# Set GEMINI_API_KEY in .env.production (and locally in .env) to enable OCR.
-# Model default lives in .env.example as GEMINI_MODEL=gemini-2.5-pro
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro").strip()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Qdrant Client (Synchronous — Celery doesn't use async)
-# ─────────────────────────────────────────────────────────────────────────────
-_qdrant_client = None
-
-
-def get_qdrant() -> QdrantClient:
-    global _qdrant_client
-    if _qdrant_client is None:
-        # Qdrant Cloud can be slow to respond during cold starts; increase HTTP timeouts.
-        _qdrant_client = QdrantClient(
-            url=QDRANT_URL,
-            api_key=QDRANT_API_KEY,
-            timeout=QDRANT_TIMEOUT_SECONDS,
-        )
-    return _qdrant_client
-
-
-def ensure_collection_exists(client: QdrantClient):
-    """Creates the Qdrant collection if it doesn't already exist."""
-    existing = [c.name for c in client.get_collections().collections]
-    if QDRANT_COLLECTION not in existing:
-        client.create_collection(
-            collection_name=QDRANT_COLLECTION,
-            vectors_config={
-                "dense": VectorParams(
-                    size=1024,  # BGE-M3 output size via OpenRouter
-                    distance=Distance.COSINE,
-                )
-            },
-            sparse_vectors_config={
-                "text-sparse": SparseVectorParams(modifier=Modifier.IDF)
-            },
-        )
-
-        # Create an index for file_id so we can filter by it
-        client.create_payload_index(
-            collection_name=QDRANT_COLLECTION,
-            field_name="file_id",
-            field_schema=PayloadSchemaType.INTEGER,
-        )
-        # Create an index for org_id so we can filter by it
-        client.create_payload_index(
-            collection_name=QDRANT_COLLECTION,
-            field_name="org_id",
-            field_schema=PayloadSchemaType.KEYWORD,
-        )
-        # Create an index for filename so read_tool can filter by contract name
-        client.create_payload_index(
-            collection_name=QDRANT_COLLECTION,
-            field_name="filename",
-            field_schema=PayloadSchemaType.KEYWORD,
-        )
-
-
-# ── Sparse Vector builder ────────────────────────────────────────────────────
-from app.utils.vector_utils import compute_sparse_vector as _compute_sparse_dict
-
-def compute_sparse_vector(text: str) -> SparseVector:
-    """Creates a SparseVector object for Qdrant using the shared dictionary builder."""
-    d = _compute_sparse_dict(text)
-    return SparseVector(indices=d["indices"], values=d["values"])
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-# PDF Inspector — Detects if a PDF is digital or scanned
-# ─────────────────────────────────────────────────────────────────────────────
-def is_scanned_pdf(file_bytes: bytes) -> bool:
-    """
-    Returns True if the PDF appears to be a scanned image (no extractable text).
-    Checks the first 3 pages — if none have text, it's likely a scan.
-
-    NOTE: This is a heuristic. In production we still rely on the OCR queue
-    for scans and the digital queue for normal PDFs.
-    """
-    reader = PdfReader(io.BytesIO(file_bytes))
-    pages_to_check = min(3, len(reader.pages))
-    for i in range(pages_to_check):
-        text = reader.pages[i].extract_text()
-        if text and text.strip():
-            return False
-    return True
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Synchronous Connection Pools (For Celery Workers)
@@ -163,7 +53,6 @@ from psycopg2 import pool
 
 _redis_conn = None
 _pg_pool = None
-
 
 def get_redis_conn():
     global _redis_conn
@@ -181,7 +70,6 @@ def get_redis_conn():
         _redis_conn = sync_redis.Redis.from_url(redis_url, decode_responses=True)
     return _redis_conn
 
-
 def get_pg_pool():
     global _pg_pool
     if _pg_pool is None:
@@ -189,39 +77,35 @@ def get_pg_pool():
         _pg_pool = pool.SimpleConnectionPool(1, 10, db_url)
     return _pg_pool
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Redis Progress Updater (Synchronous for Celery)
-# ─────────────────────────────────────────────────────────────────────────────
-def update_progress_sync(file_id: int, percent: int):
-    """Updates the processing progress in Redis using a connection pool."""
+def update_progress_sync(document_id: str, percent: int):
+    """Updates the processing progress in Redis."""
     r = get_redis_conn()
-    r.set(f"progress:{file_id}", percent, ex=600)
-
+    r.set(f"progress:{document_id}", percent, ex=600)
 
 def update_postgres_status_sync(
-    file_id: int,
+    document_id: str,
     status: str,
-    content: str | None = None,
     error: str | None = None,
+    stages_complete: dict | None = None
 ):
-    """Updates the file status in Postgres using a synchronous connection pool."""
+    """Updates the document status in Postgres using a synchronous connection pool."""
     pg_pool = get_pg_pool()
     conn = pg_pool.getconn()
     try:
+        import json
         with conn.cursor() as cur:
-            if content is not None:
+            if stages_complete is not None:
                 cur.execute(
-                    "UPDATE files SET status=%s, content=%s WHERE id=%s",
-                    (status, content, file_id),
+                    "UPDATE documents SET status=%s, intelligence_stages_complete=%s WHERE id=%s",
+                    (status, json.dumps(stages_complete), document_id),
                 )
             elif error is not None:
                 cur.execute(
-                    "UPDATE files SET status=%s, error_message=%s WHERE id=%s",
-                    (status, error, file_id),
+                    "UPDATE documents SET status=%s, error_message=%s WHERE id=%s",
+                    (status, error, document_id),
                 )
             else:
-                cur.execute("UPDATE files SET status=%s WHERE id=%s", (status, file_id))
+                cur.execute("UPDATE documents SET status=%s WHERE id=%s", (status, document_id))
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -230,177 +114,149 @@ def update_postgres_status_sync(
         pg_pool.putconn(conn)
 
 
-def _gemini_ocr_pdf_to_markdown(pdf_path: str) -> str:
+# ─────────────────────────────────────────────────────────────────────────────
+# Async Pipeline Runner
+# ─────────────────────────────────────────────────────────────────────────────
+async def run_intelligence_pipeline_async(
+    document_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    org_id: uuid.UUID,
+    filename: str,
+    chunks: List[Dict]
+):
     """
-    Backwards-compatible helper: OCR a scanned PDF into Markdown.
-
-    NOTE: We now prefer per-page Markdown via app.services.ocr_gemini so chunking has
-    better boundaries ("new chunk at headers") and less cross-clause leakage.
-    This function keeps the old call-site shape for minimal refactors.
+    Runs the intelligence extraction tasks in parallel using asyncio.
     """
-    if not GEMINI_API_KEY:
-        raise RuntimeError(
-            "GEMINI_API_KEY is missing. Set it in your environment / .env.production to enable OCR."
-        )
-    if not GEMINI_MODEL:
-        raise RuntimeError(
-            "GEMINI_MODEL is missing/empty. Set GEMINI_MODEL (e.g. gemini-2.5-pro)."
-        )
+    embedder = LegalEmbedder()
+    terms_extractor = DefinedTermExtractor()
+    deadline_extractor = DeadlineExtractor()
+    graph_extractor = LLMReferenceParser()
+    neo4j_graph = DependencyGraph()
 
-    # Ensure we never pass None to the OCR helper (type-checker + runtime safety).
-    pages = ocr_pdf_path_to_markdown_pages(
-        pdf_path, api_key=str(GEMINI_API_KEY), model=str(GEMINI_MODEL)
+    # Step A: Run synchronous Embedder inside an executor
+    loop = asyncio.get_running_loop()
+    
+    async def task_embed():
+        logger.info(f"[{document_id}] Starting embedding...")
+        await loop.run_in_executor(None, embedder.index_document, filename, chunks)
+        return "embedding_complete"
+
+    async def task_terms():
+        logger.info(f"[{document_id}] Starting terms extraction...")
+        await terms_extractor.extract_and_store(chunks, document_id, workspace_id, org_id)
+        return "terms_complete"
+
+    async def task_deadlines():
+        logger.info(f"[{document_id}] Starting deadlines extraction...")
+        await deadline_extractor.extract_and_store(chunks, document_id, workspace_id, org_id)
+        return "deadlines_complete"
+
+    async def task_graph():
+        logger.info(f"[{document_id}] Starting graph extraction...")
+        # Resolve references (LLM)
+        resolved_chunks = await loop.run_in_executor(
+            None, 
+            graph_extractor.resolve_references, 
+            chunks, 
+            filename, 
+            neo4j_graph
+        )
+        # Build neo4j graph
+        await loop.run_in_executor(None, neo4j_graph.build_graph, resolved_chunks, filename)
+        neo4j_graph.close()
+        return "graph_complete"
+
+    # Run them all concurrently
+    results = await asyncio.gather(
+        task_embed(),
+        task_terms(),
+        task_deadlines(),
+        task_graph(),
+        return_exceptions=True
     )
-
-    # Join pages with explicit delimiters to preserve page boundaries in the stored content.
-    out = []
-    for p in pages:
-        out.append(f"===PAGE {p['page']}===\n{p.get('text', '').strip()}")
-    return "\n\n".join(out).strip()
+    
+    stages = {}
+    for res in results:
+        if isinstance(res, Exception):
+            logger.error(f"[{document_id}] Task failed: {res}")
+        else:
+            stages[res] = True
+            
+    return stages
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core Processing — Uses Your Existing Services
+# Core Processing
 # ─────────────────────────────────────────────────────────────────────────────
-def _process_file_core(
-    file_id: int,
-    org_id: str,
+def _process_document_core(
+    document_id_str: str,
+    workspace_id_str: str,
+    org_id_str: str,
     filename: str,
     file_path: str,
     *,
     pages_data_override: Optional[List[Dict]] = None,
-    full_text_override: Optional[str] = None,
 ):
-    """
-    Processes a PDF using the existing pipeline:
-      1. Extract pages_data: List[{page, text}]
-         - Digital PDFs: parser.extract_from_pdf()
-         - Scanned PDFs: Gemini OCR -> Markdown -> pages_data_override
-      2. chunker.chunk_text()       → List[{chunk_text, section_text, parent_id, page_number}]
-      3. embedder.get_embedding()   → List[List[float]]
-      4. Qdrant upsert              → tagged with file_id + org_id
-    """
+    document_id = uuid.UUID(document_id_str)
+    workspace_id = uuid.UUID(workspace_id_str)
+    org_id = uuid.UUID(org_id_str)
+    
     try:
-        # ── Step 1: Parse/OCR into pages_data ────────────────────────────────
-        update_progress_sync(file_id, 5)
+        update_progress_sync(document_id_str, 5)
+        parser = LegalDocumentParser()
 
+        # 1. Parse
         if pages_data_override is not None:
-            pages_data = pages_data_override
-            full_text = (
-                full_text_override
-                if full_text_override is not None
-                else "\n".join(p.get("text", "") for p in pages_data if p.get("text"))
-            )
+            raw_blocks = parser.parse_markdown(pages_data_override)
         else:
-            # Digital path: Open file natively from disk instead of RAM buffering
-            with open(file_path, "rb") as f:
-                pages_data = extract_from_pdf(f)
+            if file_path.lower().endswith(".pdf"):
+                raw_blocks = parser.parse_pdf(file_path)
+            else:
+                raw_blocks = parser.parse_docx(file_path)
 
-            if not pages_data:
-                update_postgres_status_sync(
-                    file_id, "FAILED", error="No text could be extracted from PDF."
-                )
-                return
-
-            # Build the full raw text for storage in Postgres
-            full_text = "\n".join(p["text"] for p in pages_data)
-
-        if not pages_data:
-            update_postgres_status_sync(
-                file_id, "FAILED", error="No text could be extracted from PDF."
-            )
+        if not raw_blocks:
+            update_postgres_status_sync(document_id_str, "FAILED", error="No text could be extracted.")
             return
 
-        # ── Step 2: Chunk (using your existing hierarchical chunker.py) ──────
-        update_progress_sync(file_id, 15)
-        chunk_objects = chunk_text(pages_data)
-        total_chunks = len(chunk_objects)
+        update_progress_sync(document_id_str, 20)
 
-        if total_chunks == 0:
-            update_postgres_status_sync(
-                file_id, "FAILED", error="Chunking produced no results."
-            )
+        # 2. Chunk
+        chunker = ClauseChunker(body_font_size=parser.body_font_size)
+        chunks = chunker.build_chunks(raw_blocks)
+        
+        if not chunks:
+            update_postgres_status_sync(document_id_str, "FAILED", error="Chunking produced no results.")
             return
 
-        print(
-            f"[tasks] File {file_id}: {len(pages_data)} pages → {total_chunks} chunks"
+        # Add document metadata to chunks
+        for chunk in chunks:
+            chunk["document_name"] = filename
+
+        update_progress_sync(document_id_str, 40)
+
+        # 3. Parallel Intelligence Pipelines
+        stages_complete = asyncio.run(
+            run_intelligence_pipeline_async(
+                document_id, workspace_id, org_id, filename, chunks
+            )
         )
 
-        # ── Step 3: Embed + Upsert to Qdrant ────────────────────────────────
-        print(f"[tasks] File {file_id}: Connecting to Qdrant...")
-        qdrant = get_qdrant()
-        print(f"[tasks] File {file_id}: Ensuring collection exists...")
-        ensure_collection_exists(qdrant)
-        print(
-            f"[tasks] File {file_id}: Ready to upsert {total_chunks} chunks in batches"
-        )
+        update_progress_sync(document_id_str, 90)
 
-        BATCH_SIZE = 20
-
-        for batch_start in range(0, total_chunks, BATCH_SIZE):
-            batch = chunk_objects[batch_start : batch_start + BATCH_SIZE]
-            texts = [c["chunk_text"] for c in batch]
-            vectors = get_embedding(texts)
-
-            if not vectors:
-                print(f"[tasks] Warning: embedding failed for batch {batch_start}")
-                continue
-
-            batch_points = []
-
-            for i, (chunk, vector) in enumerate(zip(batch, vectors)):
-                global_idx = batch_start + i
-
-                search_text = chunk.get("section_text", "") + " " + chunk["chunk_text"]
-                sparse_vec = compute_sparse_vector(search_text)
-
-                import uuid
-
-                batch_points.append(
-                    PointStruct(
-                        id=str(
-                            uuid.uuid5(
-                                uuid.NAMESPACE_OID, f"{org_id}_{file_id}_{global_idx}"
-                            )
-                        ),
-                        vector={
-                            "": vector,
-                            "text-sparse": sparse_vec,
-                        },
-                        payload={
-                            "file_id": file_id,
-                            "org_id": org_id,
-                            "chunk_text": chunk["chunk_text"],
-                            "section_text": chunk.get("section_text", ""),
-                            "parent_id": chunk.get("parent_id", ""),
-                            "source_type": chunk.get("source_type", ""),
-                            "page_number": chunk.get("page_number", 0),
-                            "filename": filename,
-                        },
-                    )
-                )
-
-            if batch_points:
-                qdrant.upsert(collection_name=QDRANT_COLLECTION, points=batch_points)
-
-            progress = 15 + int(((batch_start + BATCH_SIZE) / total_chunks) * 75)
-            update_progress_sync(file_id, min(progress, 90))
-
-        # ── Step 5: Mark as READY in Postgres ───────────────────────────────
-        update_postgres_status_sync(file_id, "READY", content=full_text)
-        update_progress_sync(file_id, 100)
-        print(f"[tasks] File {file_id} ({filename}): READY ✓")
+        # 4. Mark Ready
+        update_postgres_status_sync(document_id_str, "READY", stages_complete=stages_complete)
+        update_progress_sync(document_id_str, 100)
+        logger.info(f"[{document_id_str}] Document Processing Complete")
 
     except Exception as e:
-        print(f"[tasks] File {file_id} FAILED: {e}")
-        update_postgres_status_sync(file_id, "FAILED", error=str(e))
+        logger.error(f"[{document_id_str}] FAILED: {e}")
+        update_postgres_status_sync(document_id_str, "FAILED", error=str(e))
         raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Celery Task Definitions (Two Queues)
 # ─────────────────────────────────────────────────────────────────────────────
-
 
 @celery_app.task(
     name="app.tasks.process_digital_pdf",
@@ -409,38 +265,21 @@ def _process_file_core(
     default_retry_delay=60,
     queue="default",
 )
-def process_digital_pdf(self, file_id: int, org_id: str, filename: str, blob_name: str):
-    """
-    Task for clean, digital PDFs. Runs on the fast "default" queue.
-    blob_name: The R2/S3 object key.
-    """
+def process_digital_pdf(self, document_id: str, workspace_id: str, org_id: str, filename: str, blob_name: str):
     import os
-    import uuid
-
     from app.services.object_storage import delete_file_from_gcs, download_file_from_gcs
 
-    local_temp_path = f"/tmp/{uuid.uuid4().hex}.pdf"
+    local_temp_path = f"/tmp/{uuid.uuid4().hex}_{filename}"
     try:
-        print(f"[tasks] Downloading {blob_name} to {local_temp_path}...")
         download_file_from_gcs(blob_name, local_temp_path)
-
-        _process_file_core(file_id, org_id, filename, local_temp_path)
-
-        # Success Cleanup
+        _process_document_core(document_id, workspace_id, org_id, filename, local_temp_path)
         delete_file_from_gcs(blob_name)
     except Exception as exc:
-        safe_exc = RuntimeError(
-            f"process_digital_pdf failed with {type(exc).__name__}: {exc}"
-        )
+        safe_exc = RuntimeError(f"Task failed: {exc}")
         raise self.retry(exc=safe_exc)
     finally:
-        # Disk Cleanup: ALWAYS delete temp file to prevent disk exhaustion
-        try:
-            if os.path.exists(local_temp_path):
-                os.remove(local_temp_path)
-                print(f"[tasks] Cleaned up temporary file: {local_temp_path}")
-        except Exception as e:
-            print(f"[tasks] Warning: Failed to clean up {local_temp_path}: {e}")
+        if os.path.exists(local_temp_path):
+            os.remove(local_temp_path)
 
 
 @celery_app.task(
@@ -450,182 +289,84 @@ def process_digital_pdf(self, file_id: int, org_id: str, filename: str, blob_nam
     default_retry_delay=120,
     queue="ocr",
 )
-def process_scanned_pdf(self, file_id: int, org_id: str, filename: str, blob_name: str):
-    """
-    Task for scanned/image PDFs. Runs on the slow "ocr" queue.
-
-    Uses Gemini Vision OCR to extract structured Markdown, then runs the same
-    chunk/embed/upsert pipeline as digital PDFs.
-    """
+def process_scanned_pdf(self, document_id: str, workspace_id: str, org_id: str, filename: str, blob_name: str):
     import os
-    import uuid
-
     from app.services.object_storage import delete_file_from_gcs, download_file_from_gcs
 
-    local_temp_path = f"/tmp/{uuid.uuid4().hex}.pdf"
+    local_temp_path = f"/tmp/{uuid.uuid4().hex}_{filename}"
     try:
-        print(f"[tasks] Downloading {blob_name} to {local_temp_path}...")
         download_file_from_gcs(blob_name, local_temp_path)
-
+        
         if not GEMINI_API_KEY:
-            raise RuntimeError(
-                "Scanned PDF OCR requires GEMINI_API_KEY. Set it in .env.production."
-            )
+            raise RuntimeError("Scanned PDF OCR requires GEMINI_API_KEY.")
 
-        # ── OCR with Gemini → Markdown (per page) ────────────────────────────
-        update_progress_sync(file_id, 8)
-        try:
-            pages_data = ocr_pdf_path_to_markdown_pages(
-                local_temp_path, api_key=GEMINI_API_KEY, model=GEMINI_MODEL
-            )
-        except GeminiOcrError as e:
-            update_postgres_status_sync(
-                file_id,
-                "FAILED",
-                error=f"Gemini OCR failed: {str(e)}",
-            )
-            return
-
-        # Normalize / drop empty pages (do not fabricate content)
+        pages_data = ocr_pdf_path_to_markdown_pages(
+            local_temp_path, api_key=GEMINI_API_KEY, model=GEMINI_MODEL
+        )
+        
         pages_data = [
             {"page": int(p.get("page") or 1), "text": (p.get("text") or "").strip()}
-            for p in pages_data
-            if (p.get("text") or "").strip()
+            for p in pages_data if (p.get("text") or "").strip()
         ]
 
         if not pages_data:
-            update_postgres_status_sync(
-                file_id,
-                "FAILED",
-                error="Gemini OCR returned empty text for scanned PDF.",
-            )
-            return
+            raise RuntimeError("Gemini OCR returned empty text.")
 
-        # Store a single markdown blob with page delimiters
-        full_md = "\n\n".join(
-            [f"===PAGE {p['page']}===\n{p['text']}" for p in pages_data]
-        ).strip()
-
-        _process_file_core(
-            file_id,
-            org_id,
-            filename,
-            local_temp_path,
-            pages_data_override=pages_data,
-            full_text_override=full_md,
+        _process_document_core(
+            document_id, workspace_id, org_id, filename, local_temp_path, pages_data_override=pages_data
         )
-
-        # Success Cleanup
         delete_file_from_gcs(blob_name)
-
     except Exception as exc:
-        safe_exc = RuntimeError(
-            f"process_scanned_pdf failed with {type(exc).__name__}: {exc}"
-        )
+        safe_exc = RuntimeError(f"Task failed: {exc}")
         raise self.retry(exc=safe_exc)
     finally:
-        try:
-            if os.path.exists(local_temp_path):
-                os.remove(local_temp_path)
-                print(f"[tasks] Cleaned up temporary file: {local_temp_path}")
-        except Exception as e:
-            print(f"[tasks] Warning: Failed to clean up {local_temp_path}: {e}")
+        if os.path.exists(local_temp_path):
+            os.remove(local_temp_path)
 
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def qdrant_heartbeat(self):
+@celery_app.task(name="app.tasks.cleanup_stale_data")
+def cleanup_stale_data():
     """
-    Pings the Qdrant Cloud cluster periodically to prevent it from spinning down
-    due to inactivity. A simple `get_collections()` call is enough.
+    Periodic maintenance task to purge expired invites and stale temporary files.
     """
-    try:
-        print("💓 Pinging Qdrant to keep cluster hot...")
-        client = get_qdrant()
-        collections = client.get_collections()
-        print(
-            f"💓 Qdrant ping successful. Found {len(collections.collections)} collections."
-        )
-        return "Ping successful"
-    except Exception as exc:
-        print(f"❌ Qdrant ping failed: {exc}")
-        raise self.retry(exc=exc)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Dead Letter Queue — task_failure signal
-# Celery has no built-in DLQ. This signal fires whenever a task exhausts all
-# retries. We log it as structured JSON so it's visible in log aggregators.
-# ─────────────────────────────────────────────────────────────────────────────
-from celery.signals import task_failure  # noqa: E402
-
-
-@task_failure.connect
-def handle_task_failure(
-    sender=None,
-    task_id=None,
-    exception=None,
-    args=None,
-    kwargs=None,
-    traceback=None,
-    einfo=None,
-    **kw,
-):
-    logger.error(
-        "Celery task permanently failed",
-        extra={
-            "task_name": sender.name if sender else "unknown",
-            "task_id": task_id,
-            "exception_type": type(exception).__name__ if exception else "unknown",
-            "exception_msg": str(exception)[:500] if exception else "",
-            "task_args": str(args)[:200] if args else "",
-            "task_kwargs": str(kwargs)[:200] if kwargs else "",
-        },
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Sweep: detect tasks stuck in PENDING for > 30 min and mark them FAILED.
-# This catches cases where the Celery worker crashed before even starting the
-# task (message was consumed from the broker but worker died mid-flight).
-# ─────────────────────────────────────────────────────────────────────────────
-@celery_app.task(name="app.tasks.sweep_failed_tasks")
-def sweep_failed_tasks():
-    from datetime import datetime, timedelta, timezone
-
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    from datetime import datetime, timezone
+    import time
 
     pg_pool = get_pg_pool()
     conn = pg_pool.getconn()
+    deleted_invites = 0
+    deleted_tmp = 0
+
     try:
         with conn.cursor() as cur:
+            # 1. Purge expired invites that were never accepted
             cur.execute(
-                """
-                UPDATE files
-                SET status = 'FAILED',
-                    error_message = 'Task timed out: stuck in PENDING for >30 min. Re-upload or use /reprocess.'
-                WHERE status = 'PENDING'
-                  AND upload_date < %s
-                RETURNING id, filename
-                """,
-                (cutoff,),
+                "DELETE FROM organization_invites WHERE expires_at < %s AND is_accepted = FALSE",
+                (datetime.now(timezone.utc),)
             )
-            rows = cur.fetchall()
+            deleted_invites = cur.rowcount
         conn.commit()
 
-        if rows:
-            for file_id, filename in rows:
-                logger.warning(
-                    "Swept stuck PENDING task",
-                    extra={"file_id": file_id, "file_name": filename},
-                )
-            logger.info(
-                f"sweep_failed_tasks: marked {len(rows)} stuck file(s) as FAILED"
-            )
-        else:
-            logger.info("sweep_failed_tasks: no stuck tasks found")
+        # 2. Sweep /tmp for processing remnants older than 2 hours
+        tmp_dir = "/tmp"
+        now = time.time()
+        for filename in os.listdir(tmp_dir):
+            # Target files created by our PDF processing tasks
+            if filename.startswith("temp_") or "_digital_" in filename or "_scanned_" in filename:
+                file_path = os.path.join(tmp_dir, filename)
+                try:
+                    if os.path.isfile(file_path) and now - os.path.getmtime(file_path) > 7200:
+                        os.remove(file_path)
+                        deleted_tmp += 1
+                except Exception:
+                    continue
 
+        logger.info(
+            "Maintenance Task: Purged %d expired invites and %d stale temp files.",
+            deleted_invites, deleted_tmp
+        )
     except Exception as e:
         conn.rollback()
-        logger.error(f"sweep_failed_tasks error: {e}")
+        logger.error("Maintenance Task Failed: %s", e)
     finally:
         pg_pool.putconn(conn)

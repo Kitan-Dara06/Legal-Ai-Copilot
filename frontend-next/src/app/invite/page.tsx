@@ -101,8 +101,12 @@ function InviteContent() {
       }, 1500);
 
     } catch (err: any) {
-      setError(err.message || "Failed to accept invitation.");
-      setIsSubmitting(false);
+      if (err.code === "login_required") {
+        router.push(`/login?redirect=/invite?token=${token}&msg=login_required`);
+      } else {
+        setError(err.message || "Failed to accept invitation.");
+        setIsSubmitting(false);
+      }
     }
   };
 

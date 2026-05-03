@@ -1,4 +1,5 @@
-import hashlib
+import os
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -68,12 +69,31 @@ async def generate_invite(
     db.add(new_invite)
     await db.commit()
 
-    # TODO: In a real app, trigger Celery task to send email with raw_token
-    # send_invite_email.delay(payload.email, raw_token, org_id)
+    # Dispatch Supabase Magic Link
+    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+    if supabase_url and service_role_key:
+        try:
+            from supabase import create_client as create_supabase_client
+            admin_client = create_supabase_client(supabase_url, service_role_key)
+            # The redirect_to should ideally point to our /invite page with the token
+            # But Supabase's invite_user_by_email sends a magic link for Supabase auth.
+            # We use type=recovery as a trick to allow password setting.
+            admin_client.auth.admin.invite_user_by_email(
+                payload.email,
+                options={"redirect_to": f"{frontend_url}/invite?token={raw_token}"},
+            )
+            logging.getLogger(__name__).info(f"Supabase invite sent to {payload.email}")
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed to send Supabase invite: {e}")
+            # We don't fail the request here because the local invite is already created.
+            # The admin can still manually share the link if needed.
 
     return {
-        "message": "Invite generated successfully.",
-        "raw_token": raw_token, # Returning raw_token for now so it's visible in tests
+        "message": "Invite generated successfully. If configured, an email has been sent.",
+        "invite_link": f"{frontend_url}/invite?token={raw_token}",
         "expires_at": new_invite.expires_at
     }
 
@@ -141,13 +161,10 @@ async def accept_invite(
     existing_user = (await db.execute(stmt)).scalar_one_or_none()
 
     if existing_user:
-        # User already exists, verify their password
-        if not pwd_context.verify(payload.password, existing_user.hashed_password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User with this email already exists. Please enter your correct existing password to accept the invite."
-            )
-        target_user = existing_user
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "login_required", "message": "Invitation recognized. Please log in to continue."}
+        )
     else:
         # 1. Create the user in Supabase Auth first
         import os
@@ -170,6 +187,10 @@ async def accept_invite(
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning("Supabase user creation failed: %s", e)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to create authentication profile. Please try again later."
+                )
 
         # 2. Create the user in our local Postgres database
         new_user = User(
@@ -214,7 +235,10 @@ async def accept_invite(
     
     jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
     if not jwt_secret:
-        jwt_secret = "placeholder_secret"
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server configuration error: JWT signing secret is missing."
+        )
     
     now = datetime.now(timezone.utc)
     payload_jwt = {

@@ -42,3 +42,18 @@ python-jose[cryptography]  # JWT verification (Supabase auth)
 supabase  # Supabase client (frontend auth)
 
 psycopg2-binary==2.9.9
+
+# ── Master Orchestrator (LangGraph + Groq LLM) ──────────────────────────────
+langgraph>=1.0.0              # State machine graph for agentic workflows
+langgraph-checkpoint-postgres>=3.0.0  # Async Postgres checkpointer
+langchain-core>=1.2.0         # Base abstractions (messages, LLMs)
+langchain-groq>=1.1.0         # ChatGroq adapter for Llama 3.3 70B
+psycopg[binary]>=3.1.0        # Async Postgres driver for LangGraph checkpointer
+
+# ── Due Diligence pipeline (voyage-law-2, Neo4j, SPLADE) ────────────────────
+voyageai                  # voyage-law-2 legal embedding model (primary)
+neo4j>=5.20.0             # Neo4j AuraDB driver
+sentence-transformers     # nomic-embed-text-v1.5 backup embedder
+fastembed                 # SPLADE sparse vector embedder
+python-docx               # DOCX document parsing
+pymupdf                   # PDF parsing via fitz (legal document parser)

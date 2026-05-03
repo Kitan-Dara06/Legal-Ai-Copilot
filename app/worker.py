@@ -22,27 +22,32 @@ if _sentry_dsn:
         send_default_pii=True,
     )
 
-# 1. Broker: RabbitMQ (task queue). Result backend: Redis (results only).
-#    Using the same Redis for both broker and results does not scale well.
+# 1. Configuration Parameters
 host = os.getenv("UPSTASH_HOST")
 port = os.getenv("UPSTASH_PORT", "6379")
 password = os.getenv("UPSTASH_PASSWORD")
 
 rabbitmq_url = os.getenv("RABBITMQ_URL")
 if not rabbitmq_url:
-    # Build from components (e.g. CloudAMQP, or local RabbitMQ)
     rq_host = os.getenv("RABBITMQ_HOST", "localhost")
     rq_port = os.getenv("RABBITMQ_PORT", "5672")
     rq_user = os.getenv("RABBITMQ_USER", "guest")
     rq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
     rq_vhost = os.getenv("RABBITMQ_VHOST", "/")
     from urllib.parse import quote_plus
-
     rabbitmq_url = f"amqp://{rq_user}:{quote_plus(rq_password)}@{rq_host}:{rq_port}/{quote_plus(rq_vhost)}"
 
 BROKER_URL = rabbitmq_url
-REDIS_URL = f"rediss://default:{password}@{host}:{port}/0?ssl_cert_reqs=required"
-broker_label = "RabbitMQ"
+
+# 2. Redis Result Backend (Upstash or Local)
+if not host or host == "localhost":
+    # Local Development Fallback
+    REDIS_URL = f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}/0"
+    broker_label = f"RabbitMQ + Local Redis"
+else:
+    # Production (Upstash/Managed)
+    REDIS_URL = f"rediss://default:{password}@{host}:{port}/0?ssl_cert_reqs=required"
+    broker_label = "RabbitMQ + Upstash"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Create the Celery App
@@ -107,19 +112,16 @@ celery_app.conf.update(
         "app.tasks.map_reduce.finalize_pdf_processing": {"queue": "default"},
         "app.tasks.process_digital_pdf": {"queue": "default"},
         "app.tasks.process_scanned_pdf": {"queue": "ocr"},
+        "app.tasks.cleanup_stale_data": {"queue": "default"},
+    },
+    # ── Periodic Maintenance ─────────────────────────────────────────────────
+    beat_schedule={
+        "cleanup-stale-data-hourly": {
+            "task": "app.tasks.cleanup_stale_data",
+            "schedule": 3600.0, # Every hour
+        },
     },
     # Retry failed tasks up to 3 times with a 60-second delay
     task_acks_late=True,
     task_reject_on_worker_lost=True,
-    # ── Periodic Check (Beat) ────────────────────────────────────────────────
-    beat_schedule={
-        "qdrant-heartbeat-every-12-hours": {
-            "task": "app.tasks.qdrant_heartbeat",
-            "schedule": 43200.0,  # 12 hours in seconds
-        },
-        "sweep-stuck-pending-every-5-minutes": {
-            "task": "app.tasks.sweep_failed_tasks",
-            "schedule": 300.0,  # every 5 minutes
-        },
-    },
 )

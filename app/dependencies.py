@@ -153,9 +153,7 @@ async def get_supabase_claims(
 
     if not auth_header or not auth_header.startswith("Bearer "):
         logger.warning(
-            "[get_supabase_claims] Missing or invalid Authorization header: %s. All headers: %s",
-            auth_header,
-            dict(request.headers),
+            "[get_supabase_claims] Missing or invalid Authorization header."
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -271,7 +269,8 @@ async def _verify_supabase_token(token: str) -> dict:
             public_key.to_pem().decode("utf-8"),
             algorithms=[alg],
             audience=SUPABASE_JWT_AUD,
-            options={"verify_exp": True, "verify_aud": True},
+            issuer=f"{SUPABASE_URL}/auth/v1" if SUPABASE_URL else None,
+            options={"verify_exp": True, "verify_aud": True, "verify_iss": True},
         )
     except JWTError as exc:
         raise HTTPException(

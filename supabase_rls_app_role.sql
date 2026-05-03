@@ -5,45 +5,51 @@
 -- Anonymous / authenticated Supabase roles get NO access via PostgREST.
 -- This prevents data exposure through Supabase's auto-generated REST API.
 
--- Drop old permissive policies first
+-- Drop old permissive policies first (including deprecated table names)
 DROP POLICY IF EXISTS "app_role_all_organizations" ON organizations;
 DROP POLICY IF EXISTS "app_role_all_users" ON users;
 DROP POLICY IF EXISTS "app_role_all_api_keys" ON api_keys;
-DROP POLICY IF EXISTS "app_role_all_invites" ON invites;
-DROP POLICY IF EXISTS "app_role_all_files" ON files;
+DROP POLICY IF EXISTS "app_role_all_invites" ON organization_invites;
+DROP POLICY IF EXISTS "app_role_all_files" ON documents;
 
--- Organizations: only service_role (backend) can access
-ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "service_role_all_organizations"
-  ON organizations FOR ALL TO service_role
-  USING (true) WITH CHECK (true);
-
--- Users: only service_role
-ALTER TABLE users ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "service_role_all_users"
-  ON users FOR ALL TO service_role
-  USING (true) WITH CHECK (true);
-
--- API keys: only service_role
-ALTER TABLE api_keys ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "service_role_all_api_keys"
-  ON api_keys FOR ALL TO service_role
-  USING (true) WITH CHECK (true);
-
--- Invites: only service_role
-ALTER TABLE invites ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "service_role_all_invites"
-  ON invites FOR ALL TO service_role
-  USING (true) WITH CHECK (true);
-
--- Files: only service_role
-ALTER TABLE files ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "service_role_all_files"
-  ON files FOR ALL TO service_role
-  USING (true) WITH CHECK (true);
-
--- User-org memberships: only service_role
-ALTER TABLE user_org_memberships ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "service_role_all_user_org_memberships"
-  ON user_org_memberships FOR ALL TO service_role
-  USING (true) WITH CHECK (true);
+-- Helper to quickly enable RLS and create service_role-only policy
+DO $$
+DECLARE
+    t_name text;
+    tables_list text[] := ARRAY[
+        'organizations',
+        'users',
+        'user_org_memberships',
+        'api_keys',
+        'organization_invites',
+        'workspaces',
+        'workspace_sessions',
+        'documents',
+        'goals',
+        'workflow_executions',
+        'findings',
+        'actions',
+        'approval_requests',
+        'audit_log',
+        'defined_terms_registry',
+        'deadline_registry',
+        'tool_call_log'
+    ];
+BEGIN
+    FOREACH t_name IN ARRAY tables_list
+    LOOP
+        -- Enable RLS
+        EXECUTE format('ALTER TABLE IF EXISTS %I ENABLE ROW LEVEL SECURITY', t_name);
+        
+        -- Drop any existing service_role policy to avoid duplicates
+        EXECUTE format('DROP POLICY IF EXISTS "service_role_all_%s" ON %I', t_name, t_name);
+        
+        -- Create the service_role-only policy
+        EXECUTE format('
+            CREATE POLICY "service_role_all_%s"
+            ON %I FOR ALL TO service_role
+            USING (true) WITH CHECK (true);
+        ', t_name, t_name);
+    END LOOP;
+END
+$$;

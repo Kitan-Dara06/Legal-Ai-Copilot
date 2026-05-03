@@ -16,6 +16,7 @@ from app.services.legal_primitives import (
     read_tool,
     search_tool,
 )
+from app.utils import sanitize_goal_text
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ from app.services.legal_primitives import groq_client
 
 async def _classify_intent(question: str) -> str:
     """LLM-based classification to route query to the right toolchain"""
+    safe_question = sanitize_goal_text(question)
 
     system_prompt = """You are a legal intent classifier.
 Analyze the user's question and classify it into EXACTLY ONE of these three categories:
@@ -46,10 +48,10 @@ You must output strictly valid JSON matching this schema:
 
     try:
         response = await groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question},
+                {"role": "user", "content": safe_question},
             ],
             response_format={"type": "json_object"},
             temperature=0,

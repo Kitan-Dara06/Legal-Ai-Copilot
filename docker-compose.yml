@@ -1,18 +1,73 @@
 version: "3.9"
 
 services:
+    db:
+        image: postgres:15-alpine
+        restart: always
+        environment:
+            POSTGRES_USER: ${POSTGRES_USER:-postgres}
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+            POSTGRES_DB: ${POSTGRES_DB:-legal_rag}
+        volumes:
+            - postgres_data:/var/lib/postgresql/data
+        networks:
+            - internal
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+
+    redis:
+        image: redis:7-alpine
+        restart: always
+        networks:
+            - internal
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+
+    migrations:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        env_file:
+            - .env.production
+        command: alembic upgrade head
+        depends_on:
+            db:
+                condition: service_healthy
+        networks:
+            - internal
+
     api:
         build:
             context: .
             dockerfile: Dockerfile
         environment:
-            # Use your public URL in production (e.g. https://app.example.com)
             - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost}
         env_file:
             - .env.production
-        command: uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=*
+        command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --proxy-headers --forwarded-allow-ips=*
         restart: always
-        networks: [internal]
+        depends_on:
+            db:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+            rabbitmq:
+                condition: service_healthy
+            migrations:
+                condition: service_completed_successfully
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+        networks:
+            - internal
 
     worker_pdf:
         build:
@@ -22,7 +77,15 @@ services:
             - .env.production
         command: celery -A app.worker worker -Q default -n pdf_worker@%h -c 2
         restart: always
-        networks: [internal]
+        depends_on:
+            db:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+            rabbitmq:
+                condition: service_healthy
+        networks:
+            - internal
 
     worker_ocr:
         build:
@@ -32,19 +95,15 @@ services:
             - .env.production
         command: celery -A app.worker worker -Q ocr -n ocr_worker@%h -c 1
         restart: always
-        networks: [internal]
-
-    celery_beat:
-        build:
-            context: .
-            dockerfile: Dockerfile
-        env_file:
-            - .env.production
-        command: celery -A app.worker beat --loglevel=info
-        restart: always
         depends_on:
-            - api
-        networks: [internal]
+            db:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+            rabbitmq:
+                condition: service_healthy
+        networks:
+            - internal
 
     rabbitmq:
         image: rabbitmq:3-management-alpine
@@ -55,24 +114,40 @@ services:
             RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
             RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
         restart: always
-        networks: [internal]
+        networks:
+            - internal
         volumes:
             - rabbitmq_data:/var/lib/rabbitmq
+        healthcheck:
+            test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
 
     nginx:
         image: nginx:alpine
         volumes:
             - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
-            - /etc/letsencrypt:/etc/letsencrypt:ro
+            - letsencrypt_certs:/etc/letsencrypt:ro
             - ./certbot_challenge:/var/www/certbot:ro
         ports:
             - "80:80"
             - "443:443"
-        # Note: upload size limits are enforced in nginx.conf (client_max_body_size)
         depends_on:
-            - api
+            api:
+                condition: service_healthy
         restart: always
-        networks: [internal]
+        networks:
+            - internal
+
+    certbot:
+        image: certbot/certbot
+        volumes:
+            - letsencrypt_certs:/etc/letsencrypt
+            - ./certbot_challenge:/var/www/certbot
+        entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+        networks:
+            - internal
 
 networks:
     internal:
@@ -80,3 +155,5 @@ networks:
 
 volumes:
     rabbitmq_data:
+    postgres_data:
+    letsencrypt_certs:

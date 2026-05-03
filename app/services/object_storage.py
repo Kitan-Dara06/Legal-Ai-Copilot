@@ -105,3 +105,21 @@ def object_exists(blob_name: str) -> bool:
         if e.response["Error"]["Code"] == "404":
             return False
         raise
+
+
+def check_storage_ready(strict: bool = False) -> bool:
+    """
+    Validates that R2 credentials are present and bucket is reachable.
+    If strict=True, re-raises on failures so callers can fail fast at startup.
+    """
+    try:
+        client = _get_client()
+        bucket = _bucket()
+        client.head_bucket(Bucket=bucket)
+        logger.info("[r2] Storage readiness check passed for bucket '%s'", bucket)
+        return True
+    except Exception as e:
+        logger.error("[r2] Storage readiness check failed: %s", e)
+        if strict:
+            raise
+        return False

@@ -87,7 +87,9 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/check-org")
+@limiter.limit("5/minute")
 async def check_org(
+    request: Request,
     org_id: str = Query(..., min_length=3, max_length=50),
     db: AsyncSession = Depends(get_db)
 ):
@@ -101,7 +103,7 @@ async def check_org(
 
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
-@limiter.limit("10/minute")
+@limiter.limit("5/minute")
 async def signup(
     request: Request, payload: SignupRequest, db: AsyncSession = Depends(get_db)
 ):
@@ -310,7 +312,7 @@ async def setup_org(
         logger.info("[setup_org] Linking new org to existing user_by_sub")
         user = user_by_sub
     elif user_by_email:
-        logger.info("[setup_org] Linking new org to existing user_by_email")
+        logger.warning("[AUDIT_LOG] SECURITY_NOTICE: Linking new org to existing user via email fallback (user_by_email). Sub mismatch or migration edge case. email=%s", email)
         user = user_by_email
     else:
         logger.info("[setup_org] Creating entirely new local user record")
@@ -357,27 +359,6 @@ async def setup_org(
         "app_role": user.role.value,
     }
 
-
-@router.get("/my-orgs")
-async def my_orgs(
-    ctx=Depends(get_supabase_auth_context), db: AsyncSession = Depends(get_db)
-):
-    """
-    Returns all orgs the authenticated user belongs to with their roles.
-    """
-    rows = (
-        await db.execute(
-            select(Organization.slug, Organization.id, UserOrgMembership.role)
-            .join(UserOrgMembership, UserOrgMembership.org_id == Organization.id)
-            .where(UserOrgMembership.user_id == ctx.user.id)
-        )
-    ).all()
-    return {
-        "orgs": [
-            {"org_id": str(r.id), "org_slug": r.slug, "role": r.role.value}
-            for r in rows
-        ]
-    }
 
 
 @router.post("/invite")
@@ -776,39 +757,6 @@ async def logout():
         response.delete_cookie(cookie)
     return response
 
-
-@router.delete("/debug/cleanup-user/{email}")
-async def debug_cleanup_user(
-    email: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    (DEBUG ONLY) Completely removes a user and their memberships from the local DB.
-    Use this to fix organization crosstalk issues after deleting a user from Supabase.
-    """
-    from sqlalchemy import delete
-
-    # Find the user
-    stmt = select(User).where(User.email == email)
-    result = await db.execute(stmt)
-    user = result.scalar_one_or_none()
-
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found in local database.")
-
-    # Delete memberships
-    await db.execute(
-        delete(UserOrgMembership).where(UserOrgMembership.user_id == user.id)
-    )
-    # Delete API keys
-    await db.execute(delete(ApiKey).where(ApiKey.user_id == user.id))
-    # Delete the user record
-    await db.execute(delete(User).where(User.id == user.id))
-
-    await db.commit()
-    return {
-        "message": f"User {email} and all associations cleared from local database."
-    }
 
 
 @router.get("/my-orgs")

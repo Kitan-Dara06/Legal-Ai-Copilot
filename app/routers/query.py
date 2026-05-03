@@ -3,12 +3,15 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from groq import Groq
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from starlette.concurrency import run_in_threadpool
 
 from app.dependencies import get_org_id_unified
 from app.services.legal_primitives import search_tool
+from app.utils import sanitize_goal_text
 
 load_dotenv()
 
@@ -54,7 +57,7 @@ def generate_final_answer(question: str, context_chunks: list[str]):
 
     try:
         response = client.chat.completions.create(
-            model="qwen/qwen3-32b",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -71,10 +74,13 @@ def generate_final_answer(question: str, context_chunks: list[str]):
 
 
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.post("/ask")
+@limiter.limit("20/minute")
 async def ask(
+    request: Request,
     question: str,
     org_id: str = Depends(get_org_id_unified),
     mode: str = Query(
@@ -89,10 +95,11 @@ async def ask(
     - mode=multiquery: Rephrases question from 3 angles (broadest coverage)
     """
     # These calls use synchronous network clients; run them off the event loop.
+    safe_question = sanitize_goal_text(question)
     all_chunks = await run_in_threadpool(
-        search_tool, query=question, mode=mode, top_k=5, org_id=org_id
+        search_tool, query=safe_question, mode=mode, top_k=5, org_id=org_id
     )
-    final_answer = await run_in_threadpool(generate_final_answer, question, all_chunks)
+    final_answer = await run_in_threadpool(generate_final_answer, safe_question, all_chunks)
 
     return {
         "original_question": question,

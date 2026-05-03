@@ -22,30 +22,8 @@ function LoginContent() {
   const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
-    // 1. Manually intercept and force the session from the URL hash
-    // This solves situations where SSR hydration drops the Implicit Flow session
-    if (typeof window !== "undefined" && window.location.hash) {
-      const hashParams = new URLSearchParams(window.location.hash.substring(1));
-      const accessToken = hashParams.get("access_token");
-      const refreshToken = hashParams.get("refresh_token");
-      const type = hashParams.get("type");
-
-      if (accessToken && refreshToken) {
-        supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken })
-          .then(({ error }: { error: any }) => {
-            if (error) console.error("Error setting session from hash:", error);
-            else {
-              // Strip the hash from the URL dynamically so we don't leak it
-              window.history.replaceState(null, "", window.location.pathname + window.location.search);
-            }
-          });
-      }
-      
-      // Auto-trigger recovery tab if the hash explicitly declares invite recovery
-      if (type === "invite" || type === "recovery") {
-        setActiveTab("recovery");
-      }
-    }
+    // The Supabase SDK handles session hydration automatically via onAuthStateChange
+    // or standard PKCE redirect flow. We just handle specific query params.
 
     // 2. Fallback to standard URL query checking
     if (searchParams?.get("type") === "recovery") {

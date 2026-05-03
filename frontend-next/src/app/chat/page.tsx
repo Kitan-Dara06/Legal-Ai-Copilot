@@ -52,16 +52,16 @@ export default function ChatPage() {
     const [isAnswering, setIsAnswering] = useState(false);
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
-    // Initialize Local Storage State for messages and selections
+    // Initialize Storage State for messages and selections
     useEffect(() => {
         try {
-            const savedMessages = localStorage.getItem("legalrag_active_messages");
-            const savedSelections = localStorage.getItem("legalrag_selected_files");
+            const savedMessages = sessionStorage.getItem("legalrag_active_messages");
+            const savedSelections = sessionStorage.getItem("legalrag_selected_files");
             
             if (savedMessages) setMessages(JSON.parse(savedMessages));
             if (savedSelections) setSelectedFileIds(JSON.parse(savedSelections));
         } catch (e) {
-            console.error("Failed to restore state from local storage", e);
+            console.error("Failed to restore state from session storage", e);
         }
     }, []);
 
@@ -70,31 +70,24 @@ export default function ChatPage() {
         if (!token || !user?.org_slug) return;
         
         try {
-            const savedSessionStr = localStorage.getItem("legalrag_active_session");
+            const savedSessionStr = sessionStorage.getItem("legalrag_active_session");
             if (savedSessionStr) {
                 const savedSession = JSON.parse(savedSessionStr);
                 if (savedSession?.session_id) {
-                    // Fetch full session details so we get the .files array
                     getSession(token, savedSession.session_id, user.org_slug)
                         .then(fullSession => {
                             setSession(fullSession);
-                            // Verify selections match the hydrated session if they were lost
                             if (fullSession.files && fullSession.files.length > 0 && selectedFileIds.length === 0) {
                                 setSelectedFileIds(fullSession.files.map(f => f.file_id));
                             }
                         })
                         .catch(err => {
                             console.error("Failed to restore session details:", err);
-                            
-                            // Only clear local storage if the session explicitly doesn't exist anymore (404)
-                            // or if the error indicates an invalid workspace.
-                            if (err instanceof AppError && (err.status === 404 || err.status === 400)) {
+                            if (err instanceof AppError) {
                                 console.warn("Session expired or invalid, cleaning up state...");
                                 setSession(null);
-                                localStorage.removeItem("legalrag_active_session");
+                                sessionStorage.removeItem("legalrag_active_session");
                             }
-                            // Otherwise, we keep the session_id in localStorage so it can be retried 
-                            // later or after the backend recover.
                         });
                 }
             }
@@ -103,24 +96,38 @@ export default function ChatPage() {
         }
     }, [token, user?.org_slug]);
 
-    // Sync to Local Storage
+    // Sync to Session Storage
     useEffect(() => {
         if (session) {
-            localStorage.setItem("legalrag_active_session", JSON.stringify(session));
+            sessionStorage.setItem("legalrag_active_session", JSON.stringify(session));
         }
     }, [session]);
 
     useEffect(() => {
         if (messages.length > 0) {
-            localStorage.setItem("legalrag_active_messages", JSON.stringify(messages));
+            sessionStorage.setItem("legalrag_active_messages", JSON.stringify(messages));
         }
     }, [messages]);
 
     useEffect(() => {
         if (selectedFileIds.length > 0) {
-            localStorage.setItem("legalrag_selected_files", JSON.stringify(selectedFileIds));
+            sessionStorage.setItem("legalrag_selected_files", JSON.stringify(selectedFileIds));
         }
     }, [selectedFileIds]);
+
+    // BeforeUnload Warning
+    useEffect(() => {
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            if (messages.length > 0) {
+                const msg = "Leave site? Changes you made may not be saved.";
+                e.preventDefault();
+                e.returnValue = msg;
+                return msg;
+            }
+        };
+        window.addEventListener("beforeunload", handleBeforeUnload);
+        return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+    }, [messages.length]);
 
     // Initialize Auth
     useEffect(() => {
@@ -191,8 +198,9 @@ export default function ChatPage() {
                 if (event === "SIGNED_OUT") {
                     setUser(null);
                     setToken("");
-                    localStorage.removeItem("legalrag_active_session");
-                    localStorage.removeItem("legalrag_active_messages");
+                    sessionStorage.removeItem("legalrag_active_session");
+                    sessionStorage.removeItem("legalrag_active_messages");
+                    sessionStorage.removeItem("legalrag_selected_files");
                     localStorage.removeItem("legalrag_active_org");
                     window.location.href = "/login";
                     return;
@@ -275,8 +283,9 @@ export default function ChatPage() {
             setSession(null);
             setMessages([]);
             localStorage.setItem("legalrag_active_org", orgSlug);
-            localStorage.removeItem("legalrag_active_session");
-            localStorage.removeItem("legalrag_active_messages");
+            sessionStorage.removeItem("legalrag_active_session");
+            sessionStorage.removeItem("legalrag_active_messages");
+            sessionStorage.removeItem("legalrag_selected_files");
         } catch (err) {
             console.error("Error switching org:", err);
             alert("Failed to switch workspace.");
@@ -374,9 +383,9 @@ export default function ChatPage() {
             setSession(null);
             setMessages([]);
             setSelectedFileIds([]);
-            localStorage.removeItem("legalrag_active_session");
-            localStorage.removeItem("legalrag_active_messages");
-            localStorage.removeItem("legalrag_selected_files");
+            sessionStorage.removeItem("legalrag_active_session");
+            sessionStorage.removeItem("legalrag_active_messages");
+            sessionStorage.removeItem("legalrag_selected_files");
         } catch (e) {
             alert("Failed to terminate session");
         }
@@ -430,6 +439,20 @@ export default function ChatPage() {
         } finally {
             setIsAnswering(false);
         }
+    };
+
+    const handleExportChat = () => {
+        if (messages.length === 0) return;
+        const textContent = messages.map(m => `[${m.role.toUpperCase()}]\n${m.content}\n`).join("\n---\n\n");
+        const blob = new Blob([textContent], { type: "text/plain" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `Lex_Chat_Export_${new Date().toISOString().split('T')[0]}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     };
 
     if (isInitializing || !user) {
@@ -486,8 +509,17 @@ export default function ChatPage() {
             <div className="flex-1 flex flex-col relative w-full md:w-auto min-w-0 md:ml-0">
                 <TopBar sessionActive={!!session} onMenuClick={() => setIsSidebarOpen(true)} />
 
-                {/* Chat Thread Area (starts below top bar (64px) and above input (96px max)) */}
                 <div className="flex-1 mt-16 relative overflow-hidden flex flex-col">
+                    {messages.length > 0 && (
+                        <div className="absolute top-4 right-4 z-20">
+                            <button
+                                onClick={handleExportChat}
+                                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-md shadow-sm border border-slate-700 transition-colors"
+                            >
+                                Export Chat
+                            </button>
+                        </div>
+                    )}
                     <ChatThread messages={messages} isLoading={isAnswering} />
 
                     {/* Floating Input aligned to bottom */}

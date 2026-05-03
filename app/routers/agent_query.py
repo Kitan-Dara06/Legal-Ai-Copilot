@@ -51,9 +51,12 @@ async def ask_agent(
       - Extraction      → Search + Read + Draft
       - General Search  → Search + Draft
     """
+    from app.utils import sanitize_goal_text
+    safe_question = sanitize_goal_text(question)
+
     logger.info(
         "ask_agent request",
-        extra={"question_preview": question[:80], "mode": mode, "session_id": session_id},
+        extra={"question_preview": safe_question[:80], "mode": mode, "session_id": session_id},
     )
 
     # ── Session-Scoped File IDs ───────────────────────────────────────────────
@@ -109,13 +112,13 @@ async def ask_agent(
             raise HTTPException(status_code=425, detail="No files are ready yet in this session.")
 
     # ── Execute Plan ──────────────────────────────────────────────────────────
-    plan = await create_execution_plan(question)
+    plan = await create_execution_plan(safe_question)
     result = await execute_plan(
-        plan, question, mode=mode, file_ids=file_ids, org_id=org_id
+        plan, safe_question, mode=mode, file_ids=file_ids, org_id=org_id
     )
 
     response = {
-        "question": question,
+        "question": safe_question,
         "search_mode": mode,
         "query_type": plan["query_type"],
         "tools_planned": [t["name"] for t in plan["tools"]],

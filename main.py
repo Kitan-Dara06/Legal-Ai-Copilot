@@ -1,6 +1,7 @@
 import glob
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from typing import cast
@@ -17,22 +18,30 @@ from starlette.types import ExceptionHandler
 from app.database import Base, engine
 from app.dependencies import get_org_id_for_rate_limit
 from app.logging_config import configure_logging
-from app.routers import agent_query, auth, health, injest, invites, query, session
+from app.routers import agent_query, auth, health, injest, invites, query, session, action_agent
+from app.config_validation import validate_config
+from app.services.object_storage import check_storage_ready
 
 configure_logging()
+
+# ── Environment & Config Validation ──────────────────────────────────────────
+validate_config()
+
+_env = os.getenv("ENV", "development").lower()
+is_dev = _env in {"dev", "development", "local"}
 
 _sentry_dsn = os.getenv("SENTRY_DSN")
 if _sentry_dsn:
     sentry_sdk.init(
         dsn=_sentry_dsn,
-        environment=os.getenv("ENV", "development"),
+        environment=_env,
         integrations=[
             FastApiIntegration(),
             LoggingIntegration(level=logging.INFO, event_level=logging.WARNING),
         ],
         traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
         profiles_sample_rate=float(os.getenv("SENTRY_PROFILES_SAMPLE_RATE", "1.0")),
-        send_default_pii=True,  # Changed to True to capture users, but we handle it via middleware
+        send_default_pii=True,
     )
 
 limiter = Limiter(key_func=get_org_id_for_rate_limit)
@@ -41,15 +50,11 @@ limiter = Limiter(key_func=get_org_id_for_rate_limit)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Lifespan context manager (replaces deprecated on_event).
-
+    Lifespan context manager.
     Startup:
       1) Database schema: run Alembic or create_all in dev.
       2) Sweep orphaned temp files in app/uploads/ older than 10 minutes.
     """
-    env = os.getenv("ENV", "development").lower()
-    is_dev = env in {"dev", "development", "local"}
-
     # ── DB init / migrations ────────────────────────────────────────────────
     auto_create_all = os.getenv("DB_AUTO_CREATE_ALL", "false").lower() == "true"
     run_migrations = os.getenv("DB_RUN_MIGRATIONS", "false").lower() == "true"
@@ -57,7 +62,6 @@ async def lifespan(app: FastAPI):
     if run_migrations:
         try:
             from alembic.config import Config
-
             from alembic import command
 
             alembic_cfg_path = os.getenv("ALEMBIC_CONFIG", "alembic.ini")
@@ -65,8 +69,11 @@ async def lifespan(app: FastAPI):
             command.upgrade(alembic_cfg, "head")
             print("✅ Alembic migrations applied (upgrade head).")
         except Exception as e:
-            print(f"⚠️  Alembic migration failed at startup: {e}")
-            print("   The app will still start. DB errors will surface per-request.")
+            print(f"❌ Alembic migration failed at startup: {e}")
+            if not is_dev:
+                print("FATAL: Database migrations must pass in production. Exiting.")
+                sys.exit(1)
+            print("   Warning: The app will still start in dev mode despite DB errors.")
 
     elif auto_create_all and is_dev:
         try:
@@ -75,10 +82,18 @@ async def lifespan(app: FastAPI):
             print("✅ Database tables ready (create_all).")
         except Exception as e:
             print(f"⚠️  Could not connect to database at startup: {e}")
-            print("   The app will still start. DB errors will surface per-request.")
-    else:
-        if not is_dev:
-            print("ℹ️  Skipping DB create_all on startup (use Alembic migrations).")
+            if not is_dev:
+                sys.exit(1)
+
+    # Storage readiness check: fail fast in production by default.
+    storage_strict = os.getenv("STORAGE_STRICT_STARTUP", "true" if not is_dev else "false").lower() == "true"
+    try:
+        check_storage_ready(strict=storage_strict)
+    except Exception as e:
+        print(f"❌ Storage readiness check failed: {e}")
+        if storage_strict:
+            print("FATAL: Object storage must be ready at startup. Exiting.")
+            sys.exit(1)
 
     # Orphan sweep: purge temp PDFs left behind by crashed uploads
     uploads_dir = "app/uploads"
@@ -94,9 +109,6 @@ async def lifespan(app: FastAPI):
                 print(f"⚠️  Could not sweep {fp}: {e}")
 
     yield  # App runs here
-
-    # Shutdown (nothing to clean up currently)
-
 
 # ── OpenAPI Description & Tags ───────────────────────────────────────────────
 description = """
@@ -131,11 +143,7 @@ tags_metadata = [
     },
 ]
 
-# NOTE (proxy headers):
-# This app is intended to run behind Nginx (see deploy/nginx.conf).
-# Uvicorn should be started with proxy headers enabled so the app sees the real client IP/scheme.
-# In Docker Compose, update the api command to include:
-#   uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=*
+# ── FastAPI App Setup ────────────────────────────────────────────────────────
 app = FastAPI(
     title="Legal RAG API",
     version="2.0.0",
@@ -147,6 +155,9 @@ app = FastAPI(
         "email": "support@legalrag.codes",
     },
     lifespan=lifespan,
+    docs_url="/docs" if is_dev else None,
+    redoc_url="/redoc" if is_dev else None,
+    openapi_url="/openapi.json" if is_dev else None,
 )
 app.state.limiter = limiter
 app.add_exception_handler(
@@ -155,21 +166,22 @@ app.add_exception_handler(
 )
 
 # ── CORS Middleware ──────────────────────────────────────────────────────────
-# Allow the Streamlit frontend and any future clients to make cross-origin requests.
 _allowed_origins = [
     o.strip()
     for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 ]
 if not _allowed_origins:
-    # Reasonable defaults: production domain + localhost for dev
     _allowed_origins = [
         "https://legalrag.codes",
         "https://www.legalrag.codes",
         "https://legal-ai-copilot-xi.vercel.app",
-        "http://localhost:8501",
-        "http://localhost:3000",
     ]
+    if is_dev:
+        _allowed_origins.extend([
+            "http://localhost:8501",
+            "http://localhost:3000",
+        ])
 
 # HARD OVERRIDE: Ensure Vercel is always permitted regardless of .env configuration.
 if "https://legal-ai-copilot-xi.vercel.app" not in _allowed_origins:
@@ -190,3 +202,15 @@ app.include_router(session.router)
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(invites.router)
+app.include_router(action_agent.router)
+
+from app.routers import cron
+app.include_router(cron.router)
+
+# ── Due Diligence (agentic pipeline) ────────────────────────────────────────
+from due_diligence.api.routes import router as _due_diligence_router
+app.include_router(
+    _due_diligence_router,
+    prefix="/api/v1/due-diligence",
+    tags=["Due Diligence"],
+)

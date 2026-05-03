@@ -189,6 +189,7 @@ def search_hybrid(
                     "section_context": p.get("section_text", ""),
                     "file_id": p.get("file_id"),
                     "org_id": p.get("org_id"),
+                    "clause_reference": p.get("clause_reference", ""),
                 },
             }
         )
@@ -333,6 +334,7 @@ def search_hybrid_qdrant(
                     "section_context": p.get("section_text", ""),
                     "file_id": p.get("file_id"),
                     "org_id": p.get("org_id"),
+                    "clause_reference": p.get("clause_reference", ""),
                 },
             }
         )

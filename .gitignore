@@ -39,6 +39,12 @@ results/
 # Large documents (keep out of git)
 *.pdf
 
+# Generated runtime artifacts
+overseer.log
+overseer.json
+qdrant_storage/
+logfile
+
 # OS / editor
 .DS_Store
 docker-compose.override.yml

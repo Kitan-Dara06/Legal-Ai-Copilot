@@ -49,19 +49,49 @@ async def _check_qdrant() -> dict:
         return {"ok": False, "error": str(e)[:200]}
 
 
+async def _check_neo4j() -> dict:
+    try:
+        import asyncio
+        from app.services.ingestion.graph_extractor import get_neo4j_driver
+        driver = get_neo4j_driver()
+        if not driver:
+            return {"ok": False, "error": "Neo4j driver failed to initialize."}
+        
+        # Verify connectivity
+        def _verify():
+            driver.verify_connectivity()
+            
+        await asyncio.get_event_loop().run_in_executor(None, _verify)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+async def _check_rabbitmq() -> dict:
+    try:
+        from app.worker import celery_app
+        # Attempt to inspect the broker connection
+        # This is a bit heavy, but verifies connectivity
+        celery_app.connection().ensure_connection(max_retries=1)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
 @router.get("/health")
 async def health():
     """
-    Informational health check. Always returns 200 so the deployment platform
-    marks the pod as running. Check the 'checks' body for dependency status.
+    Informational health check. Always returns 200.
     """
     t0 = time.perf_counter()
 
     pg = await _check_postgres()
     rd = await _check_redis()
     qd = await _check_qdrant()
+    nj = await _check_neo4j()
+    rmq = await _check_rabbitmq()
 
-    all_ok = all(c["ok"] for c in [pg, rd, qd])
+    all_ok = all(c["ok"] for c in [pg, rd, qd, nj, rmq])
 
     return {
         "status": "ok" if all_ok else "degraded",
@@ -70,6 +100,8 @@ async def health():
             "postgres": pg,
             "redis": rd,
             "qdrant": qd,
+            "neo4j": nj,
+            "rabbitmq": rmq,
         },
     }
 
@@ -78,13 +110,20 @@ async def health():
 async def ready():
     """
     Readiness probe. Returns 503 if any dependency is unhealthy.
-    Use this for Kubernetes readinessProbe / Render health checks.
     """
     pg = await _check_postgres()
     rd = await _check_redis()
     qd = await _check_qdrant()
+    nj = await _check_neo4j()
+    rmq = await _check_rabbitmq()
 
-    checks = {"postgres": pg, "redis": rd, "qdrant": qd}
+    checks = {
+        "postgres": pg,
+        "redis": rd,
+        "qdrant": qd,
+        "neo4j": nj,
+        "rabbitmq": rmq,
+    }
     all_ok = all(c["ok"] for c in checks.values())
 
     return JSONResponse(
