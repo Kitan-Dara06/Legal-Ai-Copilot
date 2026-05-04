@@ -22,16 +22,7 @@ from dotenv import load_dotenv
 
 from app.config import get_database_url_sync, redis_disable_tls_verify
 from app.logging_config import configure_logging
-from app.services.ocr_gemini import GeminiOcrError, ocr_pdf_path_to_markdown_pages
 from app.worker import celery_app
-
-# ── New Stage 2 Intelligence Extractors ──────────────────────────────────────
-from app.services.ingestion.parser import LegalDocumentParser
-from app.services.ingestion.chunker import ClauseChunker
-from app.services.ingestion.embedder import LegalEmbedder
-from app.services.ingestion.terms_extractor import DefinedTermExtractor
-from app.services.ingestion.graph_extractor import LLMReferenceParser, DependencyGraph
-from app.services.ingestion.deadline_extractor import DeadlineExtractor
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -44,6 +35,63 @@ password = (os.getenv("UPSTASH_PASSWORD") or "").strip()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro").strip()
+
+
+def tasks_smoke_check(*, include_gemini: bool = False) -> dict:
+    """
+    Proactively validate that the heavy ingestion/task dependencies can import.
+
+    Use this at API startup (and/or readiness checks) to surface failures *before*
+    real users hit upload/task routes.
+    """
+    # Imports that commonly fail due to missing system libs / wheels / model deps.
+    from app.services.ingestion.parser import LegalDocumentParser  # noqa: F401
+    from app.services.ingestion.chunker import ClauseChunker  # noqa: F401
+    from app.services.ingestion.embedder import LegalEmbedder  # noqa: F401
+    from app.services.ingestion.terms_extractor import DefinedTermExtractor  # noqa: F401
+    from app.services.ingestion.graph_extractor import LLMReferenceParser, DependencyGraph  # noqa: F401
+    from app.services.ingestion.deadline_extractor import DeadlineExtractor  # noqa: F401
+
+    # A tiny instantiation “touch” catches missing model downloads / init errors.
+    _ = LegalDocumentParser()
+    _ = ClauseChunker(body_font_size=12)
+
+    if include_gemini:
+        from app.services.ocr_gemini import ocr_pdf_path_to_markdown_pages  # noqa: F401
+        # We do not call Gemini here; import+symbol resolution is enough.
+
+    return {"ok": True}
+
+
+_WORKER_WARMED = False
+
+
+def warmup_heavy_dependencies(*, include_gemini: bool = False) -> dict:
+    """
+    Celery-only hot start.
+
+    This intentionally runs in worker processes (not the web server) to keep the
+    API lightweight while keeping expensive imports/initialization warm.
+    """
+    global _WORKER_WARMED
+    tasks_smoke_check(include_gemini=include_gemini)
+    _WORKER_WARMED = True
+    return {"ok": True, "warmed": True}
+
+
+@celery_app.task(name="app.tasks.ping")
+def ping() -> dict:
+    return {"ok": True}
+
+
+@celery_app.task(name="app.tasks.warmup")
+def warmup(*, include_gemini: bool = False) -> dict:
+    return warmup_heavy_dependencies(include_gemini=include_gemini)
+
+
+@celery_app.task(name="app.tasks.warm_status")
+def warm_status() -> dict:
+    return {"ok": True, "warmed": bool(_WORKER_WARMED)}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Synchronous Connection Pools (For Celery Workers)
@@ -127,6 +175,12 @@ async def run_intelligence_pipeline_async(
     """
     Runs the intelligence extraction tasks in parallel using asyncio.
     """
+    # Heavy imports live here so importing `app.tasks` is safe for the API.
+    from app.services.ingestion.embedder import LegalEmbedder
+    from app.services.ingestion.terms_extractor import DefinedTermExtractor
+    from app.services.ingestion.graph_extractor import LLMReferenceParser, DependencyGraph
+    from app.services.ingestion.deadline_extractor import DeadlineExtractor
+
     embedder = LegalEmbedder()
     terms_extractor = DefinedTermExtractor()
     deadline_extractor = DeadlineExtractor()
@@ -203,6 +257,9 @@ def _process_document_core(
     
     try:
         update_progress_sync(document_id_str, 5)
+        from app.services.ingestion.parser import LegalDocumentParser
+        from app.services.ingestion.chunker import ClauseChunker
+
         parser = LegalDocumentParser()
 
         # 1. Parse
@@ -299,6 +356,8 @@ def process_scanned_pdf(self, document_id: str, workspace_id: str, org_id: str, 
         
         if not GEMINI_API_KEY:
             raise RuntimeError("Scanned PDF OCR requires GEMINI_API_KEY.")
+
+        from app.services.ocr_gemini import ocr_pdf_path_to_markdown_pages
 
         pages_data = ocr_pdf_path_to_markdown_pages(
             local_temp_path, api_key=GEMINI_API_KEY, model=GEMINI_MODEL

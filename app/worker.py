@@ -3,6 +3,7 @@ import os
 
 import sentry_sdk
 from celery import Celery
+from celery.signals import worker_process_init
 from dotenv import load_dotenv
 from sentry_sdk.integrations.celery import CeleryIntegration
 
@@ -113,3 +114,28 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
 )
+
+
+@worker_process_init.connect
+def _celery_hot_start(**_kwargs):
+    """
+    Hot-start heavy imports inside Celery worker processes.
+    """
+    hot_start = os.getenv("CELERY_HOT_START", "true").lower() == "true"
+    include_gemini = os.getenv("CELERY_HOT_START_INCLUDE_GEMINI", "false").lower() == "true"
+    strict = os.getenv("CELERY_HOT_START_STRICT", "true").lower() == "true"
+    if not hot_start:
+        return
+    try:
+        from app.tasks import warmup_heavy_dependencies
+
+        warmup_heavy_dependencies(include_gemini=include_gemini)
+        logger.info("✅ Celery hot-start complete (heavy deps warmed).")
+    except Exception as e:
+        logger.error("❌ Celery hot-start failed: %s", e)
+        try:
+            sentry_sdk.capture_exception(e)
+        except Exception:
+            pass
+        if strict:
+            raise
