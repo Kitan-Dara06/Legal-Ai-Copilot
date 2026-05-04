@@ -4,6 +4,7 @@ export const dynamic = "force-dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import type { Session } from "@supabase/supabase-js";
 import {
     Upload, FileText, X, CheckCircle, Loader2,
     AlertTriangle, Scale, Sparkles, ChevronRight,
@@ -306,7 +307,7 @@ export default function DueDiligencePage() {
     const [orgId, setOrgId] = useState<string>("b2b3cfdf-8b57-4a8c-aecd-f3567ff67689"); // default mock
 
     useEffect(() => {
-        supabase.auth.getSession().then(({ data }) => {
+        supabase.auth.getSession().then(({ data }: { data: { session: Session | null } }) => {
             if (!data.session) {
                 router.replace("/login");
                 return;
