@@ -20,12 +20,13 @@ Security:
   - Every DB query includes an org_id == authenticated_org_id filter to enforce tenant isolation.
   - Rate limiting is applied to all write endpoints.
 """
-import uuid
+
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Body, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -34,10 +35,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_org_id_unified
-from app.models import WorkflowExecution, WorkflowStatus, Goal, Action, ToolCallLog
-from app.services.agent.agent_state import PointerOnlyState, CURRENT_GRAPH_VERSION
-from app.services.agent.graph import create_action_agent_graph
+from app.models import (
+    Action,
+    ApprovalRequest,
+    ApprovalStatus,
+    Goal,
+    IntentLog,
+    ToolCallLog,
+    WorkflowExecution,
+    WorkflowStatus,
+)
+from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
 from app.services.agent.checkpointer import get_checkpointer
+from app.services.agent.graph import create_action_agent_graph
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent", tags=["Action Agent"])
@@ -46,19 +56,28 @@ limiter = Limiter(key_func=get_remote_address)
 
 # ── Request schemas ────────────────────────────────────────────────────────────
 
+
 class StartWorkflowRequest(BaseModel):
     goal_id: uuid.UUID
     workspace_id: uuid.UUID
     document_id: uuid.UUID  # Primary document being analyzed
 
+
 class ConfirmIntentRequest(BaseModel):
     confirmed_intent: str
 
+
+class ApproveRequest(BaseModel):
+    token: str
+
+
 class RejectRequest(BaseModel):
     reason: str
+    token: str | None = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
 
 def _make_config(workflow_id: str) -> dict:
     return {"configurable": {"thread_id": workflow_id}}
@@ -85,6 +104,7 @@ async def _get_workflow_for_org(
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
+
 @router.post("/start", summary="Start a Legal Action Workflow")
 @limiter.limit("10/minute")
 async def start_workflow(
@@ -93,6 +113,8 @@ async def start_workflow(
     org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
 ):
+    import hashlib
+
     org_uuid = uuid.UUID(org_id)
 
     # Verify goal belongs to this org
@@ -102,6 +124,11 @@ async def start_workflow(
     goal = goal_res.scalar_one_or_none()
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
+
+    # NFR-SEC-10: Populate goal_hash — raw goal_text must not be stored in logs
+    if not goal.goal_hash:
+        goal.goal_hash = hashlib.sha256(goal.goal_text.encode("utf-8")).hexdigest()
+        await db.commit()
 
     workflow = WorkflowExecution(
         goal_id=req.goal_id,
@@ -154,7 +181,9 @@ async def start_workflow(
     }
 
 
-@router.post("/confirm-intent/{workflow_id}", summary="Confirm intent and resume execution")
+@router.post(
+    "/confirm-intent/{workflow_id}", summary="Confirm intent and resume execution"
+)
 @limiter.limit("10/minute")
 async def confirm_intent(
     request: Request,
@@ -163,7 +192,40 @@ async def confirm_intent(
     org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
 ):
+    import hashlib
+
     wf = await _get_workflow_for_org(workflow_id, org_id, db)
+
+    # NFR-AUD-03: Log lawyer_override when human changes intent
+    if req.confirmed_intent:
+        try:
+            from app.database import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as audit_db:
+                # Fetch goal_hash from the linked goal
+                audit_res = await audit_db.execute(
+                    select(Goal.goal_hash).where(Goal.id == wf.goal_id)
+                )
+                goal_hash = audit_res.scalar_one_or_none()
+                audit_db.add(
+                    IntentLog(
+                        workflow_id=workflow_id,
+                        goal_hash=goal_hash,
+                        model_name="human_override",
+                        prompt_hash=hashlib.sha256(
+                            req.confirmed_intent.encode()
+                        ).hexdigest(),
+                        audit_id="human_" + str(workflow_id)[:8],
+                        confidence=1.0,
+                        confirmed_intent=req.confirmed_intent,
+                        lawyer_override=True,
+                    )
+                )
+                await audit_db.commit()
+        except Exception as audit_err:
+            logger.warning(
+                "[%s] lawyer_override audit logging failed: %s", workflow_id, audit_err
+            )
 
     # Update state using LangGraph's update_state
     async with get_checkpointer() as checkpointer:
@@ -172,14 +234,14 @@ async def confirm_intent(
             interrupt_before=["ambiguity_gate", "human_approval"],
         )
         config = _make_config(str(workflow_id))
-        
+
         # Inject the confirmed intent into state
         await app.aupdate_state(
-            config, 
+            config,
             {
                 "primary_intent": req.confirmed_intent,
                 "intent_confirmed_by_human": True,
-            }
+            },
         )
         # Resume
         final_state = await app.ainvoke(None, config=config)
@@ -196,13 +258,40 @@ async def confirm_intent(
 async def approve_workflow(
     request: Request,
     workflow_id: uuid.UUID,
+    req: ApproveRequest,
     org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
 ):
+    import hashlib
+    import hmac
+    import os as os_module
+
     wf = await _get_workflow_for_org(workflow_id, org_id, db)
 
     if wf.status not in (WorkflowStatus.AWAITING_APPROVAL,):
-        raise HTTPException(status_code=409, detail=f"Cannot approve in status: {wf.status.value}")
+        raise HTTPException(
+            status_code=409, detail=f"Cannot approve in status: {wf.status.value}"
+        )
+
+    # Verify HMAC token
+    token_hash = hashlib.sha256(req.token.encode()).hexdigest()
+    approval_res = await db.execute(
+        select(ApprovalRequest).where(
+            ApprovalRequest.workflow_id == workflow_id,
+            ApprovalRequest.token_hash == token_hash,
+            ApprovalRequest.status == ApprovalStatus.PENDING,
+            ApprovalRequest.expires_at > datetime.now(timezone.utc),
+        )
+    )
+    approval = approval_res.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(
+            status_code=403, detail="Invalid, expired, or already used approval token."
+        )
+
+    # Mark token as USED
+    approval.status = ApprovalStatus.USED
+    await db.commit()
 
     async with get_checkpointer() as checkpointer:
         app = create_action_agent_graph().compile(
@@ -227,14 +316,58 @@ async def reject_workflow(
     org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
 ):
+    import hashlib
+
     wf = await _get_workflow_for_org(workflow_id, org_id, db)
 
-    await db.execute(
-        update(WorkflowExecution)
-        .where(WorkflowExecution.id == workflow_id, WorkflowExecution.org_id == uuid.UUID(org_id))
-        .values(status=WorkflowStatus.REVISING)
-    )
-    await db.commit()
+    if not req.reason or len(req.reason.strip()) < 20:
+        raise HTTPException(
+            status_code=400, detail="Rejection reason must be at least 20 characters."
+        )
+
+    # Track revision count (max 3 cycles)
+    async with db.begin():
+        from sqlalchemy import func as sa_func
+
+        revision_res = await db.execute(
+            select(Action.revision_count)
+            .where(
+                Action.workflow_id == workflow_id,
+            )
+            .order_by(Action.revision_count.desc())
+            .limit(1)
+        )
+        current_revision = revision_res.scalar_one_or_none() or 0
+
+        if current_revision >= 3:
+            await db.execute(
+                update(WorkflowExecution)
+                .where(WorkflowExecution.id == workflow_id)
+                .values(status=WorkflowStatus.ESCALATED)
+            )
+            await db.commit()
+            return {
+                "workflow_id": str(workflow_id),
+                "status": "ESCALATED",
+                "message": "Maximum 3 revision cycles reached. Escalated to admin.",
+            }
+
+        # Increment revision count on all actions
+        await db.execute(
+            update(Action)
+            .where(Action.workflow_id == workflow_id)
+            .values(revision_count=Action.revision_count + 1)
+        )
+
+        await db.execute(
+            update(WorkflowExecution)
+            .where(
+                WorkflowExecution.id == workflow_id,
+                WorkflowExecution.org_id == uuid.UUID(org_id),
+            )
+            .values(status=WorkflowStatus.REVISING)
+        )
+
     return {"workflow_id": str(workflow_id), "status": "REVISING"}
 
 

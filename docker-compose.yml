@@ -11,9 +11,49 @@ services:
         networks:
             - internal
         healthcheck:
-            test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+            test:
+                ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
             interval: 10s
             timeout: 5s
+            retries: 5
+
+    qdrant:
+        image: qdrant/qdrant:v1.7.0
+        restart: always
+        ports:
+            - "6333:6333"
+            - "6334:6334"
+        volumes:
+            - qdrant_data:/qdrant/storage
+        networks:
+            - internal
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+
+    neo4j:
+        image: neo4j:5.15.0
+        restart: always
+        environment:
+            NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-neo4j_password}
+            NEO4J_server_memory_heap_initial__size: 1G
+            NEO4J_server_memory_heap_max__size: 2G
+            NEO4J_server_memory_pagecache_size: 1G
+            # Disabling lazy-loading for immediate availability
+            NEO4J_dbms_databases_default__to__read__only: "false"
+        ports:
+            - "7474:7474"
+            - "7687:7687"
+        volumes:
+            - neo4j_data:/data
+        networks:
+            - internal
+        healthcheck:
+            test: ["CMD", "wget", "http://localhost:7474", "-O", "-"]
+            interval: 15s
+            timeout: 10s
             retries: 5
 
     redis:
@@ -157,4 +197,6 @@ networks:
 volumes:
     rabbitmq_data:
     postgres_data:
+    qdrant_data:
+    neo4j_data:
     letsencrypt_certs:

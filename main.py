@@ -7,6 +7,23 @@ from contextlib import asynccontextmanager
 from typing import cast
 
 import sentry_sdk
+from app.config_validation import validate_config
+from app.database import Base, engine
+from app.dependencies import get_org_id_for_rate_limit
+from app.logging_config import configure_logging
+from app.routers import (
+    action_agent,
+    agent_query,
+    audit,
+    auth,
+    health,
+    injest,
+    invites,
+    query,
+    session,
+    workspaces,
+)
+from app.services.object_storage import check_storage_ready
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sentry_sdk.integrations.fastapi import FastApiIntegration
@@ -14,13 +31,6 @@ from sentry_sdk.integrations.logging import LoggingIntegration
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.types import ExceptionHandler
-
-from app.database import Base, engine
-from app.dependencies import get_org_id_for_rate_limit
-from app.logging_config import configure_logging
-from app.routers import agent_query, auth, health, injest, invites, query, session, action_agent
-from app.config_validation import validate_config
-from app.services.object_storage import check_storage_ready
 
 configure_logging()
 
@@ -61,8 +71,8 @@ async def lifespan(app: FastAPI):
 
     if run_migrations:
         try:
-            from alembic.config import Config
             from alembic import command
+            from alembic.config import Config
 
             alembic_cfg_path = os.getenv("ALEMBIC_CONFIG", "alembic.ini")
             alembic_cfg = Config(alembic_cfg_path)
@@ -86,7 +96,10 @@ async def lifespan(app: FastAPI):
                 sys.exit(1)
 
     # Storage readiness check: fail fast in production by default.
-    storage_strict = os.getenv("STORAGE_STRICT_STARTUP", "true" if not is_dev else "false").lower() == "true"
+    storage_strict = (
+        os.getenv("STORAGE_STRICT_STARTUP", "true" if not is_dev else "false").lower()
+        == "true"
+    )
     try:
         check_storage_ready(strict=storage_strict)
     except Exception as e:
@@ -104,11 +117,45 @@ async def lifespan(app: FastAPI):
             try:
                 if now - os.path.getmtime(fp) > cutoff:
                     os.remove(fp)
-                    print(f"🧹 Swept orphaned upload: {fp}")
+                    print(f"\U0001f9f9 Swept orphaned upload: {fp}")
             except Exception as e:
-                print(f"⚠️  Could not sweep {fp}: {e}")
+                print(f"\u26a0\ufe0f  Could not sweep {fp}: {e}")
+
+    # NFR-REL-03: Recover workflows stuck in AWAITING_APPROVAL after restart
+    try:
+        from app.database import AsyncSessionLocal as _RecoverySession
+        from app.models import WorkflowExecution, WorkflowStatus
+        from sqlalchemy import select, update
+
+        async with _RecoverySession() as recovery_db:
+            result = await recovery_db.execute(
+                select(WorkflowExecution).where(
+                    WorkflowExecution.status == WorkflowStatus.AWAITING_APPROVAL
+                )
+            )
+            stuck = result.scalars().all()
+            if stuck:
+                logger.info(
+                    "[startup] Found %d workflows stuck in AWAITING_APPROVAL — recovering",
+                    len(stuck),
+                )
+                # They remain AWAITING_APPROVAL — the LangGraph checkpointer
+                # survived the restart, so approve/reject will still work.
+            else:
+                logger.debug("[startup] No stuck workflows found")
+    except Exception as e:
+        logger.warning("[startup] Workflow recovery check failed: %s", e)
+
+    # OpenTelemetry instrumentation (safe no-op if not configured)
+    try:
+        from app.telemetry import setup_telemetry
+
+        setup_telemetry(app)
+    except Exception:
+        pass
 
     yield  # App runs here
+
 
 # ── OpenAPI Description & Tags ───────────────────────────────────────────────
 description = """
@@ -167,9 +214,7 @@ app.add_exception_handler(
 
 # ── CORS Middleware ──────────────────────────────────────────────────────────
 _allowed_origins = [
-    o.strip()
-    for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
-    if o.strip()
+    o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
 ]
 if not _allowed_origins:
     _allowed_origins = [
@@ -178,10 +223,12 @@ if not _allowed_origins:
         "https://legal-ai-copilot-xi.vercel.app",
     ]
     if is_dev:
-        _allowed_origins.extend([
-            "http://localhost:8501",
-            "http://localhost:3000",
-        ])
+        _allowed_origins.extend(
+            [
+                "http://localhost:8501",
+                "http://localhost:3000",
+            ]
+        )
 
 # HARD OVERRIDE: Ensure Vercel is always permitted regardless of .env configuration.
 if "https://legal-ai-copilot-xi.vercel.app" not in _allowed_origins:
@@ -203,12 +250,16 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(invites.router)
 app.include_router(action_agent.router)
+app.include_router(audit.router)
+app.include_router(workspaces.router)
 
 from app.routers import cron
+
 app.include_router(cron.router)
 
 # ── Due Diligence (agentic pipeline) ────────────────────────────────────────
 from due_diligence.api.routes import router as _due_diligence_router
+
 app.include_router(
     _due_diligence_router,
     prefix="/api/v1/due-diligence",

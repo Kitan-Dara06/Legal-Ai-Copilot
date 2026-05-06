@@ -23,8 +23,8 @@ password = os.getenv("UPSTASH_PASSWORD")
 
 # Sliding idle timeout: session expires 24h after the LAST time it was used.
 # Every read (get_session) and write (add_file_to_session) resets this clock.
-SESSION_TTL_SECONDS = 60 * 60 * 24   
-PROGRESS_TTL_SECONDS = 60 * 10       
+SESSION_TTL_SECONDS = 60 * 60 * 24
+PROGRESS_TTL_SECONDS = 60 * 10
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -42,6 +42,7 @@ _redis_client = aioredis.from_url(
     health_check_interval=30,
 )
 
+
 def get_redis_client() -> aioredis.Redis:
     """
     Returns the shared async Redis client backed by the global connection pool.
@@ -53,9 +54,7 @@ def get_redis_client() -> aioredis.Redis:
 
 
 async def create_session(
-    file_ids: list[int],
-    org_id: str,
-    redis: aioredis.Redis
+    file_ids: list[int], org_id: str, redis: aioredis.Redis
 ) -> str:
     """
     Creates a new session with the given file IDs.
@@ -68,7 +67,7 @@ async def create_session(
     # Build the hash map: { "file_id": "READY" }
     # We also store org_id so we can verify ownership on queries.
     session_data = {str(fid): "READY" for fid in file_ids}
-    session_data["__org_id__"] = org_id  
+    session_data["__org_id__"] = org_id
 
     await redis.hset(session_key, mapping=session_data)
     await redis.expire(session_key, SESSION_TTL_SECONDS)
@@ -81,10 +80,7 @@ async def create_session(
     return session_id
 
 
-async def get_session(
-    session_id: str,
-    redis: aioredis.Redis
-) -> Optional[dict]:
+async def get_session(session_id: str, redis: aioredis.Redis) -> Optional[dict]:
     """
     Fetches the session data from Redis.
     Returns a dict of { file_id (int): status (str) }
@@ -94,7 +90,7 @@ async def get_session(
     data = await redis.hgetall(session_key)
 
     if not data:
-        return None 
+        return None
     await redis.expire(session_key, SESSION_TTL_SECONDS)
 
     org_id = data.pop("__org_id__", None)
@@ -105,10 +101,7 @@ async def get_session(
 
 
 async def add_file_to_session(
-    session_id: str,
-    file_id: int,
-    redis: aioredis.Redis,
-    status: str = "PROCESSING"
+    session_id: str, file_id: int, redis: aioredis.Redis, status: str = "PROCESSING"
 ) -> bool:
     """
     Adds a new file to an existing session.
@@ -121,21 +114,18 @@ async def add_file_to_session(
         return False
 
     await redis.hset(session_key, str(file_id), status)
-    
+
     # Add to reverse index
     await redis.sadd(f"file_sessions:{file_id}", session_id)
     await redis.expire(f"file_sessions:{file_id}", SESSION_TTL_SECONDS)
-    
+
     # Refresh the TTL so the session doesn't expire mid-work
     await redis.expire(session_key, SESSION_TTL_SECONDS)
     return True
 
 
 async def update_file_status_in_session(
-    session_id: str,
-    file_id: int,
-    status: str,
-    redis: aioredis.Redis
+    session_id: str, file_id: int, status: str, redis: aioredis.Redis
 ):
     """
     Called by Celery when a file finishes processing.
@@ -154,7 +144,7 @@ async def remove_file_from_all_sessions(file_id: int, redis: aioredis.Redis):
     sessions = await redis.smembers(f"file_sessions:{file_id}")
     for session_id in sessions:
         await redis.hdel(f"session:{session_id}", str(file_id))
-    
+
     await redis.delete(f"file_sessions:{file_id}")
 
 
@@ -164,6 +154,7 @@ async def remove_file_from_all_sessions(file_id: int, redis: aioredis.Redis):
 #    The query endpoint reads this to show "45% done" messages.
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 async def set_file_progress(file_id: int, percent: int, redis: aioredis.Redis):
     """
     Celery calls this every N chunks to report progress.
@@ -172,10 +163,37 @@ async def set_file_progress(file_id: int, percent: int, redis: aioredis.Redis):
     await redis.set(f"progress:{file_id}", percent, ex=PROGRESS_TTL_SECONDS)
 
 
-async def get_file_progress(file_id: int, redis: aioredis.Redis) -> int:
+import time
+
+
+async def acquire_llm_slot(org_id: str, max_slots: int = 5) -> Optional[str]:
     """
-    Returns the current processing progress (0-100) for a file.
-    Returns 0 if no progress data found.
+    Distributed Token Bucket / Semaphore.
+    Acquires a lease for LLM execution. Returns a lease_id if successful, None if full.
+    Uses a sorted set to track active leases and prune expired ones.
     """
-    val = await redis.get(f"progress:{file_id}")
-    return int(val) if val is not None else 0
+    redis = get_redis_client()
+    key = f"llm_slots:{org_id}"
+    now = time.time()
+
+    # 1. Prune expired leases (TTL = 120 seconds to be safe)
+    await redis.zremrangebyscore(key, 0, now - 120)
+
+    # 2. Check current capacity
+    count = await redis.zcard(key)
+    if count >= max_slots:
+        return None
+
+    # 3. Grant lease
+    lease_id = uuid.uuid4().hex
+    await redis.zadd(key, {lease_id: now})
+    # Set an absolute TTL on the key to prevent memory leaks
+    await redis.expire(key, 300)
+    return lease_id
+
+
+async def release_llm_slot(org_id: str, lease_id: str):
+    """Releases an LLM slot lease."""
+    redis = get_redis_client()
+    key = f"llm_slots:{org_id}"
+    await redis.zrem(key, lease_id)

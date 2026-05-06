@@ -13,8 +13,6 @@ from typing import Dict, List
 
 from openai import OpenAI
 
-from due_diligence.db.postgres import SessionLocal
-from due_diligence.db.pg_models import DefinedTerm
 
 
 class DefinedTermExtractor:
@@ -65,7 +63,6 @@ Text: {text}
                             continue
                         # ON CONFLICT DO NOTHING via merge pattern
                         existing = (
-                            due_diligence.db.query(DefinedTerm)
                             .filter_by(
                                 term=term_val,
                                 source_document=document_name,
@@ -74,7 +71,6 @@ Text: {text}
                             .first()
                         )
                         if not existing:
-                            due_diligence.db.add(DefinedTerm(
                                 term=term_val,
                                 definition=defn_val,
                                 source_document=document_name,
@@ -87,6 +83,5 @@ Text: {text}
                     print(f"⚠️ Extraction failed on [{error_path}]: {e}")
                     traceback.print_exc()
 
-            due_diligence.db.commit()
 
         print(f"✓ Stored {terms_found} defined terms for '{document_name}'.")

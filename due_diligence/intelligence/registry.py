@@ -14,8 +14,6 @@ from typing import Dict, List, Optional
 
 from sqlalchemy import func, select, text
 
-from due_diligence.db.postgres import SessionLocal
-from due_diligence.db.pg_models import DefinedTerm
 
 
 class RegistryQueryEngine:
@@ -32,7 +30,6 @@ class RegistryQueryEngine:
         """Fetches all definitions of a specific term across all documents."""
         with SessionLocal() as db:
             rows = (
-                due_diligence.db.query(DefinedTerm)
                 .filter(func.lower(DefinedTerm.term) == term.lower())
                 .all()
             )
@@ -53,7 +50,6 @@ class RegistryQueryEngine:
         with SessionLocal() as db:
             # Find terms defined in more than one distinct document
             subq = (
-                due_diligence.db.query(DefinedTerm.term)
                 .group_by(func.lower(DefinedTerm.term))
                 .having(
                     func.count(func.distinct(DefinedTerm.source_document)) > 1
@@ -62,7 +58,6 @@ class RegistryQueryEngine:
             )
 
             flagged = (
-                due_diligence.db.query(DefinedTerm)
                 .filter(func.lower(DefinedTerm.term).in_(
                     select(func.lower(subq.c.term))
                 ))

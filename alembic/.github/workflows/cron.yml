@@ -1,0 +1,34 @@
+name: Lex Platform Maintenance
+
+on:
+  schedule:
+    # Run every hour to check for stuck document tasks
+    - cron: '0 * * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sweep Stuck Processing Tasks
+        run: |
+          curl -X POST "${{ secrets.API_BASE_URL }}/cron/sweep-stuck-tasks" \
+          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+          -H "Content-Type: application/json"
+
+      - name: Qdrant Heartbeat
+        run: |
+          curl -X POST "${{ secrets.API_BASE_URL }}/cron/qdrant-heartbeat" \
+          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+          -H "Content-Type: application/json"
+
+  daily_cleanup:
+    runs-on: ubuntu-latest
+    # Only run once a day at midnight
+    if: github.event.schedule == '0 0 * * *' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Cleanup Expired Invites
+        run: |
+          curl -X POST "${{ secrets.API_BASE_URL }}/cron/cleanup-expired-invites" \
+          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+          -H "Content-Type: application/json"

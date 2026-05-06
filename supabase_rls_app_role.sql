@@ -40,10 +40,10 @@ BEGIN
     LOOP
         -- Enable RLS
         EXECUTE format('ALTER TABLE IF EXISTS %I ENABLE ROW LEVEL SECURITY', t_name);
-        
+
         -- Drop any existing service_role policy to avoid duplicates
         EXECUTE format('DROP POLICY IF EXISTS "service_role_all_%s" ON %I', t_name, t_name);
-        
+
         -- Create the service_role-only policy
         EXECUTE format('
             CREATE POLICY "service_role_all_%s"
@@ -51,5 +51,20 @@ BEGIN
             USING (true) WITH CHECK (true);
         ', t_name, t_name);
     END LOOP;
+END
+$$;
+
+-- Rule FR-EXEC-01 / Auditing: Add database-level INSERT-only constraint for audit_log
+DO $$
+BEGIN
+    -- Drop policy if it exists to allow re-running
+    DROP POLICY IF EXISTS "audit_log_insert_only" ON audit_log;
+
+    -- Ensure service_role can only INSERT and SELECT, strictly preventing UPDATE and DELETE
+    -- We restrict this at the database level by revoking UPDATE and DELETE privileges
+    REVOKE UPDATE, DELETE ON TABLE audit_log FROM PUBLIC;
+    REVOKE UPDATE, DELETE ON TABLE audit_log FROM service_role;
+    REVOKE UPDATE, DELETE ON TABLE audit_log FROM authenticated;
+    REVOKE UPDATE, DELETE ON TABLE audit_log FROM anon;
 END
 $$;

@@ -14,10 +14,9 @@ NOTE: If upgrading from the old schema (dense_bge / dense_legal_bert),
 """
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import voyageai
-from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -27,21 +26,24 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-# Import the existing BGE-M3 fallback logic from legal_rag
-from app.services.embedder import get_embedding as get_bge_embeddings
-
 QDRANT_PATH = os.environ.get("QDRANT_PATH", "./qdrant_storage")
 COLLECTION_NAME = "lex_unified_chunks"
 
 VOYAGE_DIM = 1024
-BGE_DIM = 1024
 VOYAGE_MODEL = "voyage-law-2"
 
 
 class LegalEmbedder:
-    def __init__(self, collection_name: str = COLLECTION_NAME, client: QdrantClient = None):
+    def __init__(
+        self,
+        collection_name: str = COLLECTION_NAME,
+        client: QdrantClient = None,
+        ingest_mode: bool = False,
+    ):
         self.collection_name = collection_name
-        self.qdrant_client = client if client is not None else QdrantClient(path=QDRANT_PATH)
+        self.qdrant_client = (
+            client if client is not None else QdrantClient(path=QDRANT_PATH)
+        )
 
         voyage_key = os.environ.get("VOYAGE_API_KEY")
         self._voyage_available = bool(voyage_key)
@@ -50,9 +52,11 @@ class LegalEmbedder:
             print(f"Initialising Voyage AI client (model: {VOYAGE_MODEL})...")
             self._voyage = voyageai.Client(api_key=voyage_key)
         else:
-            print("⚠️  VOYAGE_API_KEY not set — falling back to BGE-M3 as primary.")
+            print("⚠️  VOYAGE_API_KEY not set — dense embeddings will fail.")
 
         print("Loading SPLADE sparse model (fastembed)...")
+        from fastembed import SparseTextEmbedding
+
         self._splade = SparseTextEmbedding(model_name="prithivida/Splade_PP_en_v1")
 
         self._setup_collection()
@@ -67,8 +71,11 @@ class LegalEmbedder:
             self.qdrant_client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config={
-                    "dense_voyage": VectorParams(size=VOYAGE_DIM, distance=Distance.COSINE),
-                    "dense_bge": VectorParams(size=BGE_DIM, distance=Distance.COSINE),
+                    "dense_voyage": VectorParams(
+                        size=VOYAGE_DIM, distance=Distance.COSINE
+                    ),
+                    # Keep BGE config in case old points exist, but we won't populate it
+                    "dense_bge": VectorParams(size=1024, distance=Distance.COSINE),
                 },
                 sparse_vectors_config={"sparse_legal": SparseVectorParams()},
             )
@@ -88,20 +95,19 @@ class LegalEmbedder:
     # ------------------------------------------------------------------
 
     def _embed_voyage(self, texts: List[str]) -> List[List[float]]:
-        """Call Voyage AI with fallback to BGE on any error."""
+        """Call Voyage AI."""
         if not self._voyage_available:
-            return self._embed_bge(texts)
+            raise RuntimeError("VOYAGE_API_KEY is missing. Dense embedding failed.")
         try:
-            result = self._voyage.embed(texts, model=VOYAGE_MODEL, input_type="document")
+            result = self._voyage.embed(
+                texts, model=VOYAGE_MODEL, input_type="document"
+            )
             return result.embeddings
         except Exception as e:
-            print(f"  ⚠️ Voyage embed failed ({e}), falling back to BGE.")
-            return self._embed_bge(texts)
+            print(f"  ⚠️ Voyage embed failed ({e}).")
+            raise
 
-    def _embed_bge(self, texts: List[str]) -> List[List[float]]:
-        return get_bge_embeddings(texts)
-
-    def _embed_splade(self, text: str) -> SparseVector:
+    def _embed_splade(self, text: str) -> Optional[SparseVector]:
         result = list(self._splade.embed([text]))[0]
         return SparseVector(
             indices=result.indices.tolist(),
@@ -113,6 +119,11 @@ class LegalEmbedder:
     # ------------------------------------------------------------------
 
     def index_document(self, document_name: str, chunks: List[Dict]):
+        if not self._splade:
+            raise RuntimeError(
+                "LegalEmbedder must be initialized with ingest_mode=True to index documents."
+            )
+
         if not chunks:
             print("No chunks to index.")
             return
@@ -122,24 +133,24 @@ class LegalEmbedder:
         rich_texts = [self._format_text(c) for c in chunks]
         voyage_vecs = self._embed_voyage(rich_texts)
 
-        # BGE-M3 stored alongside voyage
-        bge_vecs = self._embed_bge(rich_texts)
-
         points = []
-        for i, (chunk, rich_text, v_vec, b_vec) in enumerate(
-            zip(chunks, rich_texts, voyage_vecs, bge_vecs)
+        for i, (chunk, rich_text, v_vec) in enumerate(
+            zip(chunks, rich_texts, voyage_vecs)
         ):
             splade_vec = self._embed_splade(rich_text)
             point_id = abs(hash(f"{document_name}_{i}")) % (10**15)
 
+            # Omit dense_bge
+            vector_dict = {
+                "dense_voyage": v_vec,
+            }
+            if splade_vec:
+                vector_dict["sparse_legal"] = splade_vec
+
             points.append(
                 PointStruct(
                     id=point_id,
-                    vector={
-                        "dense_voyage": v_vec,
-                        "dense_bge": b_vec,
-                        "sparse_legal": splade_vec,
-                    },
+                    vector=vector_dict,
                     payload={
                         "document_name": document_name,
                         "hierarchy_path": chunk.get("hierarchy", []),
@@ -152,26 +163,31 @@ class LegalEmbedder:
             )
 
         self.qdrant_client.upsert(collection_name=self.collection_name, points=points)
-        print(f"✓ Indexed {len(points)} chunks for '{document_name}' (voyage-law-2 + nomic + SPLADE).")
+        print(
+            f"✓ Indexed {len(points)} chunks for '{document_name}' (voyage-law-2 + SPLADE)."
+        )
 
     # ------------------------------------------------------------------
     # Query vector methods (for HybridRetriever)
     # ------------------------------------------------------------------
 
     def get_voyage_query_vector(self, text: str) -> List[float]:
-        """Embed a query with voyage-law-2 (falls back to bge on failure)."""
+        """Embed a query with voyage-law-2."""
         if not self._voyage_available:
-            return self.get_bge_query_vector(text)
+            raise RuntimeError(
+                "VOYAGE_API_KEY is missing. Query dense embedding failed."
+            )
         try:
             result = self._voyage.embed([text], model=VOYAGE_MODEL, input_type="query")
             return result.embeddings[0]
         except Exception as e:
-            print(f"  ⚠️ Voyage query embed failed ({e}), falling back to bge.")
-            return self.get_bge_query_vector(text)
+            print(f"  ⚠️ Voyage query embed failed ({e}).")
+            raise
 
-    def get_bge_query_vector(self, text: str) -> List[float]:
-        """Embed a query with BGE-M3."""
-        return get_bge_embeddings([text])[0]
+    def get_bge_query_vector(self, text: str) -> Optional[List[float]]:
+        """Deprecated."""
+        return None
 
-    def get_splade_query_vector(self, text: str) -> SparseVector:
+    def get_splade_query_vector(self, text: str) -> Optional[SparseVector]:
+        """Returns the splade vector for a given text."""
         return self._embed_splade(text)

@@ -20,7 +20,9 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
 if (!API_URL) {
     if (typeof window !== "undefined") {
-        console.error("NEXT_PUBLIC_API_URL is not defined. API calls will fail.");
+        console.error(
+            "NEXT_PUBLIC_API_URL is not defined. API calls will fail.",
+        );
     }
 }
 
@@ -92,12 +94,13 @@ async function apiFetch<T>(
     return res.json() as Promise<T>;
 }
 
-
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
 export async function checkOrgAvailable(orgId: string): Promise<boolean> {
     try {
-        const res = await fetch(`${API_URL}/auth/check-org?org_id=${encodeURIComponent(orgId)}`);
+        const res = await fetch(
+            `${API_URL}/auth/check-org?org_id=${encodeURIComponent(orgId)}`,
+        );
         if (!res.ok) return false;
         const data = await res.json();
         return !!data.available;
@@ -111,7 +114,9 @@ export function getMe(token: string, orgSlug?: string) {
 }
 
 export async function getMyOrgs(token: string) {
-    const res = await apiFetch<{ orgs: OrgEntry[] }>("/auth/my-orgs", { token });
+    const res = await apiFetch<{ orgs: OrgEntry[] }>("/auth/my-orgs", {
+        token,
+    });
     return res.orgs;
 }
 
@@ -324,5 +329,172 @@ export function askAgent(
         token,
         orgSlug,
         method: "POST",
+    });
+}
+
+// ── Workspaces ────────────────────────────────────────────────────────────────
+
+export function listWorkspaces(token: string, orgSlug?: string) {
+    return apiFetch<WorkspaceResponse[]>("/workspaces", { token, orgSlug });
+}
+
+export function getWorkspace(
+    token: string,
+    workspaceId: string,
+    orgSlug?: string,
+) {
+    return apiFetch<WorkspaceDetailResponse>(`/workspaces/${workspaceId}`, {
+        token,
+        orgSlug,
+    });
+}
+
+export function createWorkspace(
+    token: string,
+    name: string,
+    description?: string,
+    orgSlug?: string,
+) {
+    return apiFetch<WorkspaceResponse>("/workspaces", {
+        token,
+        orgSlug,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, description }),
+    });
+}
+
+// ── Workspace Sessions ────────────────────────────────────────────────────────
+
+export function createWorkspaceSession(
+    token: string,
+    workspaceId: string,
+    documentIds: string[],
+    orgSlug?: string,
+) {
+    return apiFetch<{ session_id: string }>(
+        `/workspaces/${workspaceId}/sessions`,
+        {
+            token,
+            orgSlug,
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ document_ids: documentIds }),
+        },
+    );
+}
+
+export function getWorkspaceSession(
+    token: string,
+    workspaceId: string,
+    sessionId: string,
+    orgSlug?: string,
+) {
+    return apiFetch<WorkspaceSessionResponse>(
+        `/workspaces/${workspaceId}/sessions/${sessionId}`,
+        { token, orgSlug },
+    );
+}
+
+// ── Agent Workflow ────────────────────────────────────────────────────────────
+
+export function startAgentWorkflow(
+    token: string,
+    goalId: string,
+    workspaceId: string,
+    documentId: string,
+    orgSlug?: string,
+) {
+    return apiFetch<StartWorkflowResponse>("/agent/start", {
+        token,
+        orgSlug,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            goal_id: goalId,
+            workspace_id: workspaceId,
+            document_id: documentId,
+        }),
+    });
+}
+
+export function confirmIntent(
+    token: string,
+    workflowId: string,
+    confirmedIntent: string,
+    orgSlug?: string,
+) {
+    return apiFetch<ConfirmIntentResponse>(
+        `/agent/confirm-intent/${workflowId}`,
+        {
+            token,
+            orgSlug,
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirmed_intent: confirmedIntent }),
+        },
+    );
+}
+
+export function approveWorkflow(
+    authToken: string,
+    workflowId: string,
+    approvalToken: string,
+    orgSlug?: string,
+) {
+    return apiFetch<ApproveWorkflowResponse>(`/agent/approve/${workflowId}`, {
+        token: authToken,
+        orgSlug,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: approvalToken }),
+    });
+}
+
+export function rejectWorkflow(
+    token: string,
+    workflowId: string,
+    reason: string,
+    orgSlug?: string,
+) {
+    return apiFetch<{ status: string }>(`/agent/reject/${workflowId}`, {
+        token,
+        orgSlug,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+    });
+}
+
+export function getWorkflowStatus(
+    token: string,
+    workflowId: string,
+    orgSlug?: string,
+) {
+    return apiFetch<WorkflowStatusResponse>(`/agent/status/${workflowId}`, {
+        token,
+        orgSlug,
+    });
+}
+
+export function getWorkflowActions(
+    token: string,
+    workflowId: string,
+    orgSlug?: string,
+) {
+    return apiFetch<GetActionsResponse>(`/agent/${workflowId}/actions`, {
+        token,
+        orgSlug,
+    });
+}
+
+export function getWorkflowLogs(
+    token: string,
+    workflowId: string,
+    orgSlug?: string,
+) {
+    return apiFetch<GetLogsResponse>(`/agent/${workflowId}/logs`, {
+        token,
+        orgSlug,
     });
 }

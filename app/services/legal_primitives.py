@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from datetime import date
 from typing import Any, Dict, List, Optional
 
@@ -8,7 +9,6 @@ from dotenv import load_dotenv
 from groq import AsyncGroq
 from pydantic import BaseModel, Field
 
-import re
 from app.services.embedder import get_embedding
 from app.services.store import (
     search_hybrid,
@@ -223,13 +223,17 @@ async def search_tool(
             results = search_hybrid(q_text, q_vector, top_k=top_k, org_id=org_id)
             raw_results.append(results)
 
-    # Flatten
+    # Flatten (handle new dict return format from search_hybrid)
     flat_results: List[Dict] = []
     for batch in raw_results:
-        if isinstance(batch, list):
-            flat_results.extend(batch)
+        if isinstance(batch, dict):
+            batch_results = batch.get("results", batch)
         else:
-            flat_results.append(batch)
+            batch_results = batch
+        if isinstance(batch_results, list):
+            flat_results.extend(batch_results)
+        else:
+            flat_results.append(batch_results)
 
     # Deduplicate by text
     unique_results: List[Dict] = []
@@ -247,11 +251,18 @@ async def search_tool(
     # Keyword post-filter (legacy support)
     if keyword_filter:
         logger.debug("Applying keyword filter: %s", keyword_filter)
-        filtered = [r for r in final_output if keyword_filter.lower() in r.get("text", "").lower()]
+        filtered = [
+            r
+            for r in final_output
+            if keyword_filter.lower() in r.get("text", "").lower()
+        ]
         if filtered:
             final_output = filtered
         else:
-            logger.warning("Keyword filter '%s' removed all results — returning unfiltered.", keyword_filter)
+            logger.warning(
+                "Keyword filter '%s' removed all results — returning unfiltered.",
+                keyword_filter,
+            )
 
     logger.info("Search complete: %d chunks returned", len(final_output))
     return final_output
@@ -294,6 +305,7 @@ async def read_tool(
 
     # Search scoped to the specific file IDs from the session
     from app.services.store import search_hybrid_qdrant
+
     results = search_hybrid_qdrant(
         query_text,
         embeddings[0],
@@ -368,12 +380,16 @@ class LogicResult(BaseModel):
     )
 
 
-async def logic_tool(data: dict, question: str = "Is this contract currently valid?") -> dict:
+async def logic_tool(
+    data: dict, question: str = "Is this contract currently valid?"
+) -> dict:
     """
     Evaluates logical conditions using an LLM reasoning engine
     and returns a strictly formatted 'verdict' and 'reasoning'.
     """
-    logger.info("logic_tool called | question=%.80s | data_keys=%s", question, list(data.keys()))
+    logger.info(
+        "logic_tool called | question=%.80s | data_keys=%s", question, list(data.keys())
+    )
 
     code_prompt = f"""You are a legal reasoning engine.
 Given contract data and a question, determine the answer.
@@ -407,7 +423,11 @@ You MUST output strictly valid JSON matching this schema:
         result.setdefault("reasoning", "No reasoning provided.")
         result["code_used"] = None
 
-        logger.info("logic_tool result | verdict=%s | reasoning=%.80s", result["verdict"], result["reasoning"])
+        logger.info(
+            "logic_tool result | verdict=%s | reasoning=%.80s",
+            result["verdict"],
+            result["reasoning"],
+        )
         return result
 
     except Exception as e:
@@ -429,7 +449,9 @@ async def draft_tool(
 
     logger.info(
         "draft_tool called | format=%s | use_cot=%s | chunks=%d",
-        output_format, use_cot, len(context_chunks),
+        output_format,
+        use_cot,
+        len(context_chunks),
     )
 
     if use_cot:
@@ -445,7 +467,11 @@ async def _draft_simple(
     logger.debug("draft_tool: simple mode")
 
     unique_chunks = list(set(context_chunks))
-    logger.debug("draft_tool: deduplicated %d -> %d chunks", len(context_chunks), len(unique_chunks))
+    logger.debug(
+        "draft_tool: deduplicated %d -> %d chunks",
+        len(context_chunks),
+        len(unique_chunks),
+    )
 
     context_text = "\n\n".join(unique_chunks)
 
@@ -480,7 +506,11 @@ async def _draft_simple(
         usage.total_tokens if usage and hasattr(usage, "total_tokens") else None
     )
 
-    logger.info("draft_tool (simple): %d tokens used, %d chars output", tokens_used or 0, len(output))
+    logger.info(
+        "draft_tool (simple): %d tokens used, %d chars output",
+        tokens_used or 0,
+        len(output),
+    )
     return output
 
 
@@ -498,7 +528,11 @@ async def _draft_with_cot(
         if chunk_str not in seen:
             seen.add(chunk_str)
             unique_chunks.append(chunk_str)
-    logger.debug("draft_tool: deduplicated %d -> %d chunks", len(context_chunks), len(unique_chunks))
+    logger.debug(
+        "draft_tool: deduplicated %d -> %d chunks",
+        len(context_chunks),
+        len(unique_chunks),
+    )
 
     context_text = "\n\n".join(unique_chunks)
 
@@ -540,7 +574,10 @@ async def _draft_with_cot(
         return result.output.synthesized_response
 
     except Exception as e:
-        logger.warning("draft_tool: Pydantic AI failed after retries (%s) — falling back to simple mode", e)
+        logger.warning(
+            "draft_tool: Pydantic AI failed after retries (%s) — falling back to simple mode",
+            e,
+        )
         return await _draft_simple(unique_chunks, original_question, output_format)
 
 

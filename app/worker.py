@@ -3,6 +3,7 @@ import os
 
 import sentry_sdk
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import worker_process_init
 from dotenv import load_dotenv
 from sentry_sdk.integrations.celery import CeleryIntegration
@@ -36,6 +37,7 @@ if not rabbitmq_url:
     rq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
     rq_vhost = os.getenv("RABBITMQ_VHOST", "/")
     from urllib.parse import quote_plus
+
     rabbitmq_url = f"amqp://{rq_user}:{quote_plus(rq_password)}@{rq_host}:{rq_port}/{quote_plus(rq_vhost)}"
 
 BROKER_URL = rabbitmq_url
@@ -94,12 +96,19 @@ celery_app.conf.update(
     # Timezone
     timezone="UTC",
     enable_utc=True,
-    # ── Priority Queues ──────────────────────────────────────────────────────
-    # Two queues: "default" for clean PDFs, "ocr" for scanned/image PDFs.
-    # This prevents a slow 50-page fax from blocking a fast digital contract.
+    # ── Queues ─────────────────────────────────────────────────────────────
+    # Three queues:
+    #   "default"  — digital PDF ingestion (clean, fast)
+    #   "ocr"      — scanned/image PDF ingestion (slow, Gemini OCR)
+    #   "deadline" — dedicated deadline scanner (every 15 min beat)
     task_queues={
         "default": {"exchange": "default", "routing_key": "default"},
         "ocr": {"exchange": "ocr", "routing_key": "ocr"},
+        "deadline": {
+            "exchange": "deadline",
+            "routing_key": "deadline",
+            "queue_arguments": {"x- durable": True},
+        },
     },
     task_default_queue="default",
     task_default_exchange="default",
@@ -109,6 +118,17 @@ celery_app.conf.update(
         "app.tasks.process_digital_pdf": {"queue": "default"},
         "app.tasks.process_scanned_pdf": {"queue": "ocr"},
         "app.tasks.cleanup_stale_data": {"queue": "default"},
+        "app.tasks.deadline_scanner": {"queue": "deadline"},
+        "app.tasks.resolve_defined_term_conflicts": {"queue": "default"},
+        "app.tasks.resolve_deadline_conflicts": {"queue": "deadline"},
+    },
+    # ── Beat Schedule (Deadline Scanner every 15 minutes) ──
+    beat_schedule={
+        "deadline-scanner-every-15-min": {
+            "task": "app.tasks.deadline_scanner",
+            "schedule": crontab(minute="*/15"),
+            "options": {"queue": "deadline"},
+        },
     },
     # Retry failed tasks up to 3 times with a 60-second delay
     task_acks_late=True,
@@ -122,7 +142,9 @@ def _celery_hot_start(**_kwargs):
     Hot-start heavy imports inside Celery worker processes.
     """
     hot_start = os.getenv("CELERY_HOT_START", "true").lower() == "true"
-    include_gemini = os.getenv("CELERY_HOT_START_INCLUDE_GEMINI", "false").lower() == "true"
+    include_gemini = (
+        os.getenv("CELERY_HOT_START_INCLUDE_GEMINI", "false").lower() == "true"
+    )
     strict = os.getenv("CELERY_HOT_START_STRICT", "true").lower() == "true"
     if not hot_start:
         return

@@ -1,3 +1,4 @@
+from due_diligence.dummy_db import db_create_session, db_complete_session, db_log_escalation
 """
 FastAPI Routes — Legal Due Diligence Agent (V2)
 ================================================
@@ -23,22 +24,31 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
-from pydantic import BaseModel
-
 # --- Auth — direct import (same app as legal_rag) ---
 from app.dependencies import get_supabase_claims
+from app.services.ingestion.embedder import LegalEmbedder
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
+from pydantic import BaseModel
 
-# --- Local modules ---
-from due_diligence.db.postgres import init_schema
-from due_diligence.db.pg_models import (
-    create_session as db_create_session,
     complete_session as db_complete_session,
+)
+    create_session as db_create_session,
+)
     log_escalation as db_log_escalation,
 )
+
+# --- Local modules ---
 from due_diligence.escalation.triggers import EscalationManager
 from due_diligence.ingestion.chunker import ClauseChunker
-from due_diligence.ingestion.embedder import LegalEmbedder
 from due_diligence.ingestion.parser import LegalDocumentParser
 from due_diligence.ingestion.reference_parser import LLMReferenceParser
 from due_diligence.ingestion.terms_extractor import DefinedTermExtractor
@@ -52,8 +62,8 @@ from due_diligence.output.schemas import (
     DueDiligenceReport,
     Escalation,
     EscalationAlert,
-    Finding,
     FinalReport,
+    Finding,
     TermDefinition,
 )
 from due_diligence.planner.decomposer import GoalDecomposer
@@ -127,20 +137,6 @@ def _get_reranker() -> LegalCrossEncoder:
 # Request / Response models
 # ---------------------------------------------------------------------------
 
-class PlanRequest(BaseModel):
-    goal: str
-
-
-class PlanResponse(BaseModel):
-    goal: str
-    tasks: List[dict]
-
-
-class ExecuteRequest(BaseModel):
-    goal: str
-    tasks: List[dict]
-    document_names: List[str] = []
-
 
 class QueryRequest(BaseModel):
     query: str
@@ -150,6 +146,7 @@ class QueryRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Background ingest pipeline
 # ---------------------------------------------------------------------------
+
 
 async def _run_ingest(job_id: str, tmp_path: str, doc_name: str, suffix: str):
     """
@@ -182,7 +179,9 @@ async def _run_ingest(job_id: str, tmp_path: str, doc_name: str, suffix: str):
 
         await _set("parsing_references", 60)
         ref_parser = LLMReferenceParser()
-        enriched_chunks = ref_parser.resolve_references(chunks, doc_name=doc_name, graph=_graph)
+        enriched_chunks = ref_parser.resolve_references(
+            chunks, doc_name=doc_name, graph=_graph
+        )
 
         await _set("building_graph", 70)
         _graph.build_graph(enriched_chunks, doc_name=doc_name)
@@ -221,11 +220,13 @@ async def _run_ingest(job_id: str, tmp_path: str, doc_name: str, suffix: str):
 
         # Update manifest
         _document_manifest = [m for m in _document_manifest if m["name"] != doc_name]
-        _document_manifest.append({
-            "name": doc_name,
-            "chunk_count": len(chunks),
-            "page_count": page_count,
-        })
+        _document_manifest.append(
+            {
+                "name": doc_name,
+                "chunk_count": len(chunks),
+                "page_count": page_count,
+            }
+        )
 
         result = {
             "document": doc_meta.model_dump(),
@@ -250,6 +251,7 @@ async def _run_ingest(job_id: str, tmp_path: str, doc_name: str, suffix: str):
 # Health (unauthenticated)
 # ---------------------------------------------------------------------------
 
+
 @router.get("/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
@@ -259,6 +261,7 @@ async def health():
 # POST /ingest — async upload (returns job_id immediately)
 # ---------------------------------------------------------------------------
 
+
 @router.post("/ingest")
 async def ingest_document(
     background_tasks: BackgroundTasks,
@@ -267,7 +270,9 @@ async def ingest_document(
 ):
     suffix = Path(file.filename).suffix.lower()
     if suffix not in (".pdf", ".docx"):
-        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
+        raise HTTPException(
+            status_code=400, detail="Only PDF and DOCX files are supported."
+        )
 
     # Save to temp file synchronously (small enough to be fine on the event loop)
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -276,7 +281,12 @@ async def ingest_document(
 
     job_id = str(uuid.uuid4())
     async with _jobs_lock:
-        _jobs[job_id] = {"status": "queued", "progress": 0, "result": None, "error": None}
+        _jobs[job_id] = {
+            "status": "queued",
+            "progress": 0,
+            "result": None,
+            "error": None,
+        }
 
     background_tasks.add_task(_run_ingest, job_id, tmp_path, file.filename, suffix)
     return {"job_id": job_id, "status": "queued", "document_name": file.filename}
@@ -285,6 +295,7 @@ async def ingest_document(
 # ---------------------------------------------------------------------------
 # GET /status/{job_id} — poll ingest progress (unauthenticated, ID is opaque)
 # ---------------------------------------------------------------------------
+
 
 @router.get("/status/{job_id}")
 async def get_ingest_status(job_id: str):
@@ -298,6 +309,7 @@ async def get_ingest_status(job_id: str):
 # ---------------------------------------------------------------------------
 # GET /conflicts — current registry conflict report
 # ---------------------------------------------------------------------------
+
 
 @router.get("/conflicts")
 async def get_conflicts(_claims: dict = Depends(get_supabase_claims)):
@@ -318,181 +330,21 @@ async def get_conflicts(_claims: dict = Depends(get_supabase_claims)):
             )
             for term, defs in conflicts_raw.items()
         ]
-        return {"conflict_count": len(conflicts), "conflicts": [c.model_dump() for c in conflicts]}
+        return {
+            "conflict_count": len(conflicts),
+            "conflicts": [c.model_dump() for c in conflicts],
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
-# POST /plan — document-aware goal decomposition
-# ---------------------------------------------------------------------------
 
-@router.post("/plan", response_model=PlanResponse)
-async def plan_goal(req: PlanRequest, _claims: dict = Depends(get_supabase_claims)):
-    try:
-        conflicts_raw = _registry.detect_conflicts()
-        pre_conflicts = [
-            {"term": term, "definitions": defs}
-            for term, defs in conflicts_raw.items()
-        ]
-        tasks = _decomposer.decompose_goal(
-            goal=req.goal,
-            document_manifest=_document_manifest,
-            pre_conflicts=pre_conflicts,
-        )
-        if not tasks:
-            raise HTTPException(
-                status_code=422,
-                detail="Planner failed to decompose the goal. Try rephrasing.",
-            )
-        return PlanResponse(goal=req.goal, tasks=tasks)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------------------------------------------------------------------
-# POST /execute — run confirmed task list → DueDiligenceReport
-# ---------------------------------------------------------------------------
-
-@router.post("/execute", response_model=DueDiligenceReport)
-async def execute_plan(
-    req: ExecuteRequest,
-    _claims: dict = Depends(get_supabase_claims),
-):
-    session_id = str(uuid.uuid4())
-
-    # Create session record in Postgres
-    try:
-        db_create_session(session_id, req.goal, req.document_names)
-    except Exception as e:
-        print(f"⚠️  Session create failed: {e}")
-
-    try:
-        embedder = _get_embedder()
-        retriever = _get_retriever()
-        expander = GraphExpander(_graph)
-
-        executor = StateMachineExecutor(
-            graph=_graph,
-            registry=_registry,
-            retriever=retriever,
-            embedder=embedder,
-        )
-        log = executor.execute_plan(req.tasks)
-
-        findings: List[Finding] = []
-        all_escalations: List[Escalation] = []
-
-        for record in log:
-            if record.result is None:
-                continue
-
-            raw_clauses = []
-            if isinstance(record.result, list):
-                raw_clauses = record.result
-            elif isinstance(record.result, dict):
-                raw_clauses = record.result.get("definitions", [])
-
-            # Rerank if clauses carry scores
-            if raw_clauses and all("score" in c or "rerank_score" in c for c in raw_clauses):
-                ranked = _get_reranker().rerank(record.search_target, raw_clauses, top_k=5)
-            else:
-                ranked = raw_clauses
-
-            # Graph expansion
-            expanded = []
-            if ranked:
-                expanded = expander.expand_context(ranked)
-
-            finding = _finding_gen.generate_finding(
-                task_id=str(record.task_id),
-                task_description=record.reason or record.search_target,
-                active_clauses=ranked,
-                reference_chain=expanded,
-                registry=_registry,
-            )
-            findings.append(finding)
-
-            # Run all three escalation triggers
-            escalations = _escalation_mgr.evaluate_finding(finding)
-            all_escalations.extend(escalations)
-
-            # Log each escalation to Postgres audit_log
-            for esc in escalations:
-                try:
-                    db_log_escalation(
-                        session_id=session_id,
-                        task_id=str(record.task_id),
-                        trigger_type=esc.trigger,
-                        reviewer_note=esc.reviewer_note,
-                        context=esc.context,
-                    )
-                except Exception as e:
-                    print(f"  ⚠️ Audit log write failed: {e}")
-
-        # Cross-task contradiction detection
-        contradictions = _contradiction.analyze_findings(findings)
-
-        # Pre-ingestion conflicts
-        conflicts_raw = _registry.detect_conflicts()
-        pre_conflicts = [
-            DefinitionalConflict(
-                term=term,
-                definitions=[
-                    TermDefinition(
-                        term=term,
-                        definition=d["definition"],
-                        document_name=d["document"],
-                        hierarchy_path=d["path"],
-                    )
-                    for d in defs
-                ],
-            )
-            for term, defs in conflicts_raw.items()
-        ]
-
-        # Mark session complete
-        try:
-            db_complete_session(session_id)
-        except Exception as e:
-            print(f"⚠️  Session complete failed: {e}")
-
-        docs_analysed = [
-            DocumentMeta(
-                document_name=d["name"],
-                file_type="pdf",
-                chunk_count=d.get("chunk_count", 0),
-                page_count=d.get("page_count", 0),
-            )
-            for d in _document_manifest
-        ]
-
-        return DueDiligenceReport(
-            goal=req.goal,
-            session_id=session_id,
-            documents_analysed=docs_analysed,
-            generated_at=datetime.utcnow(),
-            pre_ingestion_conflicts=pre_conflicts,
-            findings=findings,
-            cross_document_contradictions=contradictions,
-            escalations=all_escalations,
-            embedding_model_used="voyage-law-2 (primary) + nomic-embed-text-v1.5 (backup) + SPLADE | RRF",
-        )
-
-    except Exception as e:
-        # Best-effort session failure mark
-        try:
-            db_complete_session(session_id)
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------------------------
 # POST /query — legacy single-shot endpoint (unchanged, backward compat)
 # ---------------------------------------------------------------------------
+
 
 @router.post("/query", response_model=FinalReport)
 async def process_legal_query(
@@ -503,11 +355,7 @@ async def process_legal_query(
         embedder = _get_embedder()
         retriever = _get_retriever()
 
-        bge_vec = embedder.get_bge_query_vector(req.query)
-        lb_vec = embedder.get_legal_bert_query_vector(req.query)
-        splade_vec = embedder.get_splade_query_vector(req.query)
-
-        vector_hits = retriever.search(req.query, bge_vec, lb_vec, splade_vec, limit=5)
+        vector_hits = retriever.search(req.query, limit=5)
         ranked_nodes = _get_reranker().rerank(req.query, vector_hits, top_k=3)
 
         escalations = _escalation_mgr.check_for_escalations(ranked_nodes)

@@ -17,12 +17,16 @@ Edge schema:
   (:Clause)-[:REFERENCES {edge_type: str}]->(:Clause)
 """
 
+import asyncio
+import json
 import os
 import re
 from typing import Dict, List, Optional
 
-from neo4j import GraphDatabase, Driver
+from neo4j import Driver, GraphDatabase
+from openai import AsyncOpenAI
 
+from app.redis_client import acquire_llm_slot, release_llm_slot
 
 NEO4J_URI = os.environ.get("NEO4J_URI", "neo4j+s://localhost:7687")
 NEO4J_USER = os.environ.get("NEO4J_USERNAME", "neo4j")
@@ -91,7 +95,9 @@ class DependencyGraph:
                     MERGE (c:Clause {id: $id, doc: $doc})
                     SET c.text = $text
                     """,
-                    id=node_id, doc=doc, text=text,
+                    id=node_id,
+                    doc=doc,
+                    text=text,
                 )
 
                 # Intra-document dependency edges
@@ -102,7 +108,9 @@ class DependencyGraph:
                         MERGE (tgt:Clause {id: $tgt_id, doc: $doc})
                         MERGE (src)-[:REFERENCES {edge_type: 'intra_doc'}]->(tgt)
                         """,
-                        src_id=node_id, tgt_id=dep, doc=doc,
+                        src_id=node_id,
+                        tgt_id=dep,
+                        doc=doc,
                     )
 
         print(f"[Graph] Merged clauses from '{doc_name}' into Neo4j graph.")
@@ -132,8 +140,10 @@ class DependencyGraph:
                 MERGE (tgt:Clause {id: $to_id, doc: $to_doc})
                 MERGE (src)-[:REFERENCES {edge_type: $edge_type}]->(tgt)
                 """,
-                from_id=from_node_id, from_doc=from_doc,
-                to_id=to_node_id, to_doc=to_doc,
+                from_id=from_node_id,
+                from_doc=from_doc,
+                to_id=to_node_id,
+                to_doc=to_doc,
                 edge_type=edge_type,
             )
 
@@ -158,7 +168,8 @@ class DependencyGraph:
                 OPTIONAL MATCH path = (start)-[:REFERENCES*0..$hops]->(dep:Clause)
                 RETURN DISTINCT dep.id AS node, dep.text AS text, dep.doc AS source_document
                 """,
-                id=node_id, hops=max_hops,
+                id=node_id,
+                hops=max_hops,
             )
             records = result.data()
 
@@ -168,11 +179,13 @@ class DependencyGraph:
         for r in records:
             if r.get("node") and r["node"] not in seen:
                 seen.add(r["node"])
-                chain.append({
-                    "node": r["node"],
-                    "text": r.get("text", ""),
-                    "source_document": r.get("source_document", "Unknown"),
-                })
+                chain.append(
+                    {
+                        "node": r["node"],
+                        "text": r.get("text", ""),
+                        "source_document": r.get("source_document", "Unknown"),
+                    }
+                )
         return chain
 
     # ------------------------------------------------------------------
@@ -200,6 +213,8 @@ class DependencyGraph:
     @property
     def graph(self):
         return self  # self already implements number_of_nodes / number_of_edges
+
+
 """
 Cross-Reference Parser — Regex Pre-pass + LLM Fallback
 =======================================================
@@ -216,7 +231,9 @@ cross-references follow standard patterns.
 
 
 _REFERENCE_PATTERNS: List[re.Pattern] = [
-    re.compile(r"\bSection[s]?\s+\d+(?:\.\d+)*(?:\([a-z]\))?(?:\([ivx]+\))?", re.IGNORECASE),
+    re.compile(
+        r"\bSection[s]?\s+\d+(?:\.\d+)*(?:\([a-z]\))?(?:\([ivx]+\))?", re.IGNORECASE
+    ),
     re.compile(r"\bArticle[s]?\s+[IVXLCDM\d]+", re.IGNORECASE),
     re.compile(r"\bClause[s]?\s+\d+(?:\.\d+)*(?:\([a-z]\))?", re.IGNORECASE),
     re.compile(r"\bSubsection[s]?\s+\([a-z]\)", re.IGNORECASE),
@@ -253,34 +270,31 @@ class LLMReferenceParser:
     """
 
     def __init__(self):
-        self.client = OpenAI(
+        self.client = AsyncOpenAI(
             api_key=os.environ.get("OPENAI_API_KEY"),
-            base_url=os.environ.get("OPENAI_API_BASE", "https://api.groq.com/openai/v1"),
+            base_url=os.environ.get(
+                "OPENAI_API_BASE", "https://api.groq.com/openai/v1"
+            ),
         )
         self.model = "llama-3.1-8b-instant"
 
-    def resolve_references(
+    async def resolve_references(
         self,
         chunks: List[Dict],
         doc_name: str = "",
         graph=None,
+        org_id: str = "",
     ) -> List[Dict]:
         """
         Enriches each chunk with a `dependencies_clauses` list.
         Uses regex first; only calls LLM if regex finds nothing.
-
-        Args:
-            chunks:   List of chunk dicts (must contain 'text' and 'hierarchy').
-            doc_name: Name of the document being parsed.
-            graph:    DependencyGraph (Neo4j) instance. When provided, LLM-detected
-                      cross-document references are persisted via link_cross_doc_ref().
+        Uses asyncio.gather with chunk-level concurrency controlled by Redis semaphore.
         """
         regex_hits = 0
         llm_hits = 0
         llm_skips = 0
         cross_doc_edges = 0
 
-        # Signals that identify natural-language cross-document references
         _CROSS_DOC_SIGNALS = re.compile(
             r"\b(master agreement|statement of work|sow|amendment|side letter|"
             r"exhibit|schedule|governing agreement|framework agreement|"
@@ -291,31 +305,27 @@ class LLMReferenceParser:
 
         print(f"Resolving cross-references in {len(chunks)} chunks (hybrid mode)...")
 
-        for chunk in chunks:
+        async def process_chunk(chunk):
+            nonlocal regex_hits, llm_hits, llm_skips, cross_doc_edges
             text = chunk.get("text", "")
             current_path = chunk.get("hierarchy", [])
             node_id = " > ".join(current_path) if current_path else "Unknown"
 
-            # ------------------------------------------------------------------
             # Step 1: Regex pre-pass
-            # ------------------------------------------------------------------
             regex_refs = _regex_extract_references(text)
-
             if regex_refs:
-                # Filter self-references and store
                 clean_refs = [
-                    r for r in regex_refs
+                    r
+                    for r in regex_refs
                     if not self._is_self_reference(r, current_path)
                 ]
                 chunk["dependencies_clauses"] = clean_refs
                 if clean_refs:
                     regex_hits += 1
                 llm_skips += 1
-                continue  # Skip LLM for this chunk
+                return
 
-            # ------------------------------------------------------------------
-            # Step 2: LLM fallback — natural language cross-document references
-            # ------------------------------------------------------------------
+            # Step 2: LLM fallback
             prompt = f"""Extract legal cross-references from the following text.
 Focus on natural-language references like "as defined in the Master Agreement",
 "pursuant to the Governing Law clause", or "subject to the terms of the SOW".
@@ -326,8 +336,16 @@ Do not include any explanation or markdown.
 
 Text: {text}"""
 
+            # Acquire LLM Token Bucket Lease (Queueing behavior)
+            lease_id = None
+            while True:
+                lease_id = await acquire_llm_slot(str(org_id), max_slots=5)
+                if lease_id:
+                    break
+                await asyncio.sleep(0.5)
+
             try:
-                response = self.client.chat.completions.create(
+                response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.0,
@@ -345,14 +363,13 @@ Text: {text}"""
                         continue
                     clean_refs.append(ref)
 
-                    # Wire cross-document edges into Neo4j if graph provided
                     if graph and doc_name and _CROSS_DOC_SIGNALS.search(ref):
                         try:
                             graph.link_cross_doc_ref(
                                 from_node_id=node_id,
                                 from_doc=doc_name,
                                 to_node_id=ref,
-                                to_doc="__cross_doc__",  # resolved when target doc is indexed
+                                to_doc="__cross_doc__",
                                 edge_type="cross_doc_pending",
                             )
                             cross_doc_edges += 1
@@ -366,6 +383,12 @@ Text: {text}"""
             except Exception as e:
                 print(f"  ⚠️ LLM extraction failed on chunk: {e}")
                 chunk["dependencies_clauses"] = []
+            finally:
+                if lease_id:
+                    await release_llm_slot(str(org_id), lease_id)
+
+        # Run all chunks concurrently
+        await asyncio.gather(*(process_chunk(c) for c in chunks))
 
         print(
             f"  ⤴️ Regex resolved {regex_hits} chunks | "
@@ -382,6 +405,3 @@ Text: {text}"""
         flat_path = " ".join(current_path).replace(".", "").lower()
         clean_ref = re.sub(r"[^a-z0-9 ]", "", ref.lower())
         return flat_path in clean_ref or clean_ref in flat_path
-
-
-

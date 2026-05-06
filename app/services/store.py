@@ -48,12 +48,14 @@ def get_cohere_client() -> cohere.ClientV2:
 
 from app.utils.vector_utils import compute_sparse_vector as _compute_sparse_dict
 
+
 def compute_sparse_vector(text: str):
     """
     Creates a Term Frequency sparse vector for Qdrant (which applies IDF at index time).
     Uses the shared vector_utils dictionary builder to ensure index/query consistency.
     """
     from qdrant_client.models import SparseVector
+
     d = _compute_sparse_dict(text)
     return SparseVector(indices=d["indices"], values=d["values"])
 
@@ -118,10 +120,12 @@ def search_hybrid(
     top_k: int = 5,
     specific_contract: Optional[str] = None,
     org_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    nomic_vector: Optional[list[float]] = None,
 ) -> List[Dict]:
     """
-    Global Hybrid Search (filtered by org_id + optionally by specific_contract).
-    org_id is mandatory for proper tenant isolation.
+    Hybrid Search using dual dense (voyage + nomic) + sparse (SPLADE) with RRF.
+    Filtered by org_id (mandatory) + optionally workspace_id + specific_contract.
     """
     qdrant = get_global_qdrant()
 
@@ -132,6 +136,10 @@ def search_hybrid(
     must_conditions: List[FieldCondition] = [
         FieldCondition(key="org_id", match=MatchValue(value=org_id_str))
     ]
+    if workspace_id:
+        must_conditions.append(
+            FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id))
+        )
     if specific_contract:
         must_conditions.append(
             FieldCondition(key="filename", match=MatchValue(value=specific_contract))
@@ -145,22 +153,32 @@ def search_hybrid(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
     def fetch_qdrant_points():
+        prefetches = [
+            Prefetch(
+                query=query_vector,
+                using="dense_voyage",
+                filter=search_filter,
+                limit=top_k * 3,
+            ),
+            Prefetch(
+                query=sparse_vec,
+                using="sparse_legal",
+                filter=search_filter,
+                limit=top_k * 3,
+            ),
+        ]
+        if nomic_vector:
+            prefetches.append(
+                Prefetch(
+                    query=nomic_vector,
+                    using="dense_nomic",
+                    filter=search_filter,
+                    limit=top_k * 3,
+                )
+            )
         return qdrant.query_points(
             collection_name="legal_chunks",
-            prefetch=[
-                Prefetch(
-                    query=query_vector,
-                    using="dense",
-                    filter=search_filter,
-                    limit=top_k * 3,
-                ),
-                Prefetch(
-                    query=sparse_vec,
-                    using="text-sparse",
-                    filter=search_filter,
-                    limit=top_k * 3,
-                ),
-            ],
+            prefetch=prefetches,
             query=FusionQuery(fusion=Fusion.RRF),
             limit=top_k * 3,
             with_payload=True,
@@ -376,6 +394,12 @@ def search_hybrid_qdrant(
     deduplicated = _deduplicate_by_parent(reranked_results, max_context_chars=12000)
 
     final_output = []
+    reranker_metrics = {
+        "top_1_score": 0.0,
+        "score_spread": 0.0,
+        "mean_score": 0.0,
+        "score_count": 0,
+    }
     for doc in deduplicated[:top_k]:
         final_output.append(
             {
@@ -385,4 +409,12 @@ def search_hybrid_qdrant(
             }
         )
 
-    return final_output
+    # Extract reranker metrics for ResearchLog instrumentation
+    if final_output:
+        scores = [d["score"] for d in final_output]
+        reranker_metrics["top_1_score"] = max(scores)
+        reranker_metrics["score_spread"] = max(scores) - min(scores)
+        reranker_metrics["mean_score"] = sum(scores) / len(scores)
+        reranker_metrics["score_count"] = len(scores)
+
+    return {"results": final_output, "reranker_metrics": reranker_metrics}

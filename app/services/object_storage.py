@@ -51,7 +51,11 @@ def _bucket():
     return R2_BUCKET_NAME
 
 
-def upload_file(local_file_path: str, destination_blob_name: str) -> str:
+def upload_file(
+    local_file_path: str,
+    destination_blob_name: str,
+    content_type: str = "application/pdf",
+) -> str:
     """
     Uploads a file from a local path to R2 (object key = destination_blob_name).
     Returns an r2://-style identifier.
@@ -59,8 +63,62 @@ def upload_file(local_file_path: str, destination_blob_name: str) -> str:
     client = _get_client()
     bucket = _bucket()
     with open(local_file_path, "rb") as f:
-        client.upload_fileobj(f, bucket, destination_blob_name, ExtraArgs={"ContentType": "application/pdf"})
+        client.upload_fileobj(
+            f,
+            bucket,
+            destination_blob_name,
+            ExtraArgs={"ContentType": content_type},
+        )
     return f"r2://{bucket}/{destination_blob_name}"
+
+
+def upload_bytes(
+    data: bytes, destination_blob_name: str, content_type: str = "application/pdf"
+) -> str:
+    """
+    Uploads bytes directly to R2 (object key = destination_blob_name).
+    Returns an r2://-style identifier.
+    """
+    client = _get_client()
+    bucket = _bucket()
+    from io import BytesIO
+
+    client.upload_fileobj(
+        BytesIO(data),
+        bucket,
+        destination_blob_name,
+        ExtraArgs={"ContentType": content_type},
+    )
+    return f"r2://{bucket}/{destination_blob_name}"
+
+
+def generate_presigned_upload(blob_name: str, max_size_bytes: int = 104857600) -> dict:
+    """
+    Generates a pre-signed POST policy for direct client-to-R2 uploads.
+    Enforces a strict maximum file size via AWS S3 Conditions.
+    """
+    client = _get_client()
+    bucket = _bucket()
+
+    # Conditions: enforce bucket, key, and content-length-range (default 0 to 100MB)
+    conditions = [
+        {"bucket": bucket},
+        {"key": blob_name},
+        ["content-length-range", 0, max_size_bytes],
+    ]
+
+    try:
+        response = client.generate_presigned_post(
+            Bucket=bucket,
+            Key=blob_name,
+            Fields={"key": blob_name},
+            Conditions=conditions,
+            ExpiresIn=3600,  # 1 hour expiry
+        )
+        return response
+    except ClientError as e:
+        logger.error("[r2] Failed to generate presigned url: %s", e)
+        raise
 
 
 # Backward-compatible alias

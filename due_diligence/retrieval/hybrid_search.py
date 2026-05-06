@@ -26,7 +26,8 @@ from qdrant_client.models import (
 warnings.filterwarnings("ignore", category=UserWarning, module="qdrant_client")
 
 QDRANT_PATH = "./qdrant_storage"
-COLLECTION_NAME = "legal_deal_folder"
+
+from app.services.ingestion.embedder import COLLECTION_NAME, LegalEmbedder
 
 
 class HybridRetriever:
@@ -49,39 +50,41 @@ class HybridRetriever:
     def search(
         self,
         query: str,
-        bge_vector: List[float],        # voyage-law-2 primary (legacy param name kept)
-        legal_bert_vector: List[float],  # nomic backup (legacy param name kept)
-        splade_vector: SparseVector,
         limit: int = 5,
     ) -> List[Dict]:
         """
-        RRF fusion across dense_voyage, dense_nomic, and sparse_legal.
-
-        Parameters use legacy names (bge_vector, legal_bert_vector) so that
-        routes.py and executor.py require no changes.
+        Retrieves using both dense_voyage and sparse_legal (SPLADE) with RRF fusion.
+        fastembed is lazily loaded when first queried.
         """
-        print(f"[HybridRetriever] RRF search: '{query[:70]}' (limit={limit})")
+        print(f"[HybridRetriever] Hybrid search: '{query[:70]}' (limit={limit})")
+
+        embedder = LegalEmbedder(
+            client=self.client, collection_name=self.collection_name
+        )
+        voyage_vector = embedder.get_voyage_query_vector(query)
+        splade_vector = embedder.get_splade_query_vector(query)
+
+        prefetch = [
+            Prefetch(
+                query=voyage_vector,
+                using="dense_voyage",
+                limit=limit * 2,
+            )
+        ]
+
+        if splade_vector:
+            prefetch.append(
+                Prefetch(
+                    query=splade_vector,
+                    using="sparse_legal",
+                    limit=limit * 2,
+                )
+            )
 
         try:
             results = self.client.query_points(
                 collection_name=self.collection_name,
-                prefetch=[
-                    Prefetch(
-                        query=bge_vector,
-                        using="dense_voyage",
-                        limit=limit * 3,
-                    ),
-                    Prefetch(
-                        query=legal_bert_vector,
-                        using="dense_nomic",
-                        limit=limit * 3,
-                    ),
-                    Prefetch(
-                        query=splade_vector,
-                        using="sparse_legal",
-                        limit=limit * 3,
-                    ),
-                ],
+                prefetch=prefetch,
                 query=FusionQuery(fusion=Fusion.RRF),
                 limit=limit,
                 with_payload=True,

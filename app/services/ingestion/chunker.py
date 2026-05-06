@@ -1,6 +1,19 @@
 import re
 from typing import Dict, List
 
+import spacy
+
+# Load the lightweight model globally to avoid latency on every chunk
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    # Fallback if not downloaded (should be downloaded in environment)
+    import subprocess
+    import sys
+
+    subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+    nlp = spacy.load("en_core_web_sm")
+
 
 class ClauseChunker:
     """Consumes raw text blocks and builds a semantic legal hierarchy."""
@@ -93,8 +106,78 @@ class ClauseChunker:
 
     def build_chunks(self, raw_blocks: List[Dict]) -> List[Dict]:
         current_hierarchy = []
-        current_chunk_text = []
+        current_section_blocks = []
         chunks = []
+
+        # Helper to process accumulated text blocks for a section using spaCy SBD
+        def _process_section(hierarchy: List[str], text_blocks: List[str]):
+            if not text_blocks:
+                return
+
+            full_text = " ".join(text_blocks)
+            # Use spaCy for Sentence Boundary Detection
+            doc = nlp(full_text)
+
+            current_chunk_text = ""
+            for sent in doc.sents:
+                sent_text = sent.text.strip()
+                if not sent_text:
+                    continue
+
+                # Run-on sentence fallback: split massive sentences hard by length
+                if len(sent_text) > 2000:
+                    # If we already have accumulated text, save it
+                    if current_chunk_text:
+                        chunks.append(
+                            {
+                                "hierarchy": list(hierarchy),
+                                "text": current_chunk_text.strip(),
+                            }
+                        )
+                        current_chunk_text = ""
+
+                    # Hard-slice the massive sentence into <2000 char chunks
+                    words = sent_text.split()
+                    temp_slice = ""
+                    for word in words:
+                        if len(temp_slice) + len(word) + 1 > 2000:
+                            chunks.append(
+                                {
+                                    "hierarchy": list(hierarchy),
+                                    "text": temp_slice.strip(),
+                                }
+                            )
+                            temp_slice = word
+                        else:
+                            temp_slice = f"{temp_slice} {word}" if temp_slice else word
+
+                    if temp_slice:
+                        current_chunk_text = temp_slice
+                    continue
+
+                # Normal sentence accumulation
+                if len(current_chunk_text) + len(sent_text) + 1 > 2000:
+                    chunks.append(
+                        {
+                            "hierarchy": list(hierarchy),
+                            "text": current_chunk_text.strip(),
+                        }
+                    )
+                    current_chunk_text = sent_text
+                else:
+                    current_chunk_text = (
+                        f"{current_chunk_text} {sent_text}"
+                        if current_chunk_text
+                        else sent_text
+                    )
+
+            if current_chunk_text:
+                chunks.append(
+                    {
+                        "hierarchy": list(hierarchy),
+                        "text": current_chunk_text.strip(),
+                    }
+                )
 
         for block in raw_blocks:
             node_id = self._detect_clause_boundary(
@@ -102,25 +185,14 @@ class ClauseChunker:
             )
 
             if node_id:
-                if current_chunk_text:
-                    chunks.append(
-                        {
-                            "hierarchy": list(current_hierarchy),
-                            "text": " ".join(current_chunk_text),
-                        }
-                    )
-                    current_chunk_text = []
-
+                # Process the previous section before changing hierarchy
+                _process_section(current_hierarchy, current_section_blocks)
+                current_section_blocks = []
                 current_hierarchy = self._update_hierarchy(current_hierarchy, node_id)
 
-            current_chunk_text.append(block["text"])
+            current_section_blocks.append(block["text"])
 
-        if current_chunk_text:
-            chunks.append(
-                {
-                    "hierarchy": list(current_hierarchy),
-                    "text": " ".join(current_chunk_text),
-                }
-            )
+        # Flush the final section
+        _process_section(current_hierarchy, current_section_blocks)
 
         return chunks
