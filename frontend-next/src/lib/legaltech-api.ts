@@ -6,7 +6,6 @@ import type {
     IngestJobQueued,
     IngestJobStatus,
     IngestResult,
-    PlanResponse,
     DueDiligenceReport,
     DefinitionalConflict,
 } from "./types";
@@ -44,7 +43,9 @@ export async function ddIngestDocument(
 
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.detail || `Ingest failed (${res.status}): ${res.statusText}`);
+        throw new Error(
+            body?.detail || `Ingest failed (${res.status}): ${res.statusText}`,
+        );
     }
     return res.json();
 }
@@ -56,7 +57,9 @@ export async function ddIngestDocument(
  *       | "complete" | "failed"
  * progress: 0–100
  */
-export async function ddGetIngestStatus(jobId: string): Promise<IngestJobStatus> {
+export async function ddGetIngestStatus(
+    jobId: string,
+): Promise<IngestJobStatus> {
     const res = await fetch(`${DD_BASE}/status/${jobId}`);
     if (!res.ok) throw new Error(`Status check failed: ${res.statusText}`);
     return res.json();
@@ -109,58 +112,6 @@ export async function ddGetConflicts(token?: string): Promise<{
     return res.json();
 }
 
-// ── Due Diligence: Plan ───────────────────────────────────────────────────────
-
-export async function ddPlanGoal(
-    goal: string,
-    token?: string,
-): Promise<PlanResponse> {
-    const res = await fetch(`${DD_BASE}/plan`, {
-        method: "POST",
-        headers: authHeaders(token),
-        body: JSON.stringify({ goal }),
-    });
-    if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.detail || `Plan failed: ${res.statusText}`);
-    }
-    return res.json();
-}
-
-// ── Due Diligence: Execute ────────────────────────────────────────────────────
-
-export async function ddExecutePlan(
-    goal: string,
-    tasks: PlanResponse["tasks"],
-    documentNames: string[],
-    token?: string,
-    timeoutMs = 180_000,
-): Promise<DueDiligenceReport> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-        const res = await fetch(`${DD_BASE}/execute`, {
-            method: "POST",
-            headers: authHeaders(token),
-            body: JSON.stringify({ goal, tasks, document_names: documentNames }),
-            signal: controller.signal,
-        });
-        if (!res.ok) {
-            const body = await res.json().catch(() => ({}));
-            throw new Error(body?.detail || `Execute failed: ${res.statusText}`);
-        }
-        return res.json();
-    } catch (err: unknown) {
-        if (err instanceof Error && err.name === "AbortError") {
-            throw new Error("Due diligence execution timed out (> 3 min). The server is still working — refresh to check for results.");
-        }
-        throw err;
-    } finally {
-        clearTimeout(timeout);
-    }
-}
-
 // ── Master Orchestrator (Action Agent) ────────────────────────────────────────
 
 import type {
@@ -169,7 +120,7 @@ import type {
     ApproveWorkflowResponse,
     WorkflowStatusResponse,
     GetActionsResponse,
-    GetLogsResponse
+    GetLogsResponse,
 } from "./types";
 
 const AGENT_BASE = `${API_URL}/agent`;
@@ -179,7 +130,7 @@ export async function lexAgentStart(
     workspace_id: string,
     org_id: string,
     document_id: string,
-    token?: string
+    token?: string,
 ): Promise<StartWorkflowResponse> {
     const res = await fetch(`${AGENT_BASE}/start`, {
         method: "POST",
@@ -188,7 +139,9 @@ export async function lexAgentStart(
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.detail || `Agent start failed: ${res.statusText}`);
+        throw new Error(
+            body?.detail || `Agent start failed: ${res.statusText}`,
+        );
     }
     return res.json();
 }
@@ -196,7 +149,7 @@ export async function lexAgentStart(
 export async function lexAgentConfirmIntent(
     workflow_id: string,
     confirmed_intent: string,
-    token?: string
+    token?: string,
 ): Promise<ConfirmIntentResponse> {
     const res = await fetch(`${AGENT_BASE}/confirm-intent/${workflow_id}`, {
         method: "POST",
@@ -205,14 +158,16 @@ export async function lexAgentConfirmIntent(
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.detail || `Agent confirm intent failed: ${res.statusText}`);
+        throw new Error(
+            body?.detail || `Agent confirm intent failed: ${res.statusText}`,
+        );
     }
     return res.json();
 }
 
 export async function lexAgentApprove(
     workflow_id: string,
-    token?: string
+    token?: string,
 ): Promise<ApproveWorkflowResponse> {
     const res = await fetch(`${AGENT_BASE}/approve/${workflow_id}`, {
         method: "POST",
@@ -220,42 +175,48 @@ export async function lexAgentApprove(
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.detail || `Agent approve failed: ${res.statusText}`);
+        throw new Error(
+            body?.detail || `Agent approve failed: ${res.statusText}`,
+        );
     }
     return res.json();
 }
 
 export async function lexAgentStatus(
     workflow_id: string,
-    token?: string
+    token?: string,
 ): Promise<WorkflowStatusResponse> {
     const res = await fetch(`${AGENT_BASE}/status/${workflow_id}`, {
         headers: authHeaders(token),
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.detail || `Agent status failed: ${res.statusText}`);
+        throw new Error(
+            body?.detail || `Agent status failed: ${res.statusText}`,
+        );
     }
     return res.json();
 }
 
 export async function lexAgentGetActions(
     workflow_id: string,
-    token?: string
+    token?: string,
 ): Promise<GetActionsResponse> {
     const res = await fetch(`${AGENT_BASE}/${workflow_id}/actions`, {
         headers: authHeaders(token),
     });
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.detail || `Agent actions failed: ${res.statusText}`);
+        throw new Error(
+            body?.detail || `Agent actions failed: ${res.statusText}`,
+        );
     }
     return res.json();
 }
 
 export async function lexAgentGetLogs(
     workflow_id: string,
-    token?: string
+    token?: string,
 ): Promise<GetLogsResponse> {
     const res = await fetch(`${AGENT_BASE}/${workflow_id}/logs`, {
         headers: authHeaders(token),
