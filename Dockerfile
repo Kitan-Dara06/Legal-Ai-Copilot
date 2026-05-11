@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# Download spaCy English model
+RUN python -m spacy download en_core_web_sm
+
 COPY . /app
 
 EXPOSE 8000

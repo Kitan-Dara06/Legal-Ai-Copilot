@@ -61,3 +61,6 @@ pymupdf                   # PDF parsing via fitz (legal document parser)
 # ── Notification Service (Slack, Resend email, .ics calendar) ───────────────
 icalendar                 # .ics calendar file generation for deadline notifications
 python-dateutil            # Timezone utilities for .ics generation
+
+# NLP pipeline
+spacy>=3.7
