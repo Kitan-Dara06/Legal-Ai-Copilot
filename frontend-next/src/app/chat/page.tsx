@@ -478,7 +478,7 @@ export default function ChatPage() {
   };
 
   const confirmDelete = async () => {
-    if (deleteConfirmId === null) return;
+    if (deleteConfirmId === null || !workspaceId) return;
     const file = files.find((f) => f.file_id === deleteConfirmId);
     if (file?.document_id) {
       try {
