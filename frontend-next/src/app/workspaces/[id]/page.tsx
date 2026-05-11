@@ -322,7 +322,7 @@ export default function WorkspaceDetailPage() {
         </div>
         {sessionId ? (
           <div>
-            <Badge variant="success">Session Active</Badge>
+            <Badge color="green">Session Active</Badge>
             <span className="text-slate-400 text-xs ml-2 font-mono">
               {sessionId.slice(0, 8)}...
             </span>
