@@ -157,12 +157,12 @@ export function verifyInviteToken(token: string) {
   );
 }
 
-export function acceptInvite(
-  token: string,
-  payload: { token: string; full_name?: string },
-) {
+export function acceptInvite(payload: {
+  token: string;
+  full_name?: string;
+  password?: string;
+}) {
   return apiFetch<AcceptInviteResponse>("/invites/accept", {
-    token: undefined,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
