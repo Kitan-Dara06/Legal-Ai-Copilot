@@ -187,18 +187,20 @@ export default function WorkspaceDetailPage() {
     setWorkflowStatus("EXECUTING");
   };
 
-  const statusColor = (status: string) => {
+  const statusVariant = (
+    status: string,
+  ): "success" | "info" | "warning" | "error" | "default" => {
     switch (status) {
       case "READY":
-        return "green";
+        return "success";
       case "PROCESSING":
-        return "blue";
+        return "info";
       case "PENDING":
-        return "yellow";
+        return "warning";
       case "FAILED":
-        return "red";
+        return "error";
       default:
-        return "slate";
+        return "default";
     }
   };
 
@@ -233,7 +235,7 @@ export default function WorkspaceDetailPage() {
           <p className="text-slate-400 text-sm mt-1">{workspace.description}</p>
         )}
         <div className="flex items-center gap-3 mt-2">
-          <Badge color={statusColor(workspace.intelligence_status)}>
+          <Badge variant={statusVariant(workspace.intelligence_status)}>
             {workspace.intelligence_status}
           </Badge>
           <span className="text-slate-400 text-sm">
@@ -292,7 +294,7 @@ export default function WorkspaceDetailPage() {
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <Badge color={statusColor(doc.status)} size="sm">
+                  <Badge variant={statusVariant(doc.status)}>
                     {doc.status}
                   </Badge>
                   {doc.status === "FAILED" && doc.error && (
