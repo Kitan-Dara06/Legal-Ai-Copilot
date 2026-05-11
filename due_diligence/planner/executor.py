@@ -63,11 +63,14 @@ class StateMachineExecutor:
       - hybrid_search  : query Qdrant dense+sparse (requires retriever + embedder)
     """
 
-    def __init__(self, graph, registry, retriever=None, embedder=None):
+    def __init__(
+        self, graph, registry, retriever=None, embedder=None, workspace_id: str = ""
+    ):
         self.graph = graph
         self.registry = registry
         self.retriever = retriever
         self.embedder = embedder
+        self.workspace_id = workspace_id
         self.execution_log: List[TaskRecord] = []
 
     def execute_plan(self, tasks: List[Dict]) -> List[TaskRecord]:
@@ -104,7 +107,9 @@ class StateMachineExecutor:
                     result = self._dispatch(record)
                     record.result = result
 
-                    if not result or (isinstance(result, (list, dict)) and len(result) == 0):
+                    if not result or (
+                        isinstance(result, (list, dict)) and len(result) == 0
+                    ):
                         record.state = TaskState.ESCALATED
                         record.error = "No results returned — insufficient coverage."
                         print(f"  ↳ ESCALATED — no results for task {record.task_id}")
@@ -121,7 +126,9 @@ class StateMachineExecutor:
                     else:
                         record.state = TaskState.ESCALATED
                         record.error = last_error
-                        print(f"  ↳ ESCALATED — exception after {MAX_RETRIES + 1} attempts: {e}")
+                        print(
+                            f"  ↳ ESCALATED — exception after {MAX_RETRIES + 1} attempts: {e}"
+                        )
 
         self._print_summary()
         return self.execution_log
@@ -132,14 +139,18 @@ class StateMachineExecutor:
         target = record.search_target
 
         if tool == "graph_search":
-            return self.graph.get_dependency_chains(target)
+            return self.graph.get_dependency_chains(
+                target, workspace_id=self.workspace_id
+            )
 
         elif tool == "registry_check":
             definitions = self.registry.get_term(target)
             conflicts = self.registry.detect_conflicts()
             return {
                 "definitions": definitions,
-                "conflicts": {k: v for k, v in conflicts.items() if target.lower() in k.lower()},
+                "conflicts": {
+                    k: v for k, v in conflicts.items() if target.lower() in k.lower()
+                },
             }
 
         elif tool == "hybrid_search":
@@ -151,7 +162,9 @@ class StateMachineExecutor:
             return self.retriever.search(target, bge_vec, lb_vec, splade_vec, limit=5)
 
         else:
-            raise ValueError(f"Unknown tool: '{tool}'. Supported: graph_search, registry_check, hybrid_search.")
+            raise ValueError(
+                f"Unknown tool: '{tool}'. Supported: graph_search, registry_check, hybrid_search."
+            )
 
     def _print_summary(self):
         total = len(self.execution_log)

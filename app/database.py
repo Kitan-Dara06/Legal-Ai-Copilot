@@ -18,7 +18,7 @@ engine = create_async_engine(
     echo=False,
     pool_size=5,
     max_overflow=10,
-    pool_timeout=60,
+    pool_timeout=5,
     pool_pre_ping=True,  # Detect stale connections after DB restarts
 )
 

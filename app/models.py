@@ -91,6 +91,14 @@ class WorkflowStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
+class GoalStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
 class EscalationType(str, enum.Enum):
     INSUFFICIENT_COVERAGE = "INSUFFICIENT_COVERAGE"
     DEFINITIONAL_CONFLICT = "DEFINITIONAL_CONFLICT"
@@ -375,6 +383,12 @@ class Goal(Base):
     )
     goal_text: Mapped[str] = mapped_column(Text, nullable=False)
     goal_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[GoalStatus] = mapped_column(
+        Enum(GoalStatus), nullable=False, default=GoalStatus.PENDING
+    )
+    intent: Mapped[IntentType | None] = mapped_column(Enum(IntentType), nullable=True)
+    mode: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     document_subset: Mapped[list[uuid.UUID] | None] = mapped_column(
         ARRAY(Uuid), nullable=True
     )
@@ -670,4 +684,46 @@ class IntentLog(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class Notification(Base):
+    """Ephemeral, user-scoped in-app notification.
+
+    This is NOT the AuditLog. Notifications are:
+      - Ephemeral: user can dismiss them
+      - User-scoped: tied to a specific user
+      - Actionable: includes action_url to navigate to relevant page
+      - Fallback: only created when Slack/Email delivery fails
+
+    FR-NOTIF-01: In-app fallback for failed notification delivery.
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id"), nullable=False, index=True
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organizations.id"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    notification_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="info"
+    )
+    action_url: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="Frontend URL to navigate to (e.g., /workspaces/{id}/goals/{goal_id})",
+    )
+    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )

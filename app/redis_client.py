@@ -1,11 +1,17 @@
 # app/redis_client.py
-
+#
 # Session structure in Redis:
 #   Key:   "session:{uuid}"
 #   Value: Hash map of { "file_id": "STATUS" }
 #   TTL:   48 hours (auto-expires)
+#
+# LEX SRS COMPLIANT: No global connection pool at module level.
+# Redis connections are created via:
+#   - FastAPI lifespan → app.state.redis (for web server)
+#   - create_redis_pool() directly  (for Celery workers)
+#
+# All session functions accept an explicit redis parameter.
 
-import json
 import os
 import uuid
 from typing import Optional
@@ -28,29 +34,34 @@ PROGRESS_TTL_SECONDS = 60 * 10
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Global Redis Connection Pool
+# Redis Pool Factory
 # ─────────────────────────────────────────────────────────────────────────────
-base_redis_url = f"rediss://default:{password}@{host}:{port}/0"
-if redis_disable_tls_verify():
-    REDIS_URL = base_redis_url + "?ssl_cert_reqs=none"
-else:
-    REDIS_URL = base_redis_url
-
-_redis_client = aioredis.from_url(
-    REDIS_URL,
-    decode_responses=True,
-    health_check_interval=30,
-)
+def build_redis_url() -> str:
+    """Construct the Redis URL from environment variables (no connection)."""
+    base_url = f"rediss://default:{password}@{host}:{port}/0"
+    if redis_disable_tls_verify():
+        return base_url + "?ssl_cert_reqs=none"
+    return base_url
 
 
-def get_redis_client() -> aioredis.Redis:
+def create_redis_pool() -> aioredis.Redis:
     """
-    Returns the shared async Redis client backed by the global connection pool.
-    IMPORTANT: Never call .aclose() on this — it is a shared pool singleton.
-    Closing it would break all subsequent requests in the same process.
-    The pool manages its own connections automatically.
+    Create a new shared async Redis client backed by a connection pool.
+    Called once during:
+      - FastAPI lifespan startup (stored on app.state.redis)
+      - Celery worker initialisation (per-process, after fork)
     """
-    return _redis_client
+    return aioredis.from_url(
+        build_redis_url(),
+        decode_responses=True,
+        health_check_interval=30,
+        socket_connect_timeout=3,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Session Helpers (all require an explicit redis parameter)
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def create_session(
@@ -64,15 +75,12 @@ async def create_session(
     session_id = str(uuid.uuid4())
     session_key = f"session:{session_id}"
 
-    # Build the hash map: { "file_id": "READY" }
-    # We also store org_id so we can verify ownership on queries.
     session_data = {str(fid): "READY" for fid in file_ids}
     session_data["__org_id__"] = org_id
 
     await redis.hset(session_key, mapping=session_data)
     await redis.expire(session_key, SESSION_TTL_SECONDS)
 
-    # Add to reverse index: file_sessions:{file_id} -> set(session_id)
     for fid in file_ids:
         await redis.sadd(f"file_sessions:{fid}", session_id)
         await redis.expire(f"file_sessions:{fid}", SESSION_TTL_SECONDS)
@@ -94,7 +102,6 @@ async def get_session(session_id: str, redis: aioredis.Redis) -> Optional[dict]:
     await redis.expire(session_key, SESSION_TTL_SECONDS)
 
     org_id = data.pop("__org_id__", None)
-
     file_statuses = {int(k): v for k, v in data.items()}
 
     return {"org_id": org_id, "files": file_statuses}
@@ -115,11 +122,9 @@ async def add_file_to_session(
 
     await redis.hset(session_key, str(file_id), status)
 
-    # Add to reverse index
     await redis.sadd(f"file_sessions:{file_id}", session_id)
     await redis.expire(f"file_sessions:{file_id}", SESSION_TTL_SECONDS)
 
-    # Refresh the TTL so the session doesn't expire mid-work
     await redis.expire(session_key, SESSION_TTL_SECONDS)
     return True
 
@@ -149,9 +154,7 @@ async def remove_file_from_all_sessions(file_id: int, redis: aioredis.Redis):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Progress Tracking
-#    Celery updates this as it processes chunks.
-#    The query endpoint reads this to show "45% done" messages.
+# Progress Tracking
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -163,37 +166,41 @@ async def set_file_progress(file_id: int, percent: int, redis: aioredis.Redis):
     await redis.set(f"progress:{file_id}", percent, ex=PROGRESS_TTL_SECONDS)
 
 
+async def get_file_progress(file_id: int, redis: aioredis.Redis) -> Optional[int]:
+    """Returns the current progress percentage (0-100) or None."""
+    val = await redis.get(f"progress:{file_id}")
+    return int(val) if val is not None else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM Slot Semaphore
+# ─────────────────────────────────────────────────────────────────────────────
+
 import time
 
 
-async def acquire_llm_slot(org_id: str, max_slots: int = 5) -> Optional[str]:
+async def acquire_llm_slot(
+    org_id: str, redis: aioredis.Redis, max_slots: int = 5
+) -> Optional[str]:
     """
     Distributed Token Bucket / Semaphore.
     Acquires a lease for LLM execution. Returns a lease_id if successful, None if full.
-    Uses a sorted set to track active leases and prune expired ones.
     """
-    redis = get_redis_client()
     key = f"llm_slots:{org_id}"
     now = time.time()
 
-    # 1. Prune expired leases (TTL = 120 seconds to be safe)
     await redis.zremrangebyscore(key, 0, now - 120)
-
-    # 2. Check current capacity
     count = await redis.zcard(key)
     if count >= max_slots:
         return None
 
-    # 3. Grant lease
     lease_id = uuid.uuid4().hex
     await redis.zadd(key, {lease_id: now})
-    # Set an absolute TTL on the key to prevent memory leaks
     await redis.expire(key, 300)
     return lease_id
 
 
-async def release_llm_slot(org_id: str, lease_id: str):
+async def release_llm_slot(org_id: str, lease_id: str, redis: aioredis.Redis):
     """Releases an LLM slot lease."""
-    redis = get_redis_client()
     key = f"llm_slots:{org_id}"
     await redis.zrem(key, lease_id)

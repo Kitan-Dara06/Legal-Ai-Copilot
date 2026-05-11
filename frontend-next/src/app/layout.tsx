@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { Analytics } from "@vercel/analytics/next";
+import { NotificationBar } from "@/components/layout/NotificationBar";
 import "./globals.css";
 
 const inter = Inter({
@@ -10,7 +11,8 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: "Legal AI Copilot",
-  description: "Chat seamlessly with your securely embedded corporate contracts.",
+  description:
+    "Chat seamlessly with your securely embedded corporate contracts.",
 };
 
 export default function RootLayout({
@@ -20,7 +22,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.variable} font-sans antialiased bg-[#0A0F1E] text-slate-100 min-h-screen`}>
+      <body
+        className={`${inter.variable} font-sans antialiased bg-[#0A0F1E] text-slate-100 min-h-screen`}
+      >
+        <NotificationBar />
         {children}
         <Analytics />
       </body>

@@ -1,79 +1,133 @@
 """
-Registry Query Engine — PostgreSQL
-====================================
-Replaced the sqlite3 implementation with SQLAlchemy queries
-against the legaltech.defined_terms table in PostgreSQL.
+Registry Query Engine — PostgreSQL (SQLAlchemy sync)
+=====================================================
+Queries the ``defined_terms_registry`` table in PostgreSQL
+using synchronous SQLAlchemy sessions.
 
-Public API is identical to the old sqlite3 version:
-  get_term(term) -> List[Dict]
-  detect_conflicts() -> Dict[str, List[Dict]]
+Compatible drop-in for the old sqlite3 ``RegistryQueryEngine``.
 """
 
-import re
+import logging
 from typing import Dict, List, Optional
 
-from sqlalchemy import func, select, text
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import Session
 
+from app.config import get_database_url_sync
+from app.models import DefinedTermRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class RegistryQueryEngine:
     """
-    Queries the PostgreSQL legaltech.defined_terms table.
-    Compatible drop-in for the old sqlite3 RegistryQueryEngine.
+    Queries the PostgreSQL ``defined_terms_registry`` table.
+
+    All queries run through a synchronous SQLAlchemy session so
+    that this class can be called from thread-bound contexts
+    (e.g. ``HybridRetriever.search()``).
     """
 
     def __init__(self, db_path: Optional[str] = None):
-        # db_path param kept for backward compat — ignored (uses DATABASE_URL)
-        pass
+        # db_path kept for backward compatibility — ignored.
+        # The engine is created lazily from the DATABASE_URL_SYNC env var.
+        self._engine = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _get_engine(self):
+        """Return (and memoise) the sync engine."""
+        if self._engine is None:
+            self._engine = create_engine(
+                get_database_url_sync(),
+                pool_timeout=5,
+                pool_pre_ping=True,
+            )
+        return self._engine
+
+    def _row_to_dict(self, row: DefinedTermRegistry) -> Dict:
+        """Map an ORM row to the standard output dict used by callers."""
+        return {
+            "definition": row.definition,
+            "document": str(row.source_document_id),
+            "path": row.clause_reference,
+        }
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def get_term(self, term: str) -> List[Dict]:
-        """Fetches all definitions of a specific term across all documents."""
-        with SessionLocal() as db:
-            rows = (
-                .filter(func.lower(DefinedTerm.term) == term.lower())
-                .all()
-            )
-            return [
-                {
-                    "definition": r.definition,
-                    "document": r.source_document,
-                    "path": r.hierarchy,
-                }
-                for r in rows
-            ]
+        """
+        Fetch all definitions of *term* (case-insensitive) across all documents.
+
+        Returns a list of dicts with keys ``definition``, ``document``,
+        and ``path`` (clause reference).
+        """
+        engine = self._get_engine()
+        stmt = select(DefinedTermRegistry).where(
+            func.lower(DefinedTermRegistry.term) == term.lower()
+        )
+
+        try:
+            with Session(engine) as db:
+                rows = db.execute(stmt).scalars().all()
+                return [self._row_to_dict(r) for r in rows]
+        except Exception:
+            logger.exception("[RegistryQueryEngine] get_term(%r) failed", term)
+            return []
 
     def detect_conflicts(self) -> Dict[str, List[Dict]]:
         """
-        Returns a dict of term → list[definition dicts] for any term
-        that appears in more than one source_document.
+        Find terms that are defined in **more than one** distinct source
+        document and return them grouped by term.
+
+        Returns a dict like::
+
+            {
+                "Confidential Information": [
+                    {"definition": "...", "document": "...", "path": "..."},
+                    ...
+                ],
+                ...
+            }
         """
-        with SessionLocal() as db:
-            # Find terms defined in more than one distinct document
-            subq = (
-                .group_by(func.lower(DefinedTerm.term))
-                .having(
-                    func.count(func.distinct(DefinedTerm.source_document)) > 1
-                )
-                .subquery()
+        engine = self._get_engine()
+
+        # Sub-query: terms that appear in >1 distinct source_document_id.
+        conflict_subq = (
+            select(
+                DefinedTermRegistry.term,
+                func.count(DefinedTermRegistry.source_document_id.distinct()).label(
+                    "doc_count"
+                ),
             )
+            .group_by(DefinedTermRegistry.term)
+            .having(func.count(DefinedTermRegistry.source_document_id.distinct()) > 1)
+            .subquery()
+        )
 
-            flagged = (
-                .filter(func.lower(DefinedTerm.term).in_(
-                    select(func.lower(subq.c.term))
-                ))
-                .all()
+        # Main query: full rows whose term matches one of the conflicting terms.
+        stmt = (
+            select(DefinedTermRegistry)
+            .join(
+                conflict_subq,
+                DefinedTermRegistry.term == conflict_subq.c.term,
             )
+            .order_by(DefinedTermRegistry.term, DefinedTermRegistry.source_document_id)
+        )
 
-        # Group by (case-insensitive) term
-        conflicts: Dict[str, List[Dict]] = {}
-        for row in flagged:
-            key = row.term
-            if key not in conflicts:
-                conflicts[key] = []
-            conflicts[key].append({
-                "definition": row.definition,
-                "document": row.source_document,
-                "path": row.hierarchy,
-            })
+        try:
+            with Session(engine) as db:
+                rows = db.execute(stmt).scalars().all()
 
-        return conflicts
+            results: Dict[str, List[Dict]] = {}
+            for row in rows:
+                results.setdefault(row.term, []).append(self._row_to_dict(row))
+
+            return results
+        except Exception:
+            logger.exception("[RegistryQueryEngine] detect_conflicts() failed")
+            return {}

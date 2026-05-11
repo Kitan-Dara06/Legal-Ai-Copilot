@@ -3,498 +3,534 @@
 // a getter passed in at call time (works in both server + client components).
 
 import type {
-    AskResponse,
-    AcceptInviteResponse,
-    FileListResponse,
-    FileStatusResponse,
-    InviteVerifyResponse,
-    OrgEntry,
-    SessionResponse,
-    SetupOrgResponse,
-    UploadResult,
-    User,
-    OrgMember,
+  AcceptInviteResponse,
+  InviteVerifyResponse,
+  OrgEntry,
+  SetupOrgResponse,
+  User,
+  OrgMember,
+  WorkspaceResponse,
+  WorkspaceDetailResponse,
+  CreateGoalResponse,
+  GoalDetail,
+  GoalSummary,
+  GoalIntent,
+  ConfirmIntentResponse,
+  NotificationItem,
+  ApprovalRequest,
 } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
 if (!API_URL) {
-    if (typeof window !== "undefined") {
-        console.error(
-            "NEXT_PUBLIC_API_URL is not defined. API calls will fail.",
-        );
-    }
+  if (typeof window !== "undefined") {
+    console.error("NEXT_PUBLIC_API_URL is not defined. API calls will fail.");
+  }
 }
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 type Headers = Record<string, string>;
 
-/** Custom error that carries the backend's structured `code` field (e.g. "setup_required"). */
 export class AppError extends Error {
-    code?: string;
-    status?: number;
-    constructor(message: string, code?: string, status?: number) {
-        super(message);
-        this.name = "AppError";
-        this.code = code;
-        this.status = status;
-    }
+  code?: string;
+  status: number;
+  constructor(message: string, code: string | undefined, status: number) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.name = "AppError";
+  }
 }
 
 function buildHeaders(token?: string | null, orgSlug?: string | null): Headers {
-    const h: Headers = {};
-    if (token) h["Authorization"] = `Bearer ${token}`;
-    if (orgSlug) h["X-Active-Org"] = orgSlug;
-    return h;
+  const h: Headers = { "Content-Type": "application/json" };
+  if (token) h["Authorization"] = `Bearer ${token}`;
+  if (orgSlug) h["X-Active-Org"] = orgSlug;
+  return h;
 }
 
-async function apiFetch<T>(
-    path: string,
-    opts: RequestInit & { token?: string | null; orgSlug?: string | null } = {},
+export async function apiFetch<T>(
+  path: string,
+  opts: RequestInit & { token?: string | null; orgSlug?: string | null } = {},
 ): Promise<T> {
-    const { token, orgSlug, headers: extraHeaders, ...rest } = opts;
-    const url = `${API_URL}${path}`;
-    console.log(`[apiFetch] Calling ${url}...`);
+  const { token, orgSlug, headers: extraHeaders, ...rest } = opts;
+  const url = `${API_URL}${path}`;
+  console.log(`[apiFetch] Calling ${url}...`);
 
-    const res = await fetch(url, {
-        ...rest,
-        headers: {
-            ...buildHeaders(token, orgSlug),
-            ...(extraHeaders as Record<string, string>),
-        },
-    }).catch((err) => {
-        console.error(`[apiFetch] Network error calling ${url}:`, err);
-        throw err;
-    });
+  const res = await fetch(url, {
+    ...rest,
+    headers: {
+      ...buildHeaders(token, orgSlug),
+      ...(extraHeaders as Record<string, string>),
+    },
+  }).catch((err) => {
+    console.error(`[apiFetch] Network error calling ${url}:`, err);
+    throw err;
+  });
 
-    if (!res.ok) {
-        console.error(`[apiFetch] HTTP ${res.status} for ${url}`);
-        let message = res.statusText;
-        let code: string | undefined;
-        try {
-            const body = await res.json();
-            // detail can be a string or an object like {code, message}
-            if (body.detail && typeof body.detail === "object") {
-                code = body.detail.code;
-                message = body.detail.message || JSON.stringify(body.detail);
-            } else if (typeof body.detail === "string") {
-                message = body.detail;
-            }
-        } catch {
-            /* ignore */
-        }
-
-        if (res.status === 401) {
-            console.warn(`[apiFetch] 401 Unauthorized for ${url}`);
-            if (typeof window !== "undefined") window.location.href = "/login";
-        }
-
-        throw new AppError(message, code, res.status);
+  if (!res.ok) {
+    console.error(`[apiFetch] HTTP ${res.status} for ${url}`);
+    let message = res.statusText;
+    let code: string | undefined;
+    try {
+      const body = await res.json();
+      if (body.detail && typeof body.detail === "object") {
+        code = body.detail.code;
+        message = body.detail.message || JSON.stringify(body.detail);
+      } else if (typeof body.detail === "string") {
+        message = body.detail;
+      }
+    } catch {
+      /* ignore */
     }
 
-    return res.json() as Promise<T>;
+    if (res.status === 401) {
+      console.warn(`[apiFetch] 401 Unauthorized for ${url}`);
+      if (typeof window !== "undefined") window.location.href = "/login";
+    }
+
+    throw new AppError(message, code, res.status);
+  }
+
+  return res.json() as Promise<T>;
 }
 
-// ── Auth ─────────────────────────────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────────────────────
 
-export async function checkOrgAvailable(orgId: string): Promise<boolean> {
-    try {
-        const res = await fetch(
-            `${API_URL}/auth/check-org?org_id=${encodeURIComponent(orgId)}`,
-        );
-        if (!res.ok) return false;
-        const data = await res.json();
-        return !!data.available;
-    } catch {
-        return false;
-    }
+export async function checkOrgAvailable(orgId: string) {
+  const res = await fetch(
+    `${API_URL}/auth/check-org?org_id=${encodeURIComponent(orgId)}`,
+  );
+  const data = await res.json();
+  return data as { available: boolean };
 }
 
 export function getMe(token: string, orgSlug?: string) {
-    return apiFetch<User>("/auth/me", { token, orgSlug });
+  return apiFetch<User>("/auth/me", { token, orgSlug });
 }
 
 export async function getMyOrgs(token: string) {
-    const res = await apiFetch<{ orgs: OrgEntry[] }>("/auth/my-orgs", {
-        token,
-    });
-    return res.orgs;
+  const res = await apiFetch<OrgEntry[]>("/auth/my-orgs", { token });
+  return res;
 }
 
 export function setupOrg(
-    token: string,
-    payload: { org_id: string; org_name?: string },
+  token: string,
+  payload: { org_id: string; org_name?: string },
 ) {
-    return apiFetch<SetupOrgResponse>("/auth/setup-org", {
-        token,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-    });
+  return apiFetch<SetupOrgResponse>("/auth/setup-org", {
+    token,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export function inviteByEmail(token: string, email: string, orgSlug?: string) {
-    return apiFetch<{ message: string }>("/auth/invite-by-email", {
-        token,
-        orgSlug,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-    });
+  return apiFetch<{ message: string }>("/auth/invite-by-email", {
+    token,
+    orgSlug,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
 }
 
 export function getMembers(token: string, orgSlug?: string) {
-    return apiFetch<OrgMember[]>("/auth/members", { token, orgSlug });
+  return apiFetch<OrgMember[]>("/auth/members", { token, orgSlug });
 }
 
 export function removeMember(token: string, userId: string, orgSlug?: string) {
-    return apiFetch<{ message: string }>(`/auth/members/${userId}`, {
-        token,
-        orgSlug,
-        method: "DELETE",
-    });
+  return apiFetch<{ message: string }>(`/auth/members/${userId}`, {
+    token,
+    orgSlug,
+    method: "DELETE",
+  });
 }
 
-// ── Magic Invite ─────────────────────────────────────────────────────────────
+// ── Invites ───────────────────────────────────────────────────────────────────
 
-export function verifyInviteToken(inviteToken: string) {
-    return apiFetch<InviteVerifyResponse>(
-        `/invites/verify?token=${encodeURIComponent(inviteToken)}`,
-    );
+export function verifyInviteToken(token: string) {
+  return apiFetch<InviteVerifyResponse>(
+    `/invites/verify?token=${encodeURIComponent(token)}`,
+  );
 }
 
-export function acceptInvite(payload: {
-    token: string;
-    full_name: string;
-    password: string;
-}) {
-    return apiFetch<AcceptInviteResponse>("/invites/accept", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-    });
+export function acceptInvite(
+  token: string,
+  payload: { token: string; full_name?: string },
+) {
+  return apiFetch<AcceptInviteResponse>("/invites/accept", {
+    token: undefined,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export function acceptExistingInvite(token: string, inviteToken: string) {
-    return apiFetch<{ message: string; org_id: string }>(
-        "/auth/accept-invite-by-token",
-        {
-            token,
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ token: inviteToken }),
-        },
-    );
-}
-
-// ── Files ────────────────────────────────────────────────────────────────────
-
-export function listFiles(token: string, orgSlug?: string) {
-    return apiFetch<FileListResponse>("/files/list", { token, orgSlug });
-}
-
-export async function uploadFiles(
-    token: string,
-    files: File[],
-    orgSlug?: string,
-    onProgress?: (pct: number) => void,
-): Promise<{ results: UploadResult[] }> {
-    return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", `${API_URL}/files/upload`);
-        xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-        if (orgSlug) xhr.setRequestHeader("X-Active-Org", orgSlug);
-
-        if (onProgress) {
-            xhr.upload.addEventListener("progress", (e) => {
-                if (e.lengthComputable)
-                    onProgress(Math.round((e.loaded / e.total) * 100));
-            });
-        }
-
-        xhr.onload = () => {
-            if (xhr.status === 202) {
-                resolve(JSON.parse(xhr.responseText));
-            } else {
-                reject(new Error(`Upload failed: HTTP ${xhr.status}`));
-            }
-        };
-        xhr.onerror = () => reject(new Error("Network error during upload"));
-
-        const fd = new FormData();
-        files.forEach((f) => fd.append("files", f));
-        xhr.send(fd);
-    });
-}
-
-export function getFileStatus(token: string, fileId: number, orgSlug?: string) {
-    return apiFetch<FileStatusResponse>(`/files/${fileId}/status`, {
-        token,
-        orgSlug,
-    });
-}
-
-export function deleteFile(token: string, fileId: number, orgSlug?: string) {
-    return apiFetch<{ message: string }>(`/files/${fileId}`, {
-        token,
-        orgSlug,
-        method: "DELETE",
-    });
-}
-
-// ── Sessions ─────────────────────────────────────────────────────────────────
-
-export function createSession(
-    token: string,
-    fileIds: number[],
-    orgSlug?: string,
-) {
-    return apiFetch<SessionResponse>("/session/", {
-        token,
-        orgSlug,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(fileIds),
-    });
-}
-
-export function getSession(token: string, sessionId: string, orgSlug?: string) {
-    return apiFetch<SessionResponse>(`/session/${sessionId}`, {
-        token,
-        orgSlug,
-    });
-}
-
-export async function uploadToSession(
-    token: string,
-    sessionId: string,
-    file: File,
-    orgSlug?: string,
-): Promise<unknown> {
-    const fd = new FormData();
-    fd.append("file", file);
-    const res = await fetch(`${API_URL}/session/${sessionId}/upload`, {
-        method: "POST",
-        headers: buildHeaders(token, orgSlug),
-        body: fd,
-    });
-    if (!res.ok) throw new Error(`Upload to session failed: ${res.statusText}`);
-    return res.json();
-}
-
-export function deleteSession(
-    token: string,
-    sessionId: string,
-    orgSlug?: string,
-) {
-    return apiFetch<{ message: string }>(`/session/${sessionId}`, {
-        token,
-        orgSlug,
-        method: "DELETE",
-    });
-}
-
-// ── Chat ─────────────────────────────────────────────────────────────────────
-
-export function askQuestion(
-    token: string,
-    sessionId: string,
-    question: string,
-    mode: "fast" | "hybrid",
-    orgSlug?: string,
-) {
-    const params = new URLSearchParams({
-        session_id: sessionId,
-        question,
-        mode,
-    });
-    return apiFetch<AskResponse>(`/ask?${params}`, {
-        token,
-        orgSlug,
-        method: "POST",
-    });
-}
-
-export function askAgent(
-    token: string,
-    sessionId: string,
-    question: string,
-    orgSlug?: string,
-) {
-    const params = new URLSearchParams({
-        session_id: sessionId,
-        question,
-        mode: "hybrid",
-    });
-    return apiFetch<AskResponse>(`/ask-agent?${params}`, {
-        token,
-        orgSlug,
-        method: "POST",
-    });
+  return apiFetch<{ message: string }>("/auth/accept-invite-by-token", {
+    token,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: inviteToken }),
+  });
 }
 
 // ── Workspaces ────────────────────────────────────────────────────────────────
 
 export function listWorkspaces(token: string, orgSlug?: string) {
-    return apiFetch<WorkspaceResponse[]>("/workspaces", { token, orgSlug });
+  return apiFetch<WorkspaceResponse[]>("/workspaces", { token, orgSlug });
 }
 
 export function getWorkspace(
-    token: string,
-    workspaceId: string,
-    orgSlug?: string,
+  token: string,
+  workspaceId: string,
+  orgSlug?: string,
 ) {
-    return apiFetch<WorkspaceDetailResponse>(`/workspaces/${workspaceId}`, {
-        token,
-        orgSlug,
-    });
+  return apiFetch<WorkspaceDetailResponse>(
+    `/workspaces/${workspaceId}?include_docs=true`,
+    {
+      token,
+      orgSlug,
+    },
+  );
 }
 
 export function createWorkspace(
-    token: string,
-    name: string,
-    description?: string,
-    orgSlug?: string,
+  token: string,
+  name: string,
+  description?: string,
+  orgSlug?: string,
 ) {
-    return apiFetch<WorkspaceResponse>("/workspaces", {
-        token,
-        orgSlug,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, description }),
-    });
+  return apiFetch<WorkspaceResponse>("/workspaces", {
+    token,
+    orgSlug,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, description }),
+  });
 }
 
-// ── Workspace Sessions ────────────────────────────────────────────────────────
+// ── Workspace Documents ───────────────────────────────────────────────────────
+
+export async function uploadDocument(
+  token: string,
+  workspaceId: string,
+  file: File,
+  orgSlug?: string,
+  onProgress?: (pct: number) => void,
+): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_URL}/workspaces/${workspaceId}/documents`);
+    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    if (orgSlug) xhr.setRequestHeader("X-Active-Org", orgSlug);
+
+    if (onProgress) {
+      xhr.upload.addEventListener("progress", (e) => {
+        if (e.lengthComputable)
+          onProgress(Math.round((e.loaded / e.total) * 100));
+      });
+    }
+
+    xhr.onload = () => {
+      if (xhr.status === 202) {
+        resolve(JSON.parse(xhr.responseText));
+      } else {
+        reject(new Error(`Upload failed: HTTP ${xhr.status}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Network error during upload"));
+
+    const fd = new FormData();
+    fd.append("file", file);
+    xhr.send(fd);
+  });
+}
+
+export function deleteDocument(
+  token: string,
+  workspaceId: string,
+  documentId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ message: string }>(
+    `/workspaces/${workspaceId}/documents/${documentId}`,
+    { token, orgSlug, method: "DELETE" },
+  );
+}
+
+export function getDocumentStatus(
+  token: string,
+  workspaceId: string,
+  documentId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{
+    document_id: string;
+    status: string;
+    stages?: Record<string, boolean> | null;
+    error?: string | null;
+  }>(`/workspaces/${workspaceId}/documents/${documentId}/status`, {
+    token,
+    orgSlug,
+  });
+}
+
+// ── Workspace Sessions (scoped document subset) ───────────────────────────────
 
 export function createWorkspaceSession(
-    token: string,
-    workspaceId: string,
-    documentIds: string[],
-    orgSlug?: string,
+  token: string,
+  workspaceId: string,
+  documentIds: string[],
+  orgSlug?: string,
 ) {
-    return apiFetch<{ session_id: string }>(
-        `/workspaces/${workspaceId}/sessions`,
-        {
-            token,
-            orgSlug,
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ document_ids: documentIds }),
-        },
-    );
+  return apiFetch<{ session_id: string }>(
+    `/workspaces/${workspaceId}/sessions`,
+    {
+      token,
+      orgSlug,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_ids: documentIds }),
+    },
+  );
 }
 
 export function getWorkspaceSession(
-    token: string,
-    workspaceId: string,
-    sessionId: string,
-    orgSlug?: string,
+  token: string,
+  workspaceId: string,
+  sessionId: string,
+  orgSlug?: string,
 ) {
-    return apiFetch<WorkspaceSessionResponse>(
-        `/workspaces/${workspaceId}/sessions/${sessionId}`,
-        { token, orgSlug },
-    );
+  return apiFetch<{
+    session_id: string;
+    workspace_id: string;
+    documents: { document_id: string; filename: string; status: string }[];
+  }>(`/workspaces/${workspaceId}/sessions/${sessionId}`, { token, orgSlug });
 }
 
-// ── Agent Workflow ────────────────────────────────────────────────────────────
-
-export function startAgentWorkflow(
-    token: string,
-    goalId: string,
-    workspaceId: string,
-    documentId: string,
-    orgSlug?: string,
+export function createWorkspaceScopedSession(
+  token: string,
+  workspaceId: string,
+  documentIds: string[],
+  orgSlug?: string,
 ) {
-    return apiFetch<StartWorkflowResponse>("/agent/start", {
-        token,
-        orgSlug,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            goal_id: goalId,
-            workspace_id: workspaceId,
-            document_id: documentId,
-        }),
-    });
+  return apiFetch<{ session_id: string }>(
+    `/workspaces/${workspaceId}/session`,
+    {
+      token,
+      orgSlug,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_ids: documentIds }),
+    },
+  );
 }
 
-export function confirmIntent(
-    token: string,
-    workflowId: string,
-    confirmedIntent: string,
-    orgSlug?: string,
+// ── Unified Goals API ────────────────────────────────────────────────────────
+
+export function createGoal(
+  token: string,
+  workspaceId: string,
+  goalText: string,
+  sessionId?: string,
+  orgSlug?: string,
 ) {
-    return apiFetch<ConfirmIntentResponse>(
-        `/agent/confirm-intent/${workflowId}`,
-        {
-            token,
-            orgSlug,
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ confirmed_intent: confirmedIntent }),
-        },
-    );
+  const body: Record<string, unknown> = { goal_text: goalText };
+  if (sessionId) body.session_id = sessionId;
+  return apiFetch<CreateGoalResponse>(`/workspaces/${workspaceId}/goals`, {
+    token,
+    orgSlug,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
-export function approveWorkflow(
-    authToken: string,
-    workflowId: string,
-    approvalToken: string,
-    orgSlug?: string,
+export function listGoals(
+  token: string,
+  workspaceId: string,
+  orgSlug?: string,
 ) {
-    return apiFetch<ApproveWorkflowResponse>(`/agent/approve/${workflowId}`, {
-        token: authToken,
-        orgSlug,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: approvalToken }),
-    });
+  return apiFetch<GoalSummary[]>(`/workspaces/${workspaceId}/goals`, {
+    token,
+    orgSlug,
+  });
 }
 
-export function rejectWorkflow(
-    token: string,
-    workflowId: string,
-    reason: string,
-    orgSlug?: string,
+export function getGoalStatus(
+  token: string,
+  workspaceId: string,
+  goalId: string,
+  orgSlug?: string,
 ) {
-    return apiFetch<{ status: string }>(`/agent/reject/${workflowId}`, {
-        token,
-        orgSlug,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason }),
-    });
+  return apiFetch<GoalDetail>(`/workspaces/${workspaceId}/goals/${goalId}`, {
+    token,
+    orgSlug,
+  });
 }
 
-export function getWorkflowStatus(
-    token: string,
-    workflowId: string,
-    orgSlug?: string,
+export function getGoalResult(
+  token: string,
+  workspaceId: string,
+  goalId: string,
+  orgSlug?: string,
 ) {
-    return apiFetch<WorkflowStatusResponse>(`/agent/status/${workflowId}`, {
-        token,
-        orgSlug,
-    });
+  return apiFetch<{
+    goal_id: string;
+    status: string;
+    intent?: string | null;
+    answer?: string | null;
+    actions?: {
+      id: string;
+      action_type: string;
+      description: string;
+      status: string;
+      urgency: number;
+    }[];
+    logs?: {
+      id: string;
+      tool_name: string;
+      status: string;
+      summary: string;
+      created_at: string;
+    }[];
+  }>(`/workspaces/${workspaceId}/goals/${goalId}/result`, { token, orgSlug });
 }
 
-export function getWorkflowActions(
-    token: string,
-    workflowId: string,
-    orgSlug?: string,
+export function confirmGoalIntent(
+  token: string,
+  workspaceId: string,
+  goalId: string,
+  intent: GoalIntent,
+  orgSlug?: string,
 ) {
-    return apiFetch<GetActionsResponse>(`/agent/${workflowId}/actions`, {
-        token,
-        orgSlug,
-    });
+  return apiFetch<ConfirmIntentResponse>(
+    `/workspaces/${workspaceId}/goals/${goalId}/confirm-intent`,
+    {
+      token,
+      orgSlug,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmed_intent: intent }),
+    },
+  );
 }
 
-export function getWorkflowLogs(
-    token: string,
-    workflowId: string,
-    orgSlug?: string,
+export function confirmGoalPlan(
+  token: string,
+  workspaceId: string,
+  goalId: string,
+  orgSlug?: string,
 ) {
-    return apiFetch<GetLogsResponse>(`/agent/${workflowId}/logs`, {
-        token,
-        orgSlug,
-    });
+  return apiFetch<{ message: string }>(
+    `/workspaces/${workspaceId}/goals/${goalId}/confirm-plan`,
+    { token, orgSlug, method: "POST" },
+  );
+}
+
+export function deleteGoal(
+  token: string,
+  workspaceId: string,
+  goalId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ message: string }>(
+    `/workspaces/${workspaceId}/goals/${goalId}`,
+    { token, orgSlug, method: "DELETE" },
+  );
+}
+
+// ── Approvals ────────────────────────────────────────────────────────────────
+
+export function listApprovals(token: string, orgSlug?: string) {
+  return apiFetch<ApprovalRequest[]>("/approvals", { token, orgSlug });
+}
+
+export function getApprovalDetail(
+  token: string,
+  approvalId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<ApprovalRequest>(`/approvals/${approvalId}`, {
+    token,
+    orgSlug,
+  });
+}
+
+export function approveWorkflowToken(
+  token: string,
+  workflowId: string,
+  approvalToken: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ workflow_id: string; status: string }>(
+    `/approvals/workflows/${workflowId}/approve`,
+    {
+      token,
+      orgSlug,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: approvalToken }),
+    },
+  );
+}
+
+export function rejectWorkflowToken(
+  token: string,
+  workflowId: string,
+  approvalToken: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ workflow_id: string; status: string }>(
+    `/approvals/workflows/${workflowId}/reject`,
+    {
+      token,
+      orgSlug,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: approvalToken }),
+    },
+  );
+}
+
+export function reissueApproval(
+  token: string,
+  approvalId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ message: string }>(`/approvals/${approvalId}/reissue`, {
+    token,
+    orgSlug,
+    method: "POST",
+  });
+}
+
+// ── Notifications ────────────────────────────────────────────────────────────
+
+export function listNotifications(token: string, orgSlug?: string) {
+  return apiFetch<NotificationItem[]>("/notifications", { token, orgSlug });
+}
+
+export function markNotificationRead(
+  token: string,
+  notificationId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ status: string }>(`/notifications/${notificationId}/read`, {
+    token,
+    orgSlug,
+    method: "POST",
+  });
+}
+
+export function markAllNotificationsRead(token: string, orgSlug?: string) {
+  return apiFetch<{ status: string }>("/notifications/read-all", {
+    token,
+    orgSlug,
+    method: "POST",
+  });
 }

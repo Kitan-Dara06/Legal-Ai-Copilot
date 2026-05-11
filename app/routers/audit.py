@@ -33,7 +33,7 @@ limiter = Limiter(key_func=get_remote_address)
 async def export_workspace_audit(
     request: Request,
     workspace_id: uuid.UUID,
-    fmt: str = Query("csv", regex="^(csv|json)$"),
+    fmt: str = Query("csv", pattern="^(csv|json)$"),
     org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_role(UserRole.PARTNER)),
@@ -263,5 +263,164 @@ async def faithfulness_summary(
                 },
             }
             for r in rows
+        ],
+    }
+
+
+@router.get("/{workspace_id}/goals/{goal_id}/audit")
+async def get_goal_audit_trail(
+    workspace_id: uuid.UUID,
+    goal_id: uuid.UUID,
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+):
+    """Chronological audit trail for a specific goal.
+
+    Returns IntentLog entries, WorkflowExecution checkpoints, and
+    ToolCallLog records in chronological order.
+    """
+    from app.models import IntentLog, ToolCallLog, WorkflowExecution
+
+    org_uuid = uuid.UUID(org_id) if isinstance(org_id, str) else org_id
+
+    # Get goal
+    from app.models import Goal
+
+    goal_result = await db.execute(
+        select(Goal).where(Goal.id == goal_id, Goal.org_id == org_uuid)
+    )
+    goal = goal_result.scalar_one_or_none()
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    # Get intent logs
+    intent_result = await db.execute(
+        select(IntentLog)
+        .where(
+            IntentLog.workflow_id.in_(
+                select(WorkflowExecution.id).where(WorkflowExecution.org_id == org_uuid)
+            )
+        )
+        .order_by(IntentLog.created_at)
+    )
+    intents = intent_result.scalars().all()
+
+    # Get workflow executions
+    wf_result = await db.execute(
+        select(WorkflowExecution)
+        .where(WorkflowExecution.org_id == org_uuid)
+        .order_by(WorkflowExecution.created_at)
+    )
+    workflows = wf_result.scalars().all()
+
+    # Get tool call logs
+    tool_result = await db.execute(
+        select(ToolCallLog)
+        .where(
+            ToolCallLog.workflow_id.in_(
+                select(WorkflowExecution.id).where(WorkflowExecution.org_id == org_uuid)
+            )
+        )
+        .order_by(ToolCallLog.created_at)
+    )
+    tool_logs = tool_result.scalars().all()
+
+    events = []
+
+    for intent in intents:
+        events.append(
+            {
+                "timestamp": intent.created_at.isoformat(),
+                "type": "intent_classification",
+                "detail": {
+                    "intent": intent.confirmed_intent,
+                    "confidence": intent.confidence,
+                    "model": intent.model_name,
+                },
+            }
+        )
+
+    for wf in workflows:
+        events.append(
+            {
+                "timestamp": wf.created_at.isoformat(),
+                "type": "workflow_status",
+                "detail": {
+                    "status": wf.status.value,
+                    "error": wf.error_context,
+                },
+            }
+        )
+
+    for log in tool_logs:
+        events.append(
+            {
+                "timestamp": log.created_at.isoformat(),
+                "type": "tool_call",
+                "detail": {
+                    "tool": log.tool_name,
+                    "status": log.status.value,
+                    "summary": log.response_summary,
+                },
+            }
+        )
+
+    events.sort(key=lambda e: e["timestamp"])
+
+    return {
+        "goal_id": str(goal_id),
+        "goal_text": goal.goal_text,
+        "events": events,
+    }
+
+
+@router.get("/research/export")
+async def export_research_log(
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export the ResearchLog for offline CUAD evaluation.
+
+    Admin only. Returns all intent classifications and tool calls
+    for the org in a flat, exportable format.
+    """
+    from app.models import IntentLog, ToolCallLog, WorkflowExecution
+
+    org_uuid = uuid.UUID(org_id) if isinstance(org_id, str) else org_id
+
+    wf_ids = select(WorkflowExecution.id).where(WorkflowExecution.org_id == org_uuid)
+
+    intents = await db.execute(
+        select(IntentLog)
+        .where(IntentLog.workflow_id.in_(wf_ids))
+        .order_by(IntentLog.created_at)
+    )
+    tools = await db.execute(
+        select(ToolCallLog)
+        .where(ToolCallLog.workflow_id.in_(wf_ids))
+        .order_by(ToolCallLog.created_at)
+    )
+
+    return {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "intent_classifications": [
+            {
+                "workflow_id": str(i.workflow_id),
+                "model": i.model_name,
+                "intent": i.confirmed_intent,
+                "confidence": i.confidence,
+                "created_at": i.created_at.isoformat(),
+            }
+            for i in intents.scalars().all()
+        ],
+        "tool_executions": [
+            {
+                "workflow_id": str(t.workflow_id),
+                "tool": t.tool_name,
+                "status": t.status.value,
+                "attempt": t.attempt_number,
+                "created_at": t.created_at.isoformat(),
+            }
+            for t in tools.scalars().all()
         ],
     }

@@ -19,12 +19,13 @@ from typing import Dict, List
 
 from openai import OpenAI
 
-
 # ---------------------------------------------------------------------------
 # Regex patterns for standard legal cross-reference formats
 # ---------------------------------------------------------------------------
 _REFERENCE_PATTERNS: List[re.Pattern] = [
-    re.compile(r"\bSection[s]?\s+\d+(?:\.\d+)*(?:\([a-z]\))?(?:\([ivx]+\))?", re.IGNORECASE),
+    re.compile(
+        r"\bSection[s]?\s+\d+(?:\.\d+)*(?:\([a-z]\))?(?:\([ivx]+\))?", re.IGNORECASE
+    ),
     re.compile(r"\bArticle[s]?\s+[IVXLCDM\d]+", re.IGNORECASE),
     re.compile(r"\bClause[s]?\s+\d+(?:\.\d+)*(?:\([a-z]\))?", re.IGNORECASE),
     re.compile(r"\bSubsection[s]?\s+\([a-z]\)", re.IGNORECASE),
@@ -63,7 +64,9 @@ class LLMReferenceParser:
     def __init__(self):
         self.client = OpenAI(
             api_key=os.environ.get("OPENAI_API_KEY"),
-            base_url=os.environ.get("OPENAI_API_BASE", "https://api.groq.com/openai/v1"),
+            base_url=os.environ.get(
+                "OPENAI_API_BASE", "https://api.groq.com/openai/v1"
+            ),
         )
         self.model = "llama-3.1-8b-instant"
 
@@ -72,6 +75,7 @@ class LLMReferenceParser:
         chunks: List[Dict],
         doc_name: str = "",
         graph=None,
+        workspace_id: str = "",
     ) -> List[Dict]:
         """
         Enriches each chunk with a `dependencies_clauses` list.
@@ -112,7 +116,8 @@ class LLMReferenceParser:
             if regex_refs:
                 # Filter self-references and store
                 clean_refs = [
-                    r for r in regex_refs
+                    r
+                    for r in regex_refs
                     if not self._is_self_reference(r, current_path)
                 ]
                 chunk["dependencies_clauses"] = clean_refs
@@ -162,6 +167,7 @@ Text: {text}"""
                                 to_node_id=ref,
                                 to_doc="__cross_doc__",  # resolved when target doc is indexed
                                 edge_type="cross_doc_pending",
+                                workspace_id=workspace_id,
                             )
                             cross_doc_edges += 1
                         except Exception as ge:
@@ -194,6 +200,7 @@ Text: {text}"""
 
 if __name__ == "__main__":
     import sys
+
     from chunker import ClauseChunker
     from parser import LegalDocumentParser
 

@@ -11,7 +11,7 @@ Changes from the old implementation:
   - `link_cross_doc_ref` creates REFERENCES edges across document boundaries
 
 Node schema:
-  (:Clause {id: str, doc: str, text: str})
+  (:Clause {id: str, doc: str, workspace_id: str, text: str})
 
 Edge schema:
   (:Clause)-[:REFERENCES {edge_type: str}]->(:Clause)
@@ -26,7 +26,7 @@ from typing import Dict, List, Optional
 from neo4j import Driver, GraphDatabase
 from openai import AsyncOpenAI
 
-from app.redis_client import acquire_llm_slot, release_llm_slot
+from app.redis_client import acquire_llm_slot, create_redis_pool, release_llm_slot
 
 NEO4J_URI = os.environ.get("NEO4J_URI", "neo4j+s://localhost:7687")
 NEO4J_USER = os.environ.get("NEO4J_USERNAME", "neo4j")
@@ -64,7 +64,7 @@ class DependencyGraph:
         with self._driver.session() as session:
             session.run(
                 "CREATE CONSTRAINT clause_unique IF NOT EXISTS "
-                "FOR (c:Clause) REQUIRE (c.id, c.doc) IS UNIQUE"
+                "FOR (c:Clause) REQUIRE (c.id, c.doc, c.workspace_id) IS UNIQUE"
             )
 
     def close(self):
@@ -75,7 +75,12 @@ class DependencyGraph:
     # Build graph (additive — call once per ingested document)
     # ------------------------------------------------------------------
 
-    def build_graph(self, enriched_chunks: List[Dict], doc_name: str = ""):
+    def build_graph(
+        self,
+        enriched_chunks: List[Dict],
+        doc_name: str = "",
+        workspace_id: str = "",
+    ):
         """
         MERGE clause nodes and intra-document REFERENCES edges.
         Safe to call multiple times — MERGE prevents duplicates.
@@ -92,11 +97,12 @@ class DependencyGraph:
                 # Upsert clause node
                 session.run(
                     """
-                    MERGE (c:Clause {id: $id, doc: $doc})
+                    MERGE (c:Clause {id: $id, doc: $doc, workspace_id: $workspace_id})
                     SET c.text = $text
                     """,
                     id=node_id,
                     doc=doc,
+                    workspace_id=workspace_id,
                     text=text,
                 )
 
@@ -104,13 +110,14 @@ class DependencyGraph:
                 for dep in chunk.get("dependencies_clauses", []):
                     session.run(
                         """
-                        MERGE (src:Clause {id: $src_id, doc: $doc})
-                        MERGE (tgt:Clause {id: $tgt_id, doc: $doc})
+                        MERGE (src:Clause {id: $src_id, doc: $doc, workspace_id: $workspace_id})
+                        MERGE (tgt:Clause {id: $tgt_id, doc: $doc, workspace_id: $workspace_id})
                         MERGE (src)-[:REFERENCES {edge_type: 'intra_doc'}]->(tgt)
                         """,
                         src_id=node_id,
                         tgt_id=dep,
                         doc=doc,
+                        workspace_id=workspace_id,
                     )
 
         print(f"[Graph] Merged clauses from '{doc_name}' into Neo4j graph.")
@@ -126,6 +133,7 @@ class DependencyGraph:
         to_node_id: str,
         to_doc: str,
         edge_type: str = "cross_doc",
+        workspace_id: str = "",
     ):
         """
         Creates a REFERENCES edge across two documents.
@@ -136,8 +144,8 @@ class DependencyGraph:
         with self._driver.session() as session:
             session.run(
                 """
-                MERGE (src:Clause {id: $from_id, doc: $from_doc})
-                MERGE (tgt:Clause {id: $to_id, doc: $to_doc})
+                MERGE (src:Clause {id: $from_id, doc: $from_doc, workspace_id: $workspace_id})
+                MERGE (tgt:Clause {id: $to_id, doc: $to_doc, workspace_id: $workspace_id})
                 MERGE (src)-[:REFERENCES {edge_type: $edge_type}]->(tgt)
                 """,
                 from_id=from_node_id,
@@ -145,13 +153,19 @@ class DependencyGraph:
                 to_id=to_node_id,
                 to_doc=to_doc,
                 edge_type=edge_type,
+                workspace_id=workspace_id,
             )
 
     # ------------------------------------------------------------------
     # Query: dependency chains (Cypher BFS up to 5 hops)
     # ------------------------------------------------------------------
 
-    def get_dependency_chains(self, node_id: str, max_hops: int = 5) -> List[Dict]:
+    def get_dependency_chains(
+        self,
+        node_id: str,
+        max_hops: int = 2,
+        workspace_id: str = "",
+    ) -> List[Dict]:
         """
         Returns the target node and all clauses it directly or indirectly
         references (up to max_hops), across document boundaries.
@@ -164,12 +178,14 @@ class DependencyGraph:
         with self._driver.session() as session:
             result = session.run(
                 """
-                MATCH (start:Clause {id: $id})
+                MATCH (start:Clause {id: $id, workspace_id: $workspace_id})
                 OPTIONAL MATCH path = (start)-[:REFERENCES*0..$hops]->(dep:Clause)
+                WHERE dep.workspace_id = $workspace_id
                 RETURN DISTINCT dep.id AS node, dep.text AS text, dep.doc AS source_document
                 """,
                 id=node_id,
                 hops=max_hops,
+                workspace_id=workspace_id,
             )
             records = result.data()
 
@@ -284,6 +300,7 @@ class LLMReferenceParser:
         doc_name: str = "",
         graph=None,
         org_id: str = "",
+        workspace_id: str = "",
     ) -> List[Dict]:
         """
         Enriches each chunk with a `dependencies_clauses` list.
@@ -338,13 +355,14 @@ Text: {text}"""
 
             # Acquire LLM Token Bucket Lease (Queueing behavior)
             lease_id = None
-            while True:
-                lease_id = await acquire_llm_slot(str(org_id), max_slots=5)
-                if lease_id:
-                    break
-                await asyncio.sleep(0.5)
-
+            _redis = create_redis_pool()
             try:
+                while True:
+                    lease_id = await acquire_llm_slot(str(org_id), _redis, max_slots=5)
+                    if lease_id:
+                        break
+                    await asyncio.sleep(0.5)
+
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
@@ -371,6 +389,7 @@ Text: {text}"""
                                 to_node_id=ref,
                                 to_doc="__cross_doc__",
                                 edge_type="cross_doc_pending",
+                                workspace_id=workspace_id,
                             )
                             cross_doc_edges += 1
                         except Exception as ge:
@@ -385,7 +404,8 @@ Text: {text}"""
                 chunk["dependencies_clauses"] = []
             finally:
                 if lease_id:
-                    await release_llm_slot(str(org_id), lease_id)
+                    await release_llm_slot(str(org_id), lease_id, _redis)
+                await _redis.aclose()
 
         # Run all chunks concurrently
         await asyncio.gather(*(process_chunk(c) for c in chunks))

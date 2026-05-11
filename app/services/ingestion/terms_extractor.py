@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.models import DefinedTermRegistry
-from app.redis_client import acquire_llm_slot, release_llm_slot
+from app.redis_client import acquire_llm_slot, create_redis_pool, release_llm_slot
 from app.tasks import is_definition_chunk
 
 
@@ -77,14 +77,15 @@ If there are no defined terms, return: {{"terms": []}}
 Text: {text}
 """
             # Acquire token bucket lease
+            _redis = create_redis_pool()
             lease_id = None
-            while True:
-                lease_id = await acquire_llm_slot(str(org_id), max_slots=5)
-                if lease_id:
-                    break
-                await asyncio.sleep(0.5)
-
             try:
+                while True:
+                    lease_id = await acquire_llm_slot(str(org_id), _redis, max_slots=5)
+                    if lease_id:
+                        break
+                    await asyncio.sleep(0.5)
+
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
@@ -126,7 +127,8 @@ Text: {text}
                 traceback.print_exc()
             finally:
                 if lease_id:
-                    await release_llm_slot(str(org_id), lease_id)
+                    await release_llm_slot(str(org_id), lease_id, _redis)
+                await _redis.aclose()
 
         async with AsyncSessionLocal() as db:
             # Gather chunk executions concurrently

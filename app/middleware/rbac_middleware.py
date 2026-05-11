@@ -152,31 +152,34 @@ class RBACMiddleware:
 # ── FastAPI Dependency for per-endpoint role checks ───────────────────────────
 
 
-async def require_role(
-    required: UserRole,
-    role: Optional[UserRole] = Depends(resolve_user_role),
-) -> None:
+def require_role(required: UserRole) -> callable:
     """
-    Dependency that checks the authenticated user has at least `required` role.
+    Dependency factory that checks the authenticated user has at least `required` role.
 
     Usage:
         @router.get("/admin/dashboard")
         async def dashboard(_: None = Depends(require_role(UserRole.SYSTEM_ADMIN))):
             ...
     """
-    if role is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required.",
-        )
 
-    if not role.meets_threshold(required):
-        logger.warning(
-            "[rbac] Access denied: user role=%s, required=%s",
-            role.value,
-            required.value,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Role '{role.value}' cannot access this resource. Requires '{required.value}' or higher.",
-        )
+    async def _check_role(
+        role: Optional[UserRole] = Depends(resolve_user_role),
+    ) -> None:
+        if role is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required.",
+            )
+
+        if not role.meets_threshold(required):
+            logger.warning(
+                "[rbac] Access denied: user role=%s, required=%s",
+                role.value,
+                required.value,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Role '{role.value}' cannot access this resource. Requires '{required.value}' or higher.",
+            )
+
+    return _check_role

@@ -20,10 +20,10 @@ from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 
+from app.celery_app import celery_app
 from app.config import get_database_url_sync, redis_disable_tls_verify
 from app.logging_config import configure_logging
 from app.redis_client import acquire_llm_slot, release_llm_slot
-from app.worker import celery_app
 
 
 class LeaseExhaustedError(Exception):
@@ -252,11 +252,19 @@ async def run_intelligence_pipeline_async(
         logger.info(f"[{document_id}] Starting graph extraction...")
         # Resolve references (LLM)
         resolved_chunks = await graph_extractor.resolve_references(
-            chunks, filename, neo4j_graph, org_id=org_id
+            chunks,
+            filename,
+            neo4j_graph,
+            org_id=org_id,
+            workspace_id=str(workspace_id),
         )
         # Build neo4j graph
         await loop.run_in_executor(
-            None, neo4j_graph.build_graph, resolved_chunks, filename
+            None,
+            neo4j_graph.build_graph,
+            resolved_chunks,
+            filename,
+            str(workspace_id),
         )
         neo4j_graph.close()
         return "graph_complete"
@@ -341,10 +349,10 @@ def _flush_stage_and_maybe_sweep(
                 UPDATE documents
                 SET intelligence_stages_complete =
                     COALESCE(intelligence_stages_complete, '{}'::jsonb)
-                    || (%s || ' true')::jsonb
+                    || jsonb_build_object(%s, true)
                 WHERE id = %s
                 """,
-                (f'"{stage_key}"', document_id),
+                (stage_key, document_id),
             )
 
             # Step 2: Check if any non-failed doc in the workspace is missing this stage
@@ -576,6 +584,38 @@ def resolve_deadline_conflicts(self, workspace_id: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def calculate_urgency(days_remaining: int) -> float:
+    """
+    Pure function: calculate an urgency score from days remaining until
+    a deadline.
+
+    Returns a float in [0.0, 1.0] where higher values mean more urgent.
+
+    Rules
+    -----
+    * ``days_remaining <= 0``  → 1.0 (overdue / already past)
+    * ``days_remaining == 1``  → 0.95
+    * ``days_remaining <= 3``  → 0.85
+    * ``days_remaining <= 7``  → 0.70
+    * ``days_remaining <= 14`` → 0.50
+    * ``days_remaining <= 30`` → 0.30
+    * otherwise                → 0.10
+    """
+    if days_remaining <= 0:
+        return 1.0
+    if days_remaining == 1:
+        return 0.95
+    if days_remaining <= 3:
+        return 0.85
+    if days_remaining <= 7:
+        return 0.70
+    if days_remaining <= 14:
+        return 0.50
+    if days_remaining <= 30:
+        return 0.30
+    return 0.10
+
+
 @celery_app.task(
     name="app.tasks.deadline_scanner",
     bind=True,
@@ -622,21 +662,9 @@ def deadline_scanner(self):
             days_remaining = (resolved - now).days
 
             # Calculate urgency score
+            new_score = calculate_urgency(days_remaining)
             if days_remaining <= 0:
                 overdue_ids.append(reg_id)
-                new_score = 1.0
-            elif days_remaining == 1:
-                new_score = 0.95
-            elif days_remaining <= 3:
-                new_score = 0.85
-            elif days_remaining <= 7:
-                new_score = 0.70
-            elif days_remaining <= 14:
-                new_score = 0.50
-            elif days_remaining <= 30:
-                new_score = 0.30
-            else:
-                new_score = 0.10
 
             urgency_updates.append((new_score, reg_id))
 

@@ -37,10 +37,11 @@ async def _check_postgres() -> dict:
 
 async def _check_redis() -> dict:
     try:
-        from app.redis_client import get_redis_client
+        from app.redis_client import create_redis_pool
 
-        r = get_redis_client()
+        r = create_redis_pool()
         await r.ping()
+        await r.aclose()
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
@@ -49,6 +50,7 @@ async def _check_redis() -> dict:
 async def _check_qdrant() -> dict:
     try:
         import asyncio
+
         from app.services.store import get_global_qdrant
 
         client = get_global_qdrant()
@@ -61,15 +63,16 @@ async def _check_qdrant() -> dict:
 async def _check_neo4j() -> dict:
     try:
         import asyncio
-        from app.services.ingestion.graph_extractor import get_neo4j_driver
-        driver = get_neo4j_driver()
+
+        from app.services.ingestion.graph_extractor import _get_driver
+
+        driver = _get_driver()
         if not driver:
             return {"ok": False, "error": "Neo4j driver failed to initialize."}
-        
-        # Verify connectivity
+
         def _verify():
             driver.verify_connectivity()
-            
+
         await asyncio.get_event_loop().run_in_executor(None, _verify)
         return {"ok": True}
     except Exception as e:
@@ -79,6 +82,7 @@ async def _check_neo4j() -> dict:
 async def _check_rabbitmq() -> dict:
     try:
         from app.worker import celery_app
+
         # Attempt to inspect the broker connection
         # This is a bit heavy, but verifies connectivity
         celery_app.connection().ensure_connection(max_retries=1)

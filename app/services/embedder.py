@@ -38,11 +38,18 @@ CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "").strip()
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
 CLOUDFLARE_MODEL = "@cf/baai/bge-m3"
 
-# Keep the existing SDK path for compatibility/perf when provider behaves well.
-_sdk_client = OpenAI(
-    base_url=OPENROUTER_BASE_URL,
-    api_key=OPENROUTER_API_KEY,
-)
+# SDK client is lazily initialised — no connection at import time.
+_sdk_client: OpenAI | None = None
+
+
+def _get_sdk_client() -> OpenAI:
+    global _sdk_client
+    if _sdk_client is None:
+        _sdk_client = OpenAI(
+            base_url=OPENROUTER_BASE_URL,
+            api_key=OPENROUTER_API_KEY,
+        )
+    return _sdk_client
 
 
 class EmbeddingProviderError(RuntimeError):
@@ -111,7 +118,8 @@ def _extract_from_sdk_response(
 
 
 def _sdk_embeddings(model: str, inputs: List[str]) -> List[List[float]]:
-    response = _sdk_client.embeddings.create(
+    client = _get_sdk_client()
+    response = client.embeddings.create(
         model=model,
         input=inputs,
     )

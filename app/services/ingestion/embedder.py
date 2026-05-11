@@ -95,17 +95,73 @@ class LegalEmbedder:
     # ------------------------------------------------------------------
 
     def _embed_voyage(self, texts: List[str]) -> List[List[float]]:
-        """Call Voyage AI."""
+        """Call Voyage AI via direct HTTP with retry for rate limits."""
         if not self._voyage_available:
             raise RuntimeError("VOYAGE_API_KEY is missing. Dense embedding failed.")
-        try:
-            result = self._voyage.embed(
-                texts, model=VOYAGE_MODEL, input_type="document"
+
+        import time
+
+        import httpx
+
+        headers = {
+            "Authorization": f"Bearer {os.environ.get('VOYAGE_API_KEY')}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "input": texts,
+            "model": VOYAGE_MODEL,
+            "input_type": "document",
+        }
+
+        last_error = None
+        # Batch into groups of 10 for faster per-request responses
+        batch_size = 10
+        all_embeddings = []
+        for batch_start in range(0, len(texts), batch_size):
+            batch = texts[batch_start : batch_start + batch_size]
+            batch_payload = {**payload, "input": batch}
+
+            for attempt in range(5):
+                try:
+                    with httpx.Client(timeout=60.0) as client:
+                        r = client.post(
+                            "https://api.voyageai.com/v1/embeddings",
+                            headers=headers,
+                            json=batch_payload,
+                        )
+                    if r.status_code == 429:
+                        wait = min(30, (2**attempt) * 5)
+                        print(f"  ⏳ Rate limited, waiting {wait}s...")
+                        time.sleep(wait)
+                        continue
+                    if r.status_code >= 400:
+                        raise RuntimeError(
+                            f"Voyage API error {r.status_code}: {r.text[:200]}"
+                        )
+                    body = r.json()
+                    all_embeddings.extend([item["embedding"] for item in body["data"]])
+                    break
+                except httpx.TimeoutException:
+                    wait = (2**attempt) * 5
+                    print(
+                        f"  ⏳ Timeout (attempt {attempt + 1}/5), retrying in {wait}s..."
+                    )
+                    time.sleep(wait)
+                    continue
+                except Exception as e:
+                    last_error = e
+                    if attempt < 4:
+                        wait = (2**attempt) * 5
+                        print(f"  ⚠️  Failed ({e}), retrying in {wait}s...")
+                        time.sleep(wait)
+                        continue
+                    raise
+
+        if len(all_embeddings) != len(texts):
+            raise RuntimeError(
+                f"Expected {len(texts)} embeddings, got {len(all_embeddings)}"
             )
-            return result.embeddings
-        except Exception as e:
-            print(f"  ⚠️ Voyage embed failed ({e}).")
-            raise
+        return all_embeddings
 
     def _embed_splade(self, text: str) -> Optional[SparseVector]:
         result = list(self._splade.embed([text]))[0]

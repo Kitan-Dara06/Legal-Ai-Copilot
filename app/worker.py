@@ -1,3 +1,10 @@
+# app/worker.py
+#
+# Lex SRS: Celery worker configuration.
+# The celery_app itself lives in app.celery_app so that both the web server
+# (via send_task) and the worker process can import it without pulling in
+# task modules or signal handlers at import time.
+
 import logging
 import os
 
@@ -8,6 +15,7 @@ from celery.signals import worker_process_init
 from dotenv import load_dotenv
 from sentry_sdk.integrations.celery import CeleryIntegration
 
+from app.celery_app import celery_app  # noqa: F401 — re-export for convenience
 from app.logging_config import configure_logging
 
 load_dotenv()
@@ -24,83 +32,21 @@ if _sentry_dsn:
         send_default_pii=True,
     )
 
-# 1. Configuration Parameters
-host = os.getenv("UPSTASH_HOST")
-port = os.getenv("UPSTASH_PORT", "6379")
-password = os.getenv("UPSTASH_PASSWORD")
+# ── Additional worker-only configuration ──────────────────────────────────
 
-rabbitmq_url = os.getenv("RABBITMQ_URL")
-if not rabbitmq_url:
-    rq_host = os.getenv("RABBITMQ_HOST", "localhost")
-    rq_port = os.getenv("RABBITMQ_PORT", "5672")
-    rq_user = os.getenv("RABBITMQ_USER", "guest")
-    rq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
-    rq_vhost = os.getenv("RABBITMQ_VHOST", "/")
-    from urllib.parse import quote_plus
-
-    rabbitmq_url = f"amqp://{rq_user}:{quote_plus(rq_password)}@{rq_host}:{rq_port}/{quote_plus(rq_vhost)}"
-
-BROKER_URL = rabbitmq_url
-
-# 2. Redis Result Backend (Upstash or Local)
-if not host or host == "localhost":
-    # Local Development Fallback
-    REDIS_URL = f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}/0"
-    broker_label = f"RabbitMQ + Local Redis"
-else:
-    # Production (Upstash/Managed)
-    REDIS_URL = f"rediss://default:{password}@{host}:{port}/0?ssl_cert_reqs=required"
-    broker_label = "RabbitMQ + Upstash"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Create the Celery App
-# ─────────────────────────────────────────────────────────────────────────────
-celery_app = Celery(
-    "legal_rag_worker",
-    broker=BROKER_URL,
-    backend=REDIS_URL,
-    include=["app.tasks"],
-)
-
-# Debug: log broker and backend (mask passwords)
-logger = logging.getLogger(__name__)
-safe_broker = BROKER_URL.split("@")[-1] if "@" in BROKER_URL else BROKER_URL
-safe_redis = REDIS_URL.split("@")[-1] if "@" in REDIS_URL else "localhost"
-logger.info("Celery Broker: %s (%s)", broker_label, safe_broker)
-logger.info("Celery Result Backend: Redis (%s)", safe_redis)
-
-# Explicit SSL configuration for Upstash/rediss result backend
-if REDIS_URL.startswith("rediss://"):
-    celery_app.conf.update(redis_backend_use_ssl={"ssl_cert_reqs": "required"})
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Configuration
-# ─────────────────────────────────────────────────────────────────────────────
 celery_app.conf.update(
-    # Serialize tasks as JSON (human-readable, safe)
-    task_serializer="json",
-    result_serializer="json",
-    accept_content=["json"],
-    # Don't store task results in Redis — status is in Postgres; avoids "Connection closed by server" when Redis drops idle connections (e.g. Upstash).
-    task_ignore_result=False,
     # Broker robustness (CloudAMQP / RabbitMQ).
     broker_connection_retry_on_startup=True,
     broker_connection_timeout=30,
     broker_heartbeat=30,
     broker_transport_options={
-        # Kombu/amqp socket settings to reduce transient "read operation timed out"
         "connect_timeout": 30,
         "socket_timeout": 30,
     },
     # Timezone
     timezone="UTC",
     enable_utc=True,
-    # ── Queues ─────────────────────────────────────────────────────────────
-    # Three queues:
-    #   "default"  — digital PDF ingestion (clean, fast)
-    #   "ocr"      — scanned/image PDF ingestion (slow, Gemini OCR)
-    #   "deadline" — dedicated deadline scanner (every 15 min beat)
+    # Queues
     task_queues={
         "default": {"exchange": "default", "routing_key": "default"},
         "ocr": {"exchange": "ocr", "routing_key": "ocr"},
@@ -113,7 +59,6 @@ celery_app.conf.update(
     task_default_queue="default",
     task_default_exchange="default",
     task_default_routing_key="default",
-    # Route specific tasks to specific queues
     task_routes={
         "app.tasks.process_digital_pdf": {"queue": "default"},
         "app.tasks.process_scanned_pdf": {"queue": "ocr"},
@@ -122,7 +67,7 @@ celery_app.conf.update(
         "app.tasks.resolve_defined_term_conflicts": {"queue": "default"},
         "app.tasks.resolve_deadline_conflicts": {"queue": "deadline"},
     },
-    # ── Beat Schedule (Deadline Scanner every 15 minutes) ──
+    # Beat Schedule (Deadline Scanner every 15 minutes)
     beat_schedule={
         "deadline-scanner-every-15-min": {
             "task": "app.tasks.deadline_scanner",
@@ -130,7 +75,7 @@ celery_app.conf.update(
             "options": {"queue": "deadline"},
         },
     },
-    # Retry failed tasks up to 3 times with a 60-second delay
+    # Retry
     task_acks_late=True,
     task_reject_on_worker_lost=True,
 )

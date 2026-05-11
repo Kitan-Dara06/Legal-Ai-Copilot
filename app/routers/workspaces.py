@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 from slowapi import Limiter
@@ -21,9 +22,12 @@ from slowapi.util import get_remote_address
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.celery_app import celery_app
 from app.database import get_db
-from app.dependencies import get_org_id_unified
+from app.dependencies import get_org_id_unified, get_redis
 from app.models import (
+    DeadlineRegistry,
+    DefinedTermRegistry,
     Document,
     DocumentStatus,
     DocumentType,
@@ -32,8 +36,8 @@ from app.models import (
     Workspace,
     WorkspaceSession,
 )
+from app.redis_client import create_session as redis_create_session
 from app.services.object_storage import object_exists, upload_bytes
-from app.tasks import process_digital_pdf, process_scanned_pdf
 from app.utils import is_scanned_pdf
 
 logger = logging.getLogger(__name__)
@@ -399,20 +403,26 @@ async def upload_document(
 
     # 7. Dispatch Celery pipeline
     if is_scanned:
-        process_scanned_pdf.delay(
-            str(document_id),
-            str(workspace_id),
-            str(org_id),
-            filename,
-            blob_name,
+        celery_app.send_task(
+            "app.tasks.process_scanned_pdf",
+            kwargs={
+                "document_id": str(document_id),
+                "workspace_id": str(workspace_id),
+                "org_id": str(org_id),
+                "filename": filename,
+                "blob_name": blob_name,
+            },
         )
     else:
-        process_digital_pdf.delay(
-            str(document_id),
-            str(workspace_id),
-            str(org_id),
-            filename,
-            blob_name,
+        celery_app.send_task(
+            "app.tasks.process_digital_pdf",
+            kwargs={
+                "document_id": str(document_id),
+                "workspace_id": str(workspace_id),
+                "org_id": str(org_id),
+                "filename": filename,
+                "blob_name": blob_name,
+            },
         )
 
     logger.info(
@@ -703,4 +713,285 @@ async def close_workspace_session(
         )
 
     session.closed_at = datetime.now(timezone.utc)
+    await db.commit()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lex SRS Consolidation — Additional Workspace Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/{workspace_id}/documents/{document_id}/status")
+async def get_document_status(
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    GET /workspaces/{workspace_id}/documents/{document_id}/status
+
+    Replaces ``GET /files/{document_id}/status`` from the legacy injest.py
+    module. Returns the current document processing status, stages completed,
+    and any error message.
+
+    Tenant isolation enforced via org_id check.
+    """
+    org_uuid = uuid.UUID(org_id)
+
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id,
+            Document.workspace_id == workspace_id,
+            Document.org_id == org_uuid,
+        )
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    return {
+        "document_id": str(doc.id),
+        "filename": doc.filename,
+        "status": doc.status.value if doc.status else None,
+        "stages": doc.intelligence_stages_complete,
+        "error": doc.error_message,
+        "file_hash": doc.file_hash,
+        "file_type": doc.file_type.value if doc.file_type else None,
+        "upload_date": doc.upload_date.isoformat(),
+    }
+
+
+@router.post("/{workspace_id}/session", status_code=201)
+@limiter.limit("20/minute")
+async def create_workspace_scoped_session(
+    request: Request,
+    workspace_id: uuid.UUID,
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    """
+    POST /workspaces/{workspace_id}/session
+
+    Creates a Redis-backed session scoped to this workspace.
+    Replaces ``POST /session`` from the legacy session.py module.
+
+    The session stores the org context and is automatically TTL-expired.
+    """
+    org_uuid = uuid.UUID(org_id)
+
+    # Verify workspace access
+    ws_result = await db.execute(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.org_id == org_uuid,
+            Workspace.archived_at.is_(None),
+        )
+    )
+    if not ws_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Workspace not found.")
+
+    # Fetch READY document IDs in this workspace to populate the session
+    doc_result = await db.execute(
+        select(Document.id).where(
+            Document.workspace_id == workspace_id,
+            Document.org_id == org_uuid,
+            Document.status == DocumentStatus.READY,
+        )
+    )
+    ready_ids = list(row[0] for row in doc_result.all())
+
+    # Delegate to the shared Redis session helper
+    # Convert UUIDs to strings for Redis storage
+    session_id = await redis_create_session(
+        [str(did) for did in ready_ids], org_id, redis
+    )
+
+    return {
+        "session_id": session_id,
+        "workspace_id": str(workspace_id),
+        "document_count": len(ready_ids),
+        "ttl_hours": 24,
+    }
+
+
+@router.get("/{workspace_id}/defined-terms")
+async def list_defined_terms_with_conflicts(
+    workspace_id: uuid.UUID,
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+    conflict_only: bool = Query(
+        False, alias="conflict_only", description="Filter to conflicting terms only"
+    ),
+):
+    """
+    GET /workspaces/{workspace_id}/defined-terms
+
+    Cross-document conflict viewer. Queries the ``DefinedTermRegistry``
+    for terms with conflicts in a given workspace.
+
+    Optionally filter to only conflicting terms via ``?conflict_only=true``.
+    Results are returned sorted by term name.
+    """
+    org_uuid = uuid.UUID(org_id)
+
+    conditions = [
+        DefinedTermRegistry.workspace_id == workspace_id,
+        DefinedTermRegistry.org_id == org_uuid,
+    ]
+    if conflict_only:
+        conditions.append(DefinedTermRegistry.conflict_flag.is_(True))
+
+    result = await db.execute(
+        select(DefinedTermRegistry)
+        .where(*conditions)
+        .order_by(DefinedTermRegistry.term)
+    )
+    terms = result.scalars().all()
+
+    return [
+        {
+            "id": str(t.id),
+            "term": t.term,
+            "definition": t.definition,
+            "source_document_id": str(t.source_document_id),
+            "page": t.page,
+            "clause_reference": t.clause_reference,
+            "conflict_flag": t.conflict_flag,
+            "conflict_description": t.conflict_description,
+        }
+        for t in terms
+    ]
+
+
+@router.get("/{workspace_id}/deadlines")
+async def list_deadlines(
+    workspace_id: uuid.UUID,
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(50, ge=1, le=200, description="Max items to return"),
+):
+    """
+    GET /workspaces/{workspace_id}/deadlines
+
+    Deadline registry viewer. Queries ``DeadlineRegistry`` for the
+    workspace and returns obligations sorted by ``urgency_score``
+    descending (most urgent first).
+
+    Supports pagination with the ``limit`` query parameter.
+    """
+    org_uuid = uuid.UUID(org_id)
+
+    result = await db.execute(
+        select(DeadlineRegistry)
+        .where(
+            DeadlineRegistry.workspace_id == workspace_id,
+            DeadlineRegistry.org_id == org_uuid,
+        )
+        .order_by(DeadlineRegistry.urgency_score.desc())
+        .limit(limit)
+    )
+    deadlines = result.scalars().all()
+
+    return [
+        {
+            "id": str(d.id),
+            "obligation_description": d.obligation_description,
+            "obligation_type": d.obligation_type.value,
+            "raw_date_expression": d.raw_date_expression,
+            "resolved_deadline": d.resolved_deadline.isoformat()
+            if d.resolved_deadline
+            else None,
+            "resolution_status": d.resolution_status.value,
+            "conflict_flag": d.conflict_flag,
+            "urgency_score": d.urgency_score,
+            "status": d.status.value,
+        }
+        for d in deadlines
+    ]
+
+
+@router.get("/{workspace_id}/graph/expand")
+async def expand_graph(
+    workspace_id: uuid.UUID,
+    org_id: str = Depends(get_org_id_unified),
+):
+    """
+    GET /workspaces/{workspace_id}/graph/expand
+
+    Neo4j graph expander (placeholder).
+    Will be implemented when Neo4j ingestion is active.
+
+    Currently returns a descriptive placeholder indicating
+    that the Neo4j graph visualizer is not yet available.
+    """
+    return {
+        "workspace_id": str(workspace_id),
+        "status": "unavailable",
+        "message": "Neo4j graph visualization is not yet available. "
+        "This endpoint will be implemented when Neo4j ingestion is active.",
+        "documentation_reference": "SRS Section 7.2 — Neo4j Knowledge Graph",
+    }
+
+
+@router.post("/{workspace_id}/documents/{document_id}/reprocess", status_code=202)
+async def reprocess_document(
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-trigger the intelligence pipeline for a failed document."""
+    org_uuid = uuid.UUID(org_id) if isinstance(org_id, str) else org_id
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id,
+            Document.workspace_id == workspace_id,
+            Document.org_id == org_uuid,
+        )
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc.status = DocumentStatus.PENDING
+    doc.error_message = None
+    doc.intelligence_stages_complete = None
+    await db.commit()
+
+    celery_app.send_task(
+        "app.tasks.process_digital_pdf",
+        kwargs={
+            "document_id": str(document_id),
+            "workspace_id": str(workspace_id),
+            "org_id": str(org_id),
+            "filename": doc.filename,
+            "blob_name": doc.r2_key,
+        },
+    )
+    return {"status": "reprocessing", "document_id": str(document_id)}
+
+
+@router.delete("/{workspace_id}/documents/{document_id}", status_code=204)
+async def delete_workspace_document(
+    workspace_id: uuid.UUID,
+    document_id: uuid.UUID,
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a document from a workspace."""
+    org_uuid = uuid.UUID(org_id) if isinstance(org_id, str) else org_id
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id,
+            Document.workspace_id == workspace_id,
+            Document.org_id == org_uuid,
+        )
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    await db.delete(doc)
     await db.commit()

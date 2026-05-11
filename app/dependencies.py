@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 
 import httpx
+import redis.asyncio as aioredis
 import sentry_sdk
 from fastapi import Depends, Header, HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
@@ -152,9 +153,7 @@ async def get_supabase_claims(
     logger = logging.getLogger("app.dependencies")
 
     if not auth_header or not auth_header.startswith("Bearer "):
-        logger.warning(
-            "[get_supabase_claims] Missing or invalid Authorization header."
-        )
+        logger.warning("[get_supabase_claims] Missing or invalid Authorization header.")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid Authorization header.",
@@ -396,6 +395,8 @@ async def _build_supabase_auth_context(
 
 
 from fastapi import Header
+
+
 async def get_supabase_auth_context(
     request: Request,
     claims: dict = Depends(get_supabase_claims),
@@ -407,17 +408,21 @@ async def get_supabase_auth_context(
     Respects X-Active-Org header for switching active workspaces.
     """
     ctx = await _build_supabase_auth_context(claims, db)
-    
+
     if x_active_org:
         # Check if org exists
-        org_res = await db.execute(select(Organization).where(Organization.slug == x_active_org))
+        org_res = await db.execute(
+            select(Organization).where(Organization.slug == x_active_org)
+        )
         org = org_res.scalar_one_or_none()
-        
+
         if org:
             # Check user membership
             mem_res = await db.execute(
-                select(UserOrgMembership)
-                .where(UserOrgMembership.user_id == ctx.user.id, UserOrgMembership.org_id == org.id)
+                select(UserOrgMembership).where(
+                    UserOrgMembership.user_id == ctx.user.id,
+                    UserOrgMembership.org_id == org.id,
+                )
             )
             membership = mem_res.scalar_one_or_none()
             if membership:
@@ -429,13 +434,15 @@ async def get_supabase_auth_context(
 
     # If x_active_org was omitted (or invalid), we should still load their real role for the resolved org
     mem_res = await db.execute(
-        select(UserOrgMembership)
-        .where(UserOrgMembership.user_id == ctx.user.id, UserOrgMembership.org_id == ctx.org_id)
+        select(UserOrgMembership).where(
+            UserOrgMembership.user_id == ctx.user.id,
+            UserOrgMembership.org_id == ctx.org_id,
+        )
     )
     membership = mem_res.scalar_one_or_none()
     if membership:
         ctx.user.role = membership.role
-        
+
     return ctx
 
 
@@ -588,3 +595,23 @@ async def get_supabase_admin_context(
             detail="Admin privileges required.",
         )
     return ctx
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lex SRS: Lifespan-backed Dependency Injection
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def get_redis(request: Request) -> aioredis.Redis:
+    """
+    Inject the shared Redis pool from app.state.
+    Initialised once during FastAPI lifespan startup and safe to use
+    throughout the request lifecycle.
+    """
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Redis not available. Service still starting.",
+        )
+    return redis

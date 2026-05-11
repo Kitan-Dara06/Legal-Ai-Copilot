@@ -16,8 +16,15 @@ import logging
 import os
 import time
 import uuid as _uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+
+from langchain_core.messages import AIMessage
+from langchain_groq import ChatGroq
+from pydantic import BaseModel, Field
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import AsyncSessionLocal
 from app.models import (
@@ -41,18 +48,117 @@ from app.models import (
 from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
 from app.services.object_storage import upload_bytes
 from app.utils import sanitize_goal_text
-from langchain_core.messages import AIMessage
-from langchain_groq import ChatGroq
-from pydantic import BaseModel, Field
-from sqlalchemy import select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# State adapter — backward compatibility across graph versions
+# Idempotency key generation (FR-EXEC-02)
 # ─────────────────────────────────────────────────────────────────────────────
+def generate_idempotency_key(
+    workflow_id: str, action_id: str, tool_name: str, attempt_number: int
+) -> str:
+    """
+    Generate a deterministic idempotency key for a tool execution.
+
+    Rule FR-EXEC-02: The key is computed as the SHA-256 hex digest of the
+    concatenation of workflow_id, action_id, tool_name, and attempt_number.
+    This guarantees that retrying the same action with the same attempt
+    number reuses the existing result, preventing duplicate side-effects.
+
+    Args:
+        workflow_id:   The UUID of the parent workflow execution.
+        action_id:     The UUID of the action (task) being executed.
+        tool_name:     The name/type of the tool being called (e.g. action_type.value).
+        attempt_number: The 1-based retry attempt counter.
+
+    Returns:
+        A 64-character lowercase hex string (SHA-256 digest).
+    """
+    raw_key = f"{workflow_id}{action_id}{tool_name}{attempt_number}"
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Compensation plan — pure function (FR-EXEC-04 Saga Pattern)
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class ToolLogEntry:
+    """Lightweight representation of a tool call log for compensation planning.
+
+    Pure-data container — no database dependency, easily constructed in tests.
+    """
+
+    action_id: str
+    created_at: datetime
+
+
+@dataclass
+class ActionInfo:
+    """Lightweight compensation metadata for an action.
+
+    Pure-data container — no database dependency, easily constructed in tests.
+    """
+
+    idempotency_class: str
+    compensation_action: str | None
+    compensation_params: dict[str, Any] | None
+
+
+def build_compensation_plan(
+    tool_logs: list[ToolLogEntry],
+    actions_map: dict[str, ActionInfo],
+) -> list[tuple[str, str, dict[str, Any] | None]]:
+    """
+    Build a compensation plan following the Saga pattern.
+
+    Given a list of tool call log entries and a mapping of action_id to
+    compensation metadata, determines which executed tools require
+    compensation and returns them in **LIFO** order (Last-In-First-Out —
+    the last tool executed is the first to be compensated).
+
+    This is a **pure function** with zero side effects:
+      - No database queries
+      - No logging
+      - No state mutation
+
+    This makes it directly testable without a database connection or
+    any infrastructure setup.
+
+    Args:
+        tool_logs:   Chronological list of successfully executed tool calls.
+        actions_map: Mapping of action_id (str) -> ActionInfo with
+                     idempotency_class and compensation metadata.
+
+    Returns:
+        List of ``(action_id, compensation_action, compensation_params)``
+        tuples ordered in reverse execution order (LIFO). Only actions
+        whose ``idempotency_class`` is ``REQUIRES_COMPENSATION`` and which
+        have a ``compensation_action`` defined are included.
+    """
+    # Sort by created_at descending — LIFO: last executed, first compensated
+    sorted_logs = sorted(tool_logs, key=lambda x: x.created_at, reverse=True)
+
+    plan: list[tuple[str, str, dict[str, Any] | None]] = []
+    for entry in sorted_logs:
+        action = actions_map.get(entry.action_id)
+        if not action:
+            continue
+        if (
+            action.idempotency_class == IdempotencyClass.REQUIRES_COMPENSATION.value
+            and action.compensation_action
+        ):
+            plan.append(
+                (
+                    entry.action_id,
+                    action.compensation_action,
+                    action.compensation_params,
+                )
+            )
+
+    return plan
+
+
 def _adapt_state(state: PointerOnlyState) -> PointerOnlyState:
     defaults: Dict[str, Any] = {
         "graph_version": CURRENT_GRAPH_VERSION,
@@ -509,6 +615,7 @@ async def graph_expansion_node(state: PointerOnlyState) -> Dict[str, Any]:
     workflow_id = state["workflow_id"]
     goal_text = state.get("goal_text", "")
     org_id = state.get("org_id")
+    workspace_id = state.get("workspace_id", "")
     context_text = state.get("context_text", "")
 
     logger.info("[%s] graph_expansion_node: Expanding graph references...", workflow_id)
@@ -543,7 +650,9 @@ async def graph_expansion_node(state: PointerOnlyState) -> Dict[str, Any]:
         batch_start = time.time()
 
         for ref in clause_refs:
-            chains = graph.get_dependency_chains(node_id=ref, max_hops=2)
+            chains = graph.get_dependency_chains(
+                node_id=ref, max_hops=2, workspace_id=str(workspace_id)
+            )
 
             for c in chains:
                 node_id = c.get("node", "")
@@ -1243,9 +1352,12 @@ async def execute_node(state: PointerOnlyState) -> Dict[str, Any]:
         attempt = state.get("retry_count", 0) + 1
 
         # --- SAGA / EXECUTION ENGINE: SHA-256 Idempotency Hashes ---
-        # Rule FR-EXEC-02: Key = SHA-256(workflow_id + action_id + tool_name + attempt_number)
-        raw_key = f"{workflow_id}{task.id}{task.action_type.value}{attempt}"
-        idempotency_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+        idempotency_key = generate_idempotency_key(
+            workflow_id=str(workflow_id),
+            action_id=str(task.id),
+            tool_name=task.action_type.value,
+            attempt_number=attempt,
+        )
 
         # Calculate strict request_hash from payload JSON
         payload_str = json.dumps(task.draft_payload or {}, sort_keys=True)
@@ -1348,8 +1460,10 @@ async def execute_node(state: PointerOnlyState) -> Dict[str, Any]:
 async def compensate_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     SAGA PATTERN: Reverse compensation loop.
-    Iterates backward through the ToolCallLog for the workflow and triggers
-    compensation_action for any NON_IDEMPOTENT tool that requires it.
+
+    Uses the pure ``build_compensation_plan`` function to determine which
+    actions need compensation and in what order, then executes the plan
+    by dispatching each compensating action and updating database state.
     """
     state = _adapt_state(state)
     workflow_id = state["workflow_id"]
@@ -1360,81 +1474,100 @@ async def compensate_node(state: PointerOnlyState) -> Dict[str, Any]:
     )
 
     async with AsyncSessionLocal() as db:
-        # Fetch all SUCCESSFUL tool calls for this workflow, descending order (reverse execution)
+        # Fetch all SUCCESSFUL tool calls for this workflow
         logs_res = await db.execute(
-            select(ToolCallLog)
-            .where(
+            select(ToolCallLog).where(
                 ToolCallLog.workflow_id == wf_uuid,
                 ToolCallLog.status == ToolCallStatus.SUCCESS,
             )
-            .order_by(ToolCallLog.created_at.desc())
         )
         successful_logs = logs_res.scalars().all()
 
-        for log_entry in successful_logs:
-            action_res = await db.execute(
-                select(Action).where(Action.id == log_entry.action_id)
+        # Fetch all associated actions in a single query (avoids N+1)
+        action_ids = [log.action_id for log in successful_logs]
+        actions_res = await db.execute(select(Action).where(Action.id.in_(action_ids)))
+        actions = actions_res.scalars().all()
+
+        # Build lookup maps for the execution phase
+        actions_by_id: dict[str, Action] = {str(a.id): a for a in actions}
+        tool_logs_by_action: dict[str, ToolCallLog] = {
+            str(log.action_id): log for log in successful_logs
+        }
+
+        # Prepare lightweight, DB-free inputs for the pure function
+        tool_entries = [
+            ToolLogEntry(action_id=str(log.action_id), created_at=log.created_at)
+            for log in successful_logs
+        ]
+        action_infos = {
+            str(a.id): ActionInfo(
+                idempotency_class=a.idempotency_class.value,
+                compensation_action=a.compensation_action,
+                compensation_params=a.compensation_params,
             )
-            action = action_res.scalar_one_or_none()
+            for a in actions
+        }
 
-            if not action:
-                continue
+        # Build the compensation plan (pure — no side effects)
+        plan = build_compensation_plan(tool_entries, action_infos)
 
-            if (
-                action.idempotency_class == IdempotencyClass.REQUIRES_COMPENSATION
-                and action.compensation_action
-            ):
+        # Execute the plan (side effects stay here in the node)
+        for action_id_str, compensation_action, compensation_params in plan:
+            action = actions_by_id[action_id_str]
+            log_entry = tool_logs_by_action[action_id_str]
+
+            logger.info(
+                "[%s] Compensating action %s (Tool: %s, Action: %s)",
+                workflow_id,
+                log_entry.id,
+                log_entry.tool_name,
+                compensation_action,
+            )
+
+            try:
+                # In a fully fleshed out system, this would dispatch
+                # `compensation_action` with `compensation_params`.
+                # For now, we simulate the dispatch:
                 logger.info(
-                    "[%s] Compensating action %s (Tool: %s, Action: %s)",
-                    workflow_id,
-                    log_entry.id,
-                    log_entry.tool_name,
-                    action.compensation_action,
+                    "Executing compensation: %s with %s",
+                    compensation_action,
+                    compensation_params,
                 )
 
-                try:
-                    # In a fully fleshed out system, this would dispatch `action.compensation_action` with `action.compensation_params`
-                    # For now, we simulate the dispatch:
-                    logger.info(
-                        "Executing compensation: %s with %s",
-                        action.compensation_action,
-                        action.compensation_params,
-                    )
+                log_entry.status = ToolCallStatus.COMPENSATED
 
-                    log_entry.status = ToolCallStatus.COMPENSATED
+                db.add(
+                    AuditLog(
+                        workflow_id=wf_uuid,
+                        action_id=action.id,
+                        org_id=action.org_id,
+                        event_type="COMPENSATION_EXECUTED",
+                        actor="SYSTEM",
+                        notes=f"Successfully compensated action {action.id} using {compensation_action}.",
+                    )
+                )
+            except Exception as e:
+                logger.error(
+                    "[%s] COMPENSATION FAILED for action %s: %s",
+                    workflow_id,
+                    action.id,
+                    e,
+                )
+                log_entry.status = ToolCallStatus.UNCOMPENSATABLE_FAILURE
 
-                    db.add(
-                        AuditLog(
-                            workflow_id=wf_uuid,
-                            action_id=action.id,
-                            org_id=action.org_id,
-                            event_type="COMPENSATION_EXECUTED",
-                            actor="SYSTEM",
-                            notes=f"Successfully compensated action {action.id} using {action.compensation_action}.",
-                        )
+                # Rule FR-EXEC-03: Log UNCOMPENSATABLE_FAILURE and Halt
+                db.add(
+                    AuditLog(
+                        workflow_id=wf_uuid,
+                        action_id=action.id,
+                        org_id=action.org_id,
+                        event_type="UNCOMPENSATABLE_FAILURE",
+                        actor="SYSTEM",
+                        notes=f"Failed to compensate action {action.id}. Manual admin intervention required. Error: {e}",
                     )
-                except Exception as e:
-                    logger.error(
-                        "[%s] COMPENSATION FAILED for action %s: %s",
-                        workflow_id,
-                        action.id,
-                        e,
-                    )
-                    log_entry.status = ToolCallStatus.UNCOMPENSATABLE_FAILURE
-
-                    # Rule FR-EXEC-03: Log UNCOMPENSATABLE_FAILURE and Halt
-                    db.add(
-                        AuditLog(
-                            workflow_id=wf_uuid,
-                            action_id=action.id,
-                            org_id=action.org_id,
-                            event_type="UNCOMPENSATABLE_FAILURE",
-                            actor="SYSTEM",
-                            notes=f"Failed to compensate action {action.id}. Manual admin intervention required. Error: {e}",
-                        )
-                    )
-                    # Don't throw, we MUST update the db state to FAILED
-                    break
+                )
+                # Don't throw, we MUST update the db state to FAILED
+                break
 
         # SAGA completed (either fully reversed or failed during reverse)
         await db.execute(

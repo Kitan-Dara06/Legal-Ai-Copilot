@@ -1,4 +1,9 @@
-from due_diligence.dummy_db import db_create_session, db_complete_session, db_log_escalation
+from due_diligence.dummy_db import (
+    db_complete_session,
+    db_create_session,
+    db_log_escalation,
+)
+
 """
 FastAPI Routes — Legal Due Diligence Agent (V2)
 ================================================
@@ -24,9 +29,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# --- Auth — direct import (same app as legal_rag) ---
-from app.dependencies import get_supabase_claims
-from app.services.ingestion.embedder import LegalEmbedder
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -39,12 +41,9 @@ from fastapi import (
 )
 from pydantic import BaseModel
 
-    complete_session as db_complete_session,
-)
-    create_session as db_create_session,
-)
-    log_escalation as db_log_escalation,
-)
+# --- Auth — direct import (same app as legal_rag) ---
+from app.dependencies import get_supabase_claims
+from app.services.ingestion.embedder import LegalEmbedder
 
 # --- Local modules ---
 from due_diligence.escalation.triggers import EscalationManager
@@ -87,18 +86,65 @@ except Exception as _e:
     print(f"⚠️  DB schema init failed: {_e}. Will retry on first request.")
 
 # ---------------------------------------------------------------------------
-# Module-level singletons
+# Module-level singletons — lazy-initialised to avoid import-time hangs
 # ---------------------------------------------------------------------------
 
 _embedder: Optional[LegalEmbedder] = None
 _retriever: Optional[HybridRetriever] = None
 _reranker: Optional[LegalCrossEncoder] = None
 _registry = RegistryQueryEngine()
-_decomposer = GoalDecomposer()
-_finding_gen = FindingGenerator()
-_contradiction = ContradictionDetector()
-_escalation_mgr = EscalationManager(confidence_threshold=0.5)
-_graph = DependencyGraph()
+_decomposer = None
+_finding_gen = None
+_contradiction = None
+_escalation_mgr = None
+_graph = None
+
+
+# Only keep lazy getters for modules that still have broken imports
+def _get_decomposer():
+    global _decomposer
+    if _decomposer is None:
+        from due_diligence.planner.decomposer import GoalDecomposer
+
+        _decomposer = GoalDecomposer()
+    return _decomposer
+
+
+def _get_finding_gen():
+    global _finding_gen
+    if _finding_gen is None:
+        from due_diligence.synthesis.finding_generator import FindingGenerator
+
+        _finding_gen = FindingGenerator()
+    return _finding_gen
+
+
+def _get_contradiction():
+    global _contradiction
+    if _contradiction is None:
+        from due_diligence.intelligence.contradiction import ContradictionDetector
+
+        _contradiction = ContradictionDetector()
+    return _contradiction
+
+
+def _get_escalation_mgr():
+    global _escalation_mgr
+    if _escalation_mgr is None:
+        from due_diligence.escalation.triggers import EscalationManager
+
+        _escalation_mgr = EscalationManager(confidence_threshold=0.5)
+    return _escalation_mgr
+
+
+def _get_graph():
+    global _graph
+    if _graph is None:
+        from due_diligence.intelligence.graph import DependencyGraph
+
+        _graph = DependencyGraph()
+    return _graph
+
 
 # --- In-memory job store for async ingest ---
 _jobs: Dict[str, Dict] = {}
@@ -148,7 +194,9 @@ class QueryRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _run_ingest(job_id: str, tmp_path: str, doc_name: str, suffix: str):
+async def _run_ingest(
+    job_id: str, tmp_path: str, doc_name: str, suffix: str, workspace_id: str = ""
+):
     """
     Full ingestion pipeline run as a background task.
     Updates _jobs[job_id] at each stage.
@@ -174,17 +222,20 @@ async def _run_ingest(job_id: str, tmp_path: str, doc_name: str, suffix: str):
         chunks = chunker.build_chunks(raw_blocks)
 
         await _set("extracting_terms", 45)
+
         extractor = DefinedTermExtractor()
         extractor.extract_and_store(chunks, document_name=doc_name)
 
         await _set("parsing_references", 60)
         ref_parser = LLMReferenceParser()
         enriched_chunks = ref_parser.resolve_references(
-            chunks, doc_name=doc_name, graph=_graph
+            chunks, doc_name=doc_name, graph=_get_graph(), workspace_id=workspace_id
         )
 
         await _set("building_graph", 70)
-        _graph.build_graph(enriched_chunks, doc_name=doc_name)
+        _get_graph().build_graph(
+            enriched_chunks, doc_name=doc_name, workspace_id=workspace_id
+        )
 
         await _set("embedding", 80)
         embedder = _get_embedder()
@@ -203,7 +254,7 @@ async def _run_ingest(job_id: str, tmp_path: str, doc_name: str, suffix: str):
                         document_name=d["document"],
                         hierarchy_path=d["path"],
                     )
-                    for d in defs
+                    for d in term_data.get("definitions", [])
                 ],
             )
             for term, defs in conflicts_raw.items()
@@ -288,7 +339,11 @@ async def ingest_document(
             "error": None,
         }
 
-    background_tasks.add_task(_run_ingest, job_id, tmp_path, file.filename, suffix)
+    # Extract workspace_id from Supabase claims for tenant isolation
+    workspace_id = str(_claims.get("workspace_id", ""))
+    background_tasks.add_task(
+        _run_ingest, job_id, tmp_path, file.filename, suffix, workspace_id
+    )
     return {"job_id": job_id, "status": "queued", "document_name": file.filename}
 
 
@@ -338,9 +393,6 @@ async def get_conflicts(_claims: dict = Depends(get_supabase_claims)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # POST /query — legacy single-shot endpoint (unchanged, backward compat)
 # ---------------------------------------------------------------------------
@@ -358,8 +410,8 @@ async def process_legal_query(
         vector_hits = retriever.search(req.query, limit=5)
         ranked_nodes = _get_reranker().rerank(req.query, vector_hits, top_k=3)
 
-        escalations = _escalation_mgr.check_for_escalations(ranked_nodes)
-        contradiction = _contradiction.analyze(ranked_nodes)
+        escalations = _get_escalation_mgr().check_for_escalations(ranked_nodes)
+        contradiction = _get_contradiction().analyze(ranked_nodes)
         if contradiction:
             escalations.append(contradiction)
 

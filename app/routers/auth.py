@@ -25,7 +25,16 @@ from app.dependencies import (
     get_supabase_claims,
     hash_api_key,
 )
-from app.models import ApiKey, Invite, Organization, User, UserOrgMembership, UserRole
+from app.models import (
+    ApiKey,
+    IntelligenceStatus,
+    Invite,
+    Organization,
+    User,
+    UserOrgMembership,
+    UserRole,
+    Workspace,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -91,7 +100,7 @@ logger = logging.getLogger(__name__)
 async def check_org(
     request: Request,
     org_id: str = Query(..., min_length=3, max_length=50),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Checks if an organization slug is available before proceeding with user signup.
@@ -312,7 +321,10 @@ async def setup_org(
         logger.info("[setup_org] Linking new org to existing user_by_sub")
         user = user_by_sub
     elif user_by_email:
-        logger.warning("[AUDIT_LOG] SECURITY_NOTICE: Linking new org to existing user via email fallback (user_by_email). Sub mismatch or migration edge case. email=%s", email)
+        logger.warning(
+            "[AUDIT_LOG] SECURITY_NOTICE: Linking new org to existing user via email fallback (user_by_email). Sub mismatch or migration edge case. email=%s",
+            email,
+        )
         user = user_by_email
     else:
         logger.info("[setup_org] Creating entirely new local user record")
@@ -329,6 +341,14 @@ async def setup_org(
         db.add(
             UserOrgMembership(user_id=user.id, org_id=new_org.id, role=UserRole.ADMIN)
         )
+        # Create a default workspace
+        default_workspace = Workspace(
+            org_id=new_org.id,
+            name="Default Workspace",
+            description="Default workspace created during setup",
+            intelligence_status=IntelligenceStatus.PENDING,
+        )
+        db.add(default_workspace)
         await db.commit()
         await db.refresh(user)
         return {
@@ -347,6 +367,14 @@ async def setup_org(
     await db.flush()
     logger.info("[setup_org] Updated user record with new org_id=%s", new_org.id)
     db.add(UserOrgMembership(user_id=user.id, org_id=new_org.id, role=UserRole.ADMIN))
+    # Create a default workspace
+    default_workspace = Workspace(
+        org_id=new_org.id,
+        name="Default Workspace",
+        description="Default workspace created during setup",
+        intelligence_status=IntelligenceStatus.PENDING,
+    )
+    db.add(default_workspace)
     await db.commit()
     await db.refresh(user)
 
@@ -358,7 +386,6 @@ async def setup_org(
         "email": user.email,
         "app_role": user.role.value,
     }
-
 
 
 @router.post("/invite")
@@ -418,9 +445,10 @@ async def invite_user_by_email(
         )
 
     import hashlib
+
     invite_token = secrets.token_urlsafe(32)
     hashed_token = hashlib.sha256(invite_token.encode("utf-8")).hexdigest()
-    
+
     new_invite = Invite(
         email=payload.email,
         org_id=ctx.org_id,
@@ -479,6 +507,7 @@ async def invite_info(
     Public: returns invite details for a token so the frontend can show "Invited to join org X".
     """
     import hashlib
+
     hashed_token = hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     stmt = select(Invite).where(
@@ -503,6 +532,7 @@ async def accept_invite_by_token(
     Invite email must match the logged-in user's email.
     """
     import hashlib
+
     hashed_token = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
 
     stmt = select(Invite).where(
@@ -542,6 +572,7 @@ async def accept_invite(
     Consumes an invite token, creates a MEMBER user, and issues an API key.
     """
     import hashlib
+
     hashed_token = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
 
     stmt = select(Invite).where(
@@ -756,7 +787,6 @@ async def logout():
     for cookie in cookies_to_clear:
         response.delete_cookie(cookie)
     return response
-
 
 
 @router.get("/my-orgs")

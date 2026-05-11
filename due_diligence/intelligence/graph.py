@@ -11,7 +11,7 @@ Changes from the old implementation:
   - `link_cross_doc_ref` creates REFERENCES edges across document boundaries
 
 Node schema:
-  (:Clause {id: str, doc: str, text: str})
+  (:Clause {id: str, doc: str, workspace_id: str, text: str})
 
 Edge schema:
   (:Clause)-[:REFERENCES {edge_type: str}]->(:Clause)
@@ -20,8 +20,8 @@ Edge schema:
 import os
 from typing import Dict, List, Optional
 
-from neo4j import GraphDatabase, Driver
 from dotenv import load_dotenv
+from neo4j import Driver, GraphDatabase
 
 load_dotenv()
 
@@ -29,9 +29,7 @@ load_dotenv()
 def _get_driver() -> Driver:
     neo4j_uri = (os.environ.get("NEO4J_URI") or "").strip()
     neo4j_user = (
-        os.environ.get("NEO4J_USERNAME")
-        or os.environ.get("NEO4J_USER")
-        or "neo4j"
+        os.environ.get("NEO4J_USERNAME") or os.environ.get("NEO4J_USER") or "neo4j"
     ).strip()
     neo4j_pass = (os.environ.get("NEO4J_PASSWORD") or "").strip()
     if not neo4j_uri:
@@ -73,7 +71,7 @@ class DependencyGraph:
         with self._driver.session() as session:
             session.run(
                 "CREATE CONSTRAINT clause_unique IF NOT EXISTS "
-                "FOR (c:Clause) REQUIRE (c.id, c.doc) IS UNIQUE"
+                "FOR (c:Clause) REQUIRE (c.id, c.doc, c.workspace_id) IS UNIQUE"
             )
 
     def close(self):
@@ -84,7 +82,12 @@ class DependencyGraph:
     # Build graph (additive — call once per ingested document)
     # ------------------------------------------------------------------
 
-    def build_graph(self, enriched_chunks: List[Dict], doc_name: str = ""):
+    def build_graph(
+        self,
+        enriched_chunks: List[Dict],
+        doc_name: str = "",
+        workspace_id: str = "",
+    ):
         """
         MERGE clause nodes and intra-document REFERENCES edges.
         Safe to call multiple times — MERGE prevents duplicates.
@@ -101,21 +104,27 @@ class DependencyGraph:
                 # Upsert clause node
                 session.run(
                     """
-                    MERGE (c:Clause {id: $id, doc: $doc})
+                    MERGE (c:Clause {id: $id, doc: $doc, workspace_id: $workspace_id})
                     SET c.text = $text
                     """,
-                    id=node_id, doc=doc, text=text,
+                    id=node_id,
+                    doc=doc,
+                    workspace_id=workspace_id,
+                    text=text,
                 )
 
                 # Intra-document dependency edges
                 for dep in chunk.get("dependencies_clauses", []):
                     session.run(
                         """
-                        MERGE (src:Clause {id: $src_id, doc: $doc})
-                        MERGE (tgt:Clause {id: $tgt_id, doc: $doc})
+                        MERGE (src:Clause {id: $src_id, doc: $doc, workspace_id: $workspace_id})
+                        MERGE (tgt:Clause {id: $tgt_id, doc: $doc, workspace_id: $workspace_id})
                         MERGE (src)-[:REFERENCES {edge_type: 'intra_doc'}]->(tgt)
                         """,
-                        src_id=node_id, tgt_id=dep, doc=doc,
+                        src_id=node_id,
+                        tgt_id=dep,
+                        doc=doc,
+                        workspace_id=workspace_id,
                     )
 
         print(f"[Graph] Merged clauses from '{doc_name}' into Neo4j graph.")
@@ -131,6 +140,7 @@ class DependencyGraph:
         to_node_id: str,
         to_doc: str,
         edge_type: str = "cross_doc",
+        workspace_id: str = "",
     ):
         """
         Creates a REFERENCES edge across two documents.
@@ -141,20 +151,28 @@ class DependencyGraph:
         with self._driver.session() as session:
             session.run(
                 """
-                MERGE (src:Clause {id: $from_id, doc: $from_doc})
-                MERGE (tgt:Clause {id: $to_id, doc: $to_doc})
+                MERGE (src:Clause {id: $from_id, doc: $from_doc, workspace_id: $workspace_id})
+                MERGE (tgt:Clause {id: $to_id, doc: $to_doc, workspace_id: $workspace_id})
                 MERGE (src)-[:REFERENCES {edge_type: $edge_type}]->(tgt)
                 """,
-                from_id=from_node_id, from_doc=from_doc,
-                to_id=to_node_id, to_doc=to_doc,
+                from_id=from_node_id,
+                from_doc=from_doc,
+                to_id=to_node_id,
+                to_doc=to_doc,
                 edge_type=edge_type,
+                workspace_id=workspace_id,
             )
 
     # ------------------------------------------------------------------
     # Query: dependency chains (Cypher BFS up to 5 hops)
     # ------------------------------------------------------------------
 
-    def get_dependency_chains(self, node_id: str, max_hops: int = 5) -> List[Dict]:
+    def get_dependency_chains(
+        self,
+        node_id: str,
+        max_hops: int = 2,
+        workspace_id: str = "",
+    ) -> List[Dict]:
         """
         Returns the target node and all clauses it directly or indirectly
         references (up to max_hops), across document boundaries.
@@ -167,11 +185,14 @@ class DependencyGraph:
         with self._driver.session() as session:
             result = session.run(
                 """
-                MATCH (start:Clause {id: $id})
+                MATCH (start:Clause {id: $id, workspace_id: $workspace_id})
                 OPTIONAL MATCH path = (start)-[:REFERENCES*0..$hops]->(dep:Clause)
+                WHERE dep.workspace_id = $workspace_id
                 RETURN DISTINCT dep.id AS node, dep.text AS text, dep.doc AS source_document
                 """,
-                id=node_id, hops=max_hops,
+                id=node_id,
+                hops=max_hops,
+                workspace_id=workspace_id,
             )
             records = result.data()
 
@@ -181,11 +202,13 @@ class DependencyGraph:
         for r in records:
             if r.get("node") and r["node"] not in seen:
                 seen.add(r["node"])
-                chain.append({
-                    "node": r["node"],
-                    "text": r.get("text", ""),
-                    "source_document": r.get("source_document", "Unknown"),
-                })
+                chain.append(
+                    {
+                        "node": r["node"],
+                        "text": r.get("text", ""),
+                        "source_document": r.get("source_document", "Unknown"),
+                    }
+                )
         return chain
 
     # ------------------------------------------------------------------

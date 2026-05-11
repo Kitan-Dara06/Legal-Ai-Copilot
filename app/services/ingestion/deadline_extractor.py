@@ -29,7 +29,7 @@ from app.models import (
     DeadlineStatus,
     ObligationType,
 )
-from app.redis_client import acquire_llm_slot, release_llm_slot
+from app.redis_client import acquire_llm_slot, create_redis_pool, release_llm_slot
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Relative date resolution helpers
@@ -276,14 +276,15 @@ Examples:
 Text:
 {combined_text[:6000]}
 """
+        _redis = create_redis_pool()
         lease_id = None
-        while True:
-            lease_id = await acquire_llm_slot(str(org_id), max_slots=5)
-            if lease_id:
-                break
-            await asyncio.sleep(0.5)
-
         try:
+            while True:
+                lease_id = await acquire_llm_slot(str(org_id), _redis, max_slots=5)
+                if lease_id:
+                    break
+                await asyncio.sleep(0.5)
+
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
@@ -303,7 +304,8 @@ Text:
             print(f"  [deadline_extractor] Execution date extraction failed: {e}")
         finally:
             if lease_id:
-                await release_llm_slot(str(org_id), lease_id)
+                await release_llm_slot(str(org_id), lease_id, _redis)
+            await _redis.aclose()
 
         return None
 
@@ -377,14 +379,15 @@ Text: {text}
 """
 
             # Acquire token bucket lease
+            _redis = create_redis_pool()
             lease_id = None
-            while True:
-                lease_id = await acquire_llm_slot(str(org_id), max_slots=5)
-                if lease_id:
-                    break
-                await asyncio.sleep(0.5)
-
             try:
+                while True:
+                    lease_id = await acquire_llm_slot(str(org_id), _redis, max_slots=5)
+                    if lease_id:
+                        break
+                    await asyncio.sleep(0.5)
+
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
@@ -465,7 +468,8 @@ Text: {text}
                 traceback.print_exc()
             finally:
                 if lease_id:
-                    await release_llm_slot(str(org_id), lease_id)
+                    await release_llm_slot(str(org_id), lease_id, _redis)
+                await _redis.aclose()
 
         async with AsyncSessionLocal() as db:
             await asyncio.gather(*(process_chunk(chunk, db) for chunk in chunks))

@@ -29,7 +29,7 @@ def run_integration_test():
         },
     ]
     kg = DependencyGraph()
-    kg.build_graph(simulated_chunks)
+    kg.build_graph(simulated_chunks, workspace_id="test_workspace")
 
     # 2. STAND UP THE LOCAL REGISTRY
     print("\n[STEP 2] Initializing SQLite Terms Registry...")
@@ -68,7 +68,9 @@ def run_integration_test():
     print(
         "\n--> [Action A] Querying Graph for 'Article II > Termination' dependencies..."
     )
-    chain = kg.get_dependency_chains("Article II > Termination")
+    chain = kg.get_dependency_chains(
+        "Article II > Termination", workspace_id="test_workspace"
+    )
     for item in chain:
         print(f"    - [{item.get('node_id')}]: {item.get('text')}")
 
