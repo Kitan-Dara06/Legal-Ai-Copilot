@@ -1,0 +1,34 @@
+Section 1.1: Definitions
+
+For the purposes of this Agreement, the following definitions shall apply:
+"Intellectual Property" means all intellectual property rights, including but not limited to patents, trademarks, copyrights, trade secrets, and any other proprietary rights, whether registered or unregistered, and all applications, renewals, and extensions thereof.
+"Work Product" means all deliverables, materials, and works created, developed, or provided by Contractor in connection with the performance of the Services under this Agreement.
+"Pre-Existing Tools" means all tools, software, and other materials owned or licensed by Contractor prior to the commencement of this Agreement, which are used by Contractor in the performance of the Services.
+
+Section 1.2: Ownership of Work Product
+
+The parties agree that all Work Product created, developed, or provided by Contractor in connection with the performance of the Services under this Agreement shall be considered "works made for hire" under the United States Copyright Act, as amended. As such, Client shall own all right, title, and interest in and to the Work Product, including but not limited to all Intellectual Property rights therein. To the extent that any Work Product does not qualify as a "work made for hire" under the United States Copyright Act, as amended, Contractor hereby assigns to Client all right, title, and interest in and to such Work Product, including but not limited to all Intellectual Property rights therein.
+
+Section 1.3: Pre-Existing Tools
+
+Notwithstanding the provisions of Section 1.2, Contractor retains all right, title, and interest in and to the Pre-Existing Tools, including but not limited to all Intellectual Property rights therein. Client acknowledges that the Pre-Existing Tools are the sole property of Contractor and that Client does not acquire any ownership rights or interests in the Pre-Existing Tools by virtue of this Agreement.
+
+Section 1.4: License to Pre-Existing Tools
+
+Contractor hereby grants to Client a non-exclusive, non-transferable, royalty-free license to use the Pre-Existing Tools solely for the purpose of using the Work Product and for no other purpose. The license granted under this Section 1.4 shall commence on the date of this Agreement and shall continue for as long as Client uses the Work Product. Client shall not sublicense, assign, or transfer the license granted under this Section 1.4 to any third party without the prior written consent of Contractor.
+
+Section 1.5: Restrictions on Use of Pre-Existing Tools
+
+Client shall not, and shall not permit any third party to, (i) modify, alter, or enhance the Pre-Existing Tools; (ii) reverse engineer, disassemble, or decompile the Pre-Existing Tools; (iii) create derivative works based on the Pre-Existing Tools; or (iv) use the Pre-Existing Tools for any purpose other than as expressly permitted under this Agreement.
+
+Section 1.6: Warranty and Indemnification
+
+Contractor represents and warrants that it has the right to grant the license to the Pre-Existing Tools under Section 1.4 and that the use of the Pre-Existing Tools by Client shall not infringe the Intellectual Property rights of any third party. Contractor shall indemnify, defend, and hold harmless Client against any claims, damages, losses, and expenses arising from or related to any breach of the representation and warranty made under this Section 1.6.
+
+Section 1.7: Governing Law
+
+This Agreement shall be governed by and construed in accordance with the laws of the [State/Country], without giving effect to any principles of conflicts of law. Any dispute arising out of or related to this Agreement shall be resolved through [Dispute Resolution Process], in accordance with the rules of the [Arbitration Institution], as amended from time to time.
+
+Section 1.8: Entire Agreement
+
+This Agreement constitutes the entire agreement between the parties with respect to the subject matter hereof and supersedes all prior or contemporaneous agreements, understandings, and communications, whether written or oral. This Agreement may not be amended or modified except in writing signed by both parties.

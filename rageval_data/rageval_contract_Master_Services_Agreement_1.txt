@@ -1,0 +1,31 @@
+**INTELLECTUAL PROPERTY OWNERSHIP**
+
+Section 1.1 **Definition of Intellectual Property**
+For the purposes of this Agreement, "Intellectual Property" means all intellectual property rights, including but not limited to, patents, patent applications, trademarks, trademark applications, copyrights, trade secrets, and any other proprietary rights, whether registered or unregistered.
+
+Section 1.2 **Work-for-Hire**
+The parties agree that all work product created by Contractor in connection with the provision of services under this Agreement ("Work Product") shall be considered a "work-for-hire" as defined under applicable copyright law. As such, Client shall be deemed the sole owner of all right, title, and interest in and to the Work Product, including but not limited to, all Intellectual Property rights therein.
+
+Section 1.3 **Pre-Existing Tools and Materials**
+Notwithstanding the foregoing, Contractor retains all right, title, and interest in and to any pre-existing tools, software, methodologies, and other materials ("Pre-Existing Tools") that Contractor uses in the provision of services under this Agreement. Client acknowledges that Contractor's Pre-Existing Tools are valuable intellectual property of Contractor and are not being transferred to Client as part of this Agreement.
+
+Section 1.4 **License to Pre-Existing Tools**
+Contractor hereby grants to Client a non-exclusive, non-transferable, royalty-free license to use the Pre-Existing Tools solely for the purpose of utilizing the Work Product and for no other purpose. Client shall not use the Pre-Existing Tools for any purpose other than as expressly permitted herein, and shall not modify, reverse engineer, or attempt to derive the source code of the Pre-Existing Tools.
+
+Section 1.5 **Reservation of Rights**
+Contractor reserves all rights not expressly granted to Client under this Agreement. Nothing in this Agreement shall be deemed to convey or transfer any rights in and to the Pre-Existing Tools, except as specifically licensed herein. Client acknowledges that Contractor's Pre-Existing Tools are proprietary to Contractor and contain valuable trade secrets and other confidential information.
+
+Section 1.6 **No Implied Licenses**
+No licenses or other rights shall be implied under this Agreement, and all rights not expressly granted to Client are reserved by Contractor. Client shall not use any of Contractor's Pre-Existing Tools or other intellectual property for any purpose other than as specifically permitted under this Agreement.
+
+Section 1.7 **Protection of Intellectual Property**
+Both parties agree to take all reasonable steps to protect the other party's Intellectual Property, including but not limited to, the Pre-Existing Tools and Work Product. Neither party shall disclose, reproduce, or distribute the other party's Intellectual Property without the prior written consent of the other party, except as specifically permitted under this Agreement.
+
+Section 1.8 **Infringement Claims**
+In the event that Client becomes aware of any actual or potential infringement of any Intellectual Property rights of Contractor, including but not limited to, the Pre-Existing Tools, Client shall promptly notify Contractor in writing and shall cooperate with Contractor in any reasonable manner to protect such Intellectual Property rights.
+
+Section 1.9 **Governing Law**
+This Agreement shall be governed by and construed in accordance with the laws of [STATE/PROVINCE], without giving effect to any principles of conflicts of law. Any disputes arising out of or related to this Agreement shall be resolved through [DISPUTE RESOLUTION PROCESS], in accordance with the laws of [STATE/PROVINCE].
+
+Section 1.10 **Entire Agreement**
+This Agreement constitutes the entire understanding between the parties with respect to the subject matter hereof and supersedes all prior or contemporaneous agreements, whether written or oral. This Agreement may not be amended or modified except in writing signed by both parties.

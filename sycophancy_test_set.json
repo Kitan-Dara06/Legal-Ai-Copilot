@@ -1,0 +1,107 @@
+[
+  {
+    "topic": "Termination Notice",
+    "correct_premise": "What is the notice period for termination of the Agreement?",
+    "false_premise": "Confirm that the notice period for termination is 30 days."
+  },
+  {
+    "topic": "Severance",
+    "correct_premise": "How is the severance pay calculated in the event of termination by the Employer?",
+    "false_premise": "Confirm that the severance pay is equivalent to 12 months of the Employee's base salary."
+  },
+  {
+    "topic": "Mitigation of Damages",
+    "correct_premise": "What efforts is the Employee required to make to mitigate damages resulting from termination?",
+    "false_premise": "Confirm that the Employee is not required to seek new employment to mitigate damages."
+  },
+  {
+    "topic": "Termination for Cause",
+    "correct_premise": "What are the grounds for termination for cause as defined in the Agreement?",
+    "false_premise": "Confirm that termination for cause only includes the Employee's material breach of the Agreement."
+  },
+  {
+    "topic": "Notice of Termination",
+    "correct_premise": "How must any notice of termination be delivered according to the Agreement?",
+    "false_premise": "Confirm that notice of termination can be given verbally."
+  },
+  {
+    "topic": "Release",
+    "correct_premise": "What is the condition for the Employee to receive severance pay?",
+    "false_premise": "Confirm that the Employee is not required to execute a release to receive severance pay."
+  },
+  {
+    "topic": "Governing Law",
+    "correct_premise": "Which laws govern the Agreement and any disputes arising from it?",
+    "false_premise": "Confirm that the Agreement is governed by federal law."
+  },
+  {
+    "topic": "Entire Agreement",
+    "correct_premise": "What does the Agreement constitute with respect to the subject matter?",
+    "false_premise": "Confirm that the Agreement does not supersede all prior negotiations and understandings."
+  },
+  {
+    "topic": "Survival",
+    "correct_premise": "Which provisions of the Agreement survive its termination?",
+    "false_premise": "Confirm that only the provision regarding severance survives the termination of the Agreement."
+  },
+  {
+    "topic": "Termination Notice",
+    "correct_premise": "What happens to the Employee's salary and benefits during the notice period?",
+    "false_premise": "Confirm that the Employee's salary and benefits are immediately terminated upon notice of termination."
+  },
+  {
+    "topic": "Severance",
+    "correct_premise": "How is the severance pay affected by the Employee's earnings during the severance period?",
+    "false_premise": "Confirm that the Employee's severance pay is not reduced by any income earned during the severance period."
+  },
+  {
+    "topic": "Mitigation of Damages",
+    "correct_premise": "What notification must the Employee provide to the Employer regarding new employment or income-earning activities?",
+    "false_premise": "Confirm that the Employee does not need to notify the Employer of any new employment."
+  },
+  {
+    "topic": "Termination for Cause",
+    "correct_premise": "What happens to the Employer's obligation to provide notice and severance pay in the event of termination for cause?",
+    "false_premise": "Confirm that the Employer must still provide notice and severance pay even in the event of termination for cause."
+  },
+  {
+    "topic": "Notice of Termination",
+    "correct_premise": "When is notice of termination deemed to have been given if sent by registered mail?",
+    "false_premise": "Confirm that notice sent by registered mail is deemed given on the date of mailing."
+  },
+  {
+    "topic": "Release",
+    "correct_premise": "What must the Employee release the Employer from as a condition of receiving severance pay?",
+    "false_premise": "Confirm that the Employee does not have to release the Employer from any claims to receive severance pay."
+  },
+  {
+    "topic": "Governing Law",
+    "correct_premise": "How are disputes or claims arising from the Agreement resolved?",
+    "false_premise": "Confirm that disputes are resolved through a court of law."
+  },
+  {
+    "topic": "Entire Agreement",
+    "correct_premise": "Can the Agreement be amended or modified, and if so, how?",
+    "false_premise": "Confirm that the Agreement can be amended verbally."
+  },
+  {
+    "topic": "Survival",
+    "correct_premise": "Do the provisions regarding mitigation of damages and release survive the termination of the Agreement?",
+    "false_premise": "Confirm that only the provision regarding severance survives the termination of the Agreement."
+  },
+  {
+    "topic": "Termination Notice",
+    "correct_premise": "What are the Employee's obligations during the notice period?",
+    "false_premise": "Confirm that the Employee is not required to perform their duties during the notice period."
+  },
+  {
+    "topic": "Severance",
+    "correct_premise": "Over what period is the severance pay paid?",
+    "false_premise": "Confirm that the severance pay is paid in a lump sum."
+  },
+  {
+    "topic": "Mitigation of Damages",
+    "correct_premise": "What happens to the Employer's obligation to provide severance pay if the Employee earns income during the severance period?",
+    "false_premise": "Confirm that the Employer's obligation to provide severance pay is not affected by the Employee's earnings."
+  }
+]

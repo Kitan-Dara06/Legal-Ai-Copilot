@@ -1,0 +1,202 @@
+[
+    {
+        "question": "What is the annual interest rate applied to unpaid amounts due to me under this agreement?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Am I required to seek other employment to mitigate the amount payable to me under this paragraph?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Is my employer's obligation to pay me compensation under this agreement absolute and unconditional?",
+        "ground_truth": ""
+    },
+    {
+        "question": "How are my legal fees and expenses reimbursed in the event of a lawsuit related to this agreement?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Are payments made to me by my employer under this paragraph subject to recovery or setoff for any reason?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What benefits am I entitled to receive for 12 months following the termination of my employment agreement?",
+        "ground_truth": ""
+    },
+    {
+        "question": "How is my bonus payment determined if I terminate my employment without cause?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What happens to my automobile allowance if I become entitled to similar benefits from another employer within 12 months of termination?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Am I eligible to receive a prorated portion of my bonus if my employment is terminated due to death or long-term disability?",
+        "ground_truth": ""
+    },
+    {
+        "question": "How is the notice period for termination of my employment agreement determined?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What benefits will I be eligible for if my employment is terminated without cause?",
+        "ground_truth": ""
+    },
+    {
+        "question": "How will my bonus be calculated if I terminate my employment voluntarily?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What happens to my automobile allowance if I become entitled to similar benefits from another employer within 12 months of termination?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Will I be entitled to receive any compensation or benefits if my employment is terminated due to death or long-term disability?",
+        "ground_truth": ""
+    },
+    {
+        "question": "How will my bonus be paid if I am still employed at the end of the fiscal year but my employment is terminated before the bonus is paid?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What is the annual interest rate applied to unpaid amounts due to me under this agreement?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Am I required to seek other employment to mitigate the amount payable to me under this Paragraph?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Is my employer's obligation to pay me compensation under this agreement absolute and unconditional?",
+        "ground_truth": ""
+    },
+    {
+        "question": "How will my legal fees and expenses be paid if I need to enforce my rights under this Paragraph?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Can my employer set off or counterclaim against any amounts payable to me under this agreement?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What are the restrictions on my conduct after I cease to be employed by the Company?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Can I provide competitive services or products to clients I had a business relationship with before my employment with the Company?",
+        "ground_truth": ""
+    },
+    {
+        "question": "How does the duration of my employment with the Company affect the time period of the competitive restrictions?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Am I allowed to seek or accept employment with a competing entity after my employment with the Company is terminated?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Are there any exceptions to the non-solicitation restrictions for clients or prospective clients I was involved with during my employment?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Who does the Executive report to in the performance of their duties?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Am I entitled to additional compensation for serving in additional positions or offices within the company?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What happens to my positions as an officer or director of the company if my employment is terminated?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Is the company required to indemnify me against any claims or liabilities incurred while serving as an officer or director?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Do I need to provide separate notice or take any additional steps to resign from any offices or directorships I hold upon termination of my employment?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What happens to my benefits if I breach certain provisions of my employment agreement?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What kind of information is considered Confidential Information under my employment contract?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Do I have to sign a release of claims in favor of the company to receive certain benefits?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What are the consequences of disclosing Confidential Information obtained during my employment?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Are my benefits conditional on the expiration of any revocation period provided for in a release of claims?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What are the restrictions on soliciting customers after termination of employment?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Can I hire employees from my previous company after I leave?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What remedies are available to the company in case of a breach of the non-solicitation agreement?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Is the company entitled to seek an injunction in case of a threatened breach of the non-solicitation agreement?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What constitutes interference with the business or accounts of the company under the employment agreement?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What is the maximum enforceable period for the restrictive covenants in my contract?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Can my employer seek injunctive relief if I breach the restrictive covenants in my agreement?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Are the restrictive covenants in my contract limited to a specific range of activities?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Can my employer require me to pay back any compensation I received as a result of breaching the restrictive covenants?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Do I have the right to assert that monetary damages are sufficient relief in the event of a breach of the restrictive covenants?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What is considered a 'Client' for the purposes of my non-solicitation obligations?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Can I solicit prospective clients that were referred to the company during my employment?",
+        "ground_truth": ""
+    },
+    {
+        "question": "What types of information are considered 'Confidential Information' that I am obligated to protect?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Do I need written authorization from the company to invite a client to obtain a competitive service from a third party?",
+        "ground_truth": ""
+    },
+    {
+        "question": "Are social security numbers or other government-issued identification numbers of clients considered 'Confidential Information'?",
+        "ground_truth": ""
+    }
+]
