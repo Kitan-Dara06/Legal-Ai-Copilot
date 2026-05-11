@@ -7,6 +7,7 @@ import { uploadDocument } from "@/lib/api";
 import { createGoal, getGoalStatus, listGoals } from "@/lib/api";
 import { WorkspaceDetailResponse, WorkspaceDocument } from "@/lib/types";
 import { Card } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { AmbiguityGate } from "@/components/workspace/AmbiguityGate";
 import { AnalyzeResult } from "@/components/workspace/AnalyzeResult";
