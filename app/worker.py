@@ -9,6 +9,8 @@ import logging
 import os
 
 import sentry_sdk
+
+logger = logging.getLogger(__name__)
 from celery import Celery
 from celery.schedules import crontab
 from celery.signals import worker_process_init
@@ -42,6 +44,7 @@ celery_app.conf.update(
     broker_transport_options={
         "connect_timeout": 30,
         "socket_timeout": 30,
+        "failover_strategy": "shuffle",
     },
     # Timezone
     timezone="UTC",

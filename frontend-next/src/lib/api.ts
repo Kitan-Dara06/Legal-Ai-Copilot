@@ -355,10 +355,10 @@ export function listGoals(
   workspaceId: string,
   orgSlug?: string,
 ) {
-  return apiFetch<GoalSummary[]>(`/workspaces/${workspaceId}/goals`, {
-    token,
-    orgSlug,
-  });
+  return apiFetch<{ goals: GoalSummary[]; total: number }>(
+    `/workspaces/${workspaceId}/goals`,
+    { token, orgSlug },
+  );
 }
 
 export function getGoalStatus(

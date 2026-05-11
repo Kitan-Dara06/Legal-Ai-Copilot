@@ -14,6 +14,7 @@ import {
   getMe,
   listWorkspaces,
   getWorkspace,
+  createWorkspace,
   createGoal,
   getGoalStatus,
   getGoalResult,
@@ -187,8 +188,20 @@ export default function ChatPage() {
           const ws = workspaces[0];
           setWorkspaceId(ws.workspace_id);
           setWorkspaceName(ws.name);
-        } else {
-          console.warn("[ChatPage] No workspaces found for this org");
+        } else if (token && user?.org_slug) {
+          // No workspaces exist — create a default one
+          console.warn("[ChatPage] No workspaces found, creating default...");
+          createWorkspace(token, "Default Workspace", undefined, user.org_slug)
+            .then((ws) => {
+              setWorkspaceId(ws.workspace_id);
+              setWorkspaceName(ws.name);
+            })
+            .catch((err) =>
+              console.error(
+                "[ChatPage] Failed to create default workspace:",
+                err,
+              ),
+            );
         }
       })
       .catch(console.error);
@@ -219,13 +232,15 @@ export default function ChatPage() {
 
     listGoals(token, workspaceId, orgSlug)
       .then((goalList) => {
-        const msgs: GoalMessage[] = (goalList || []).map((g: GoalSummary) => ({
-          id: g.id,
-          goal_text: g.goal_text,
-          status: g.status,
-          intent: g.intent,
-          created_at: g.created_at,
-        }));
+        const msgs: GoalMessage[] = ((goalList && goalList.goals) || []).map(
+          (g: GoalSummary) => ({
+            id: g.id,
+            goal_text: g.goal_text,
+            status: g.status,
+            intent: g.intent,
+            created_at: g.created_at,
+          }),
+        );
         setGoals(msgs);
       })
       .catch(console.error);

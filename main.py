@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
         # Verify connectivity with a short timeout to avoid blocking startup
         import asyncio
 
-        await asyncio.wait_for(app.state.redis.ping(), timeout=3.0)
+        await asyncio.wait_for(app.state.redis.ping(), timeout=10.0)
         print("✅ Redis pool initialised.")
     except Exception as e:
         print(f"⚠️  Redis init failed — app will degrade: {e}")

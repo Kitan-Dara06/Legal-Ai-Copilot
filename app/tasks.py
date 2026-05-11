@@ -61,6 +61,7 @@ def tasks_smoke_check(*, include_gemini: bool = False) -> dict:
         DependencyGraph,
         LLMReferenceParser,
     )  # noqa: F401
+    from app.services.ingestion.parser import LegalDocumentParser  # noqa: F401
 
     # A tiny instantiation “touch” catches missing model downloads / init errors.
     _ = LegalDocumentParser()

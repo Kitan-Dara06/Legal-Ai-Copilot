@@ -55,7 +55,7 @@ def create_redis_pool() -> aioredis.Redis:
         build_redis_url(),
         decode_responses=True,
         health_check_interval=30,
-        socket_connect_timeout=3,
+        socket_connect_timeout=10,
     )
 
 
