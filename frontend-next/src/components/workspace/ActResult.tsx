@@ -143,7 +143,7 @@ export function ActResult({
 
       {/* Approve / Reject */}
       <div className="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-slate-700">
-        <Button variant="secondary" onClick={() => onReject?.(workflowId)}>
+        <Button variant="outline" onClick={() => onReject?.(workflowId)}>
           Reject Plan
         </Button>
         <Button onClick={() => onApprove?.(workflowId)}>
