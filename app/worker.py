@@ -17,6 +17,7 @@ from celery.signals import worker_process_init
 from dotenv import load_dotenv
 from sentry_sdk.integrations.celery import CeleryIntegration
 
+import app.tasks  # noqa: F401 — register task decorators
 from app.celery_app import celery_app  # noqa: F401 — re-export for convenience
 from app.logging_config import configure_logging
 
