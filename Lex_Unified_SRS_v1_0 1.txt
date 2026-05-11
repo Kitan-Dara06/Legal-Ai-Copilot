@@ -1,0 +1,3938 @@
+UNIFIED LEGAL AI PLATFORM
+
+Lex
+Software Requirements Specification
+One product. A lawyer uploads documents, states a goal in plain language, and Lex handles
+everything — from understanding to reasoning to action — through a single orchestrated
+pipeline. No mode selection. No pipeline picker. The system decides; the interface adapts.
+
+Version
+
+1.0 — Unified Baseline
+
+Date
+
+2026-04-30
+
+Author
+
+Aaliyah
+
+Status
+
+Architecture Baseline — Pre-build
+
+Classification
+
+Internal / Portfolio
+
+Prior work
+
+Legal AI Copilot (complete) · Legal Due Diligence Agent (spec) · Legal Action Agent (spec)
+
+Core stack
+
+FastAPI · LangGraph · Celery · PostgreSQL · Neo4j · Qdrant · Redis · Next.js
+
+LLM
+
+Claude Sonnet — all generation tasks
+
+Table of Contents
+1. Introduction
+1.1 Purpose
+1.2 Scope
+1.3 The Core Design Decision
+1.4 What Unification Changes
+1.5 Definitions & Abbreviations
+
+2. Overall Description
+2.1 Product Perspective
+2.2 Product Functions
+2.3 Operating Environment
+
+3. Stakeholders & User Classes
+4. System Architecture
+4.1 Four-Layer Model
+4.2 The Master Orchestrator
+4.3 Intent Classification & Routing
+4.4 Ambiguity Resolution
+4.5 Workspace Sessions
+4.6 LangGraph State Machine
+4.7 Capability Layer Contracts
+
+5. Functional Requirements
+5.1 Document Upload & Workspace Management
+5.2 Document Intelligence Pipeline
+5.3 Goal Submission & Intent Classification
+5.4 Ambiguity Resolution Gate
+5.5 ANALYZE Execution Path
+5.6 REASON Execution Path
+5.7 ACT Execution Path
+5.8 Approval Gate System
+5.9 Execution Engine & Tool Recovery
+5.10 Audit Trail
+5.11 Deadline Registry & Scanner
+5.12 Notification Layer
+5.13 Research Instrumentation
+5.14 Frontend Application
+
+6. Non-Functional Requirements
+6.1 Performance
+6.2 Reliability
+6.3 Security
+6.4 Scalability
+6.5 Auditability
+
+7. Unified Data Model
+7.1 Workspaces
+7.2 Documents
+
+7.3 Goals
+7.4 WorkflowExecutions
+7.5 Findings
+7.6 Actions
+7.7 ApprovalRequests
+7.8 AuditLog
+7.9 DefinedTermsRegistry
+7.10 CrossReferenceGraph
+7.11 DeadlineRegistry
+7.12 ToolCallLog
+
+8. API Specification
+9. External Integrations & Tool Registry
+10. Failure Modes & Edge Cases
+11. Build Order
+12. Open Questions
+13. Glossary
+
+1. Introduction
+1.1 Purpose
+This SRS is the complete design baseline for Lex — a unified legal AI platform that collapses three previously
+separate systems (Legal AI Copilot, Legal Due Diligence Agent, Legal Action Agent) into one product with one entry
+point, one data model, one orchestration layer, and one frontend. This document supersedes all prior per-system
+specifications.
+
+1.2 Scope
+Lex enables lawyers and legal professionals to upload a deal folder of contracts, amendments, and side letters;
+state a goal in plain language; and receive grounded legal analysis, cross-document reasoning, or executed legal
+workflows — depending on what the goal requires. The system determines which capabilities to invoke. The lawyer
+never selects a mode.
+The system comprises: a unified FastAPI backend; a LangGraph master orchestrator; three capability layers
+(retrieval, graph intelligence, action); a document intelligence pipeline that runs once per document and is shared
+across all layers; and a Next.js frontend with an adaptive results interface.
+
+1.3 The Core Design Decision
+The central architectural decision of Lex is that document intelligence is separated from goal execution. When a
+document is uploaded, the system immediately builds a complete intelligence package: clause-boundary chunks,
+dual embeddings, defined terms registry, cross-reference graph, and deadline registry. This runs asynchronously
+and completes before the lawyer submits any goal.
+Every subsequent goal submission against that document consumes this pre-built intelligence. There is no
+per-query ingestion. There is no pipeline-specific indexing. One document, one intelligence package, infinite goals.
+The second core decision is intent-based routing. The master orchestrator classifies the lawyer's goal into one of
+three intents — ANALYZE, REASON, ACT — and composes exactly the capability layers that intent requires.
+Unneeded layers do not run. Latency scales with what the goal actually needs, not with what the system is
+theoretically capable of.
+
+1.4 What Unification Changes
+What changed
+
+Three-system approach
+
+Unified Lex
+
+Ingestion
+
+Runs per-pipeline, per-query in some
+
+Runs once per document, shared permanently
+
+cases
+Planning
+
+Three separate planners with different
+
+One master orchestrator with intent routing
+
+schemas
+Data model
+
+Three separate schemas with partial
+
+One unified schema, all tables in one DB
+
+overlap
+Frontend
+
+Three separate UIs or one with a mode
+picker
+
+One workspace, adaptive results panel
+
+Sessions
+
+Copilot sessions only; no cross-system
+
+Workspace sessions spanning all goal types
+
+persistence
+Research data
+
+Collected per-system, requires manual
+
+Collected on every retrieval call, always
+
+merging
+Auth
+
+Shared Supabase, but per-system API
+
+Single auth, single API, single org context
+
+routes
+Defined terms
+
+Built by Due Diligence Agent on demand
+
+Built at ingestion, available to all layers
+
+Cross-ref graph
+
+Built by Due Diligence Agent on demand
+
+Built at ingestion, available to all layers
+
+1.5 Definitions & Abbreviations
+Term
+
+Definition
+
+Workspace
+
+A named collection of documents + a user context. The primary unit of work in Lex. A deal
+folder is a workspace.
+
+Goal
+
+A plain-language statement submitted by the lawyer — e.g. 'find all liability caps' or 'draft a
+response to the notice in clause 12'.
+
+Intent
+
+The orchestrator's classification of a goal: ANALYZE, REASON, or ACT.
+
+WorkflowExecution
+
+One run of the LangGraph state machine for one goal submission. Has a status, a
+capability layer path, and a result.
+
+Document intelligence
+
+The complete set of artifacts built at ingestion: chunks, embeddings, defined terms,
+
+package
+
+cross-reference graph, deadline registry entries.
+
+Capability layer
+
+One of three functional modules: Retrieval, Graph Intelligence, Action. Each is
+independently composable.
+
+ANALYZE
+
+Intent: the goal is a question requiring grounded retrieval. Output: cited answer.
+
+REASON
+
+Intent: the goal requires cross-document analysis, contradiction detection, or risk
+assessment. Output: findings report with escalations.
+
+ACT
+
+Intent: the goal requires drafting, approval, and execution of a legal action. Output:
+executed action with audit trail.
+
+Ambiguity gate
+
+The orchestrator's confidence check: if intent classification confidence < threshold, system
+shows its best guess and asks for confirmation before proceeding.
+
+Approval gate
+
+A durable HITL pause requiring explicit lawyer sign-off before execution. Only active in ACT
+path.
+
+Defined terms registry
+
+PostgreSQL table of all terms defined in uploaded documents, with cross-document conflict
+detection.
+
+Cross-reference graph
+
+Neo4j directed graph of clause nodes and reference edges, enabling dependency-aware
+retrieval.
+
+Deadline registry
+
+PostgreSQL table of all time-bound obligations extracted from documents, scanned by
+Celery Beat.
+
+HITL
+
+Human-in-the-loop — any workflow step requiring a human decision before continuation.
+
+Saga
+
+Distributed transaction pattern using compensation actions for non-idempotent tool call
+recovery.
+
+RRF
+
+Reciprocal Rank Fusion — the fusion algorithm combining dense and sparse retrieval
+scores in Qdrant.
+
+2. Overall Description
+2.1 Product Perspective
+Lex is a standalone SaaS platform deployed via Docker Compose behind an Nginx reverse proxy. It is a greenfield
+unified system — not a wrapper around three existing systems, but a redesign that incorporates all prior capabilities
+into a single codebase with shared infrastructure. Prior system implementations (Copilot, Due Diligence Agent) are
+reference implementations from which proven components are extracted and integrated.
+
+2.2 Product Functions
+Function
+
+Description
+
+Active in
+
+Workspace management
+
+Create and manage deal folders (named document
+
+Always
+
+collections) per org
+Document upload & ingestion
+
+Accept PDF/DOCX, build full intelligence package
+
+Always
+
+asynchronously
+Goal submission
+
+Accept plain-language goal, classify intent, resolve
+
+Always
+
+ambiguity if needed
+Retrieval & grounded Q&A;
+
+Hybrid search, reranking, cited answer generation
+
+ANALYZE, REASON, ACT
+
+Cross-document reasoning
+
+Graph traversal, defined terms conflict detection,
+
+REASON, ACT
+
+findings with typed escalations
+Draft generation
+
+Produce legal response documents grounded in
+
+ACT
+
+retrieved + graph context
+Approval gate management
+
+HMAC-gated HITL approval with durable state, TTL, and
+
+ACT
+
+revision loop
+Execution engine
+
+External tool calls with idempotency, saga recovery,
+
+ACT
+
+audit
+Deadline awareness
+
+Audit trail
+
+Research instrumentation
+
+Extract, register, and scan time-bound obligations
+
+Always (detection), ACT
+
+across documents
+
+(priority)
+
+Immutable append-only log of every LLM call, human
+
+ACT (full), REASON (findings
+
+decision, tool execution
+
+log)
+
+Per-retrieval logging of negation sensitivity, reranker
+
+Always
+
+stability, faithfulness scores
+Notification delivery
+
+Email + Slack for approval requests, deadline alerts,
+escalations
+
+2.3 Operating Environment
+Component
+
+Technology
+
+ACT
+
+Backend runtime
+
+Python 3.11+, FastAPI, Uvicorn
+
+Agent orchestration
+
+LangGraph — unified state machine, all intent paths
+
+Task broker
+
+RabbitMQ + Celery — ingestion, deadline scanning, notification, retry
+
+Session / state cache
+
+Redis — workspace sessions, workflow state cache, progress tracking
+
+Durable workflow state
+
+PostgreSQL — LangGraph checkpoints, all relational data
+
+Vector store
+
+Qdrant — dual named vectors (text-embedding-3-large + legal-bert), BM25 sparse
+
+Graph store
+
+Neo4j — cross-reference graph built at ingestion
+
+Object storage
+
+Cloudflare R2 — raw documents, audit blobs, LLM prompt archives
+
+Auth
+
+Supabase Auth — JWT, org management, API keys, magic links
+
+LLM
+
+Claude Sonnet — intent classification, planning, retrieval synthesis, drafting, revision
+
+Reranker
+
+Cohere Rerank v3 — instrumented for negation sensitivity
+
+Embeddings
+
+OpenAI text-embedding-3-large (primary) + legal-bert (secondary, dual named vectors)
+
+Document parsing
+
+PyMuPDF (PDF) + python-docx (DOCX) + GeminiOCR (scanned PDF)
+
+NLP
+
+spaCy with custom legal NER — defined terms extraction, clause boundary detection
+
+Output validation
+
+Pydantic v2 — all LLM outputs, all tool inputs/outputs
+
+Database ORM
+
+SQLAlchemy 2.x async + Alembic migrations
+
+Frontend
+
+Next.js 15, TypeScript — single adaptive workspace
+
+Reverse proxy
+
+Nginx — TLS termination, rate limiting, 100MB upload guard
+
+3. Stakeholders & User Classes
+Role
+
+Description
+
+Capabilities
+
+Admin
+
+Law firm principal or
+
+All capabilities + org management, notification config, tool integration, audit
+
+account owner
+
+export, escalation management
+
+Primary user —
+
+Upload documents, manage workspaces, submit goals, view results,
+
+submits goals,
+
+approve/reject actions, view own audit trail
+
+Lawyer
+
+approves actions
+Member
+
+Associate or paralegal
+
+Upload documents, submit goals, view results — cannot approve actions or
+access org audit trail
+
+API Consumer
+
+Agent (System)
+
+External scripts via
+
+All workspace/goal/result endpoints — approval gates still enforce HITL,
+
+sk_live_ key
+
+cannot be bypassed
+
+LangGraph executor
+
+Executes capability layers — cannot submit any consequential external
+action without a logged human approval event
+
+Celery Worker
+
+Background task
+
+Ingestion, deadline scanning, notification dispatch, retry — no business logic
+
+runner
+
+authority
+
+Design invariant: no code path executes a consequential external action (file, send, post) without a logged
+human approval event. Enforced at the execution layer, not by convention.
+
+4. System Architecture
+4.1 Four-Layer Model
+Lex is structured as four horizontal layers. Each layer has a clear ownership boundary and depends only on layers
+below it.
+Lay
+er
+
+Name
+
+Responsibility
+
+Always active?
+
+0
+
+Shared foundation
+
+PostgreSQL, Qdrant, Neo4j, Redis, RabbitMQ, R2, Supabase
+
+Yes
+
+Auth, Nginx
+1
+
+2
+
+3
+
+Document intelligence
+
+Master orchestrator
+
+Capability layers
+
+Ingestion, chunking, dual embedding, defined terms, cross-ref
+
+Yes — on
+
+graph, deadline extraction
+
+upload
+
+Intent classification, ambiguity gate, capability layer selection,
+
+Yes — on goal
+
+LangGraph execution, workspace session management
+
+submission
+
+Retrieval, Graph Intelligence, Action — composed dynamically
+
+Per-intent
+
+based on intent
+
+4.2 The Master Orchestrator
+The master orchestrator is a LangGraph state machine that owns the full lifecycle of a goal submission. It is the
+single brain of the unified system — replacing three separate planners with one composable coordinator.
+Orchestrator responsibilities:
+→ Receive goal submission, retrieve workspace context and document intelligence summary
+→ Classify intent (ANALYZE / REASON / ACT) with a confidence score
+→ If confidence < 0.80: trigger ambiguity gate — show classification + ask for confirmation
+→ Select capability layer path based on confirmed intent
+→ Build execution plan: ordered LangGraph nodes for this intent
+→ Execute nodes, checkpoint state to PostgreSQL at every transition
+→ Manage HITL gates (ambiguity gate + approval gate for ACT)
+→ Surface result to frontend through unified result schema
+
+4.3 Intent Classification & Routing
+Intent classification is the first node in every workflow execution. It is a structured LLM call — Claude Sonnet
+receives the goal text, the workspace document manifest, and any pre-flagged conflicts from the defined terms
+registry, then returns a structured classification object.
+IntentClassification:
+primary_intent: ANALYZE | REASON | ACT
+confidence: float # 0.0–1.0
+reasoning: str # one sentence explaining the classification
+requires_graph: bool # whether cross-document reasoning is needed
+
+requires_action: bool # whether execution is implied
+deadline_sensitive: bool # whether a deadline was detected in the goal
+urgency_score: float # 0.0–1.0, from deadline proximity if applicable
+Intent
+
+Trigger signals
+
+Capability layers activated
+
+Result type
+
+ANALYZ
+
+'What does...', 'Find...', 'List...', 'How
+
+Retrieval only
+
+Cited answer with confidence +
+
+E
+
+much...', 'Who are the parties...'
+
+REASON
+
+'What are the risks...', 'Are there
+
+source clauses
+Retrieval + Graph Intelligence
+
+contradictions...', 'Compare...', 'Does
+
+Structured findings report with typed
+escalations + contradiction map
+
+this conflict...', 'Due diligence on...'
+ACT
+
+'Draft...', 'Respond to...', 'File...', 'Send
+
+Retrieval + Graph Intelligence
+
+Executed action with full audit trail +
+
+notice...', 'I need to reply by...'
+
++ Action
+
+approval record
+
+4.4 Ambiguity Resolution Gate
+When intent classification confidence is below 0.80, the orchestrator pauses before dispatching any capability layer
+and presents its best guess to the lawyer.
+The interface shows:
+→ The system's classification: 'I read this as a REASON goal — find risks across the deal folder'
+→ A brief plain-language explanation of what that means it will do
+→ Two responses: 'Yes, proceed' and 'No, change it' (which reveals the other two intent options as buttons)
+The lawyer's selection is recorded in the WorkflowExecution as intent_confirmed_by_human=True with the original
+classification and confidence preserved for audit and research purposes. This data feeds the intent classifier's
+improvement loop.
+
+If the lawyer does not respond within 10 minutes, the ambiguity gate expires and the workflow returns
+status=AWAITING_INTENT_CONFIRMATION. No capability layer has run. No resources consumed beyond the
+classification call.
+
+4.5 Workspace Sessions
+A workspace session is the primary context object — it binds a lawyer to a set of documents for a working period.
+Sessions persist across multiple goal submissions. A lawyer working on a deal folder creates one session for that
+folder and submits as many goals as needed within it.
+Property
+
+Value
+
+Scope
+
+One workspace (document set) + one user
+
+Persistence
+
+PostgreSQL — survives process restart, not time-limited like prior Copilot sessions
+
+TTL
+
+No automatic expiry — explicitly closed by user or Admin, or auto-archived after 90 days inactivity
+
+Goal history
+
+All goals submitted within a session are linked — context accumulates
+
+Capacity
+
+Up to 200 documents per workspace (up from 100 in Copilot)
+
+Cross-goal context
+
+Later goals in the same session have access to findings from earlier REASON goals —
+orchestrator includes prior findings summary in context
+
+4.6 LangGraph State Machine
+Node execution paths per intent:
+ANALYZE path:
+intent_node → retrieval_node → synthesis_node → result_node
+REASON path:
+intent_node → retrieval_node → graph_expansion_node → defined_terms_node
+→ contradiction_node → findings_node → escalation_node → result_node
+ACT path:
+intent_node → retrieval_node → graph_expansion_node → defined_terms_node
+→ contradiction_node → draft_node → approval_node
+→ [on approve] execute_node → [on success] audit_node → result_node
+→ [on reject] revision_node → draft_node (loop, max 3)
+→ [on failure] recovery_node → [retry | compensate | escalate]
+Ambiguity gate (any path, when confidence < 0.80):
+intent_node → ambiguity_gate_node → [confirmed] → path selection
+→ [expired] → AWAITING_INTENT_CONFIRMATION
+
+4.7 Capability Layer Contracts
+Each capability layer exposes a typed interface to the orchestrator. Layers are independent Python modules. The
+orchestrator calls them by interface, not by implementation — swapping a layer does not require orchestrator
+changes.
+class RetrievalLayer(Protocol):
+async def search(self, query: str, workspace_id: UUID,
+session_id: UUID, mode: RetrievalMode) -> RetrievalResult: ...
+class GraphIntelligenceLayer(Protocol):
+async def analyze(self, chunks: list[Chunk], workspace_id: UUID,
+goal: str) -> GraphAnalysisResult: ...
+class ActionLayer(Protocol):
+async def draft(self, context: ActionContext) -> DraftResult: ...
+async def execute(self, action: ApprovedAction) -> ExecutionResult: ...
+
+5. Functional Requirements
+5.1 Document Upload & Workspace Management
+FR-WS-01
+
+Create workspace
+
+Inputs
+
+name: str, org_id from auth, description: str (optional)
+
+Processing
+
+Create Workspace record. Org-scoped. Admin or Member may create.
+
+Output
+
+{ workspace_id, name, org_id, created_at }
+
+FR-WS-02
+
+Upload documents to workspace
+
+Baseline
+
+Baseline
+
+Inputs
+
+workspace_id, files: list[PDF|DOCX], max 100MB per file, max 200 files per workspace
+
+Processing
+
+SHA-256 dedup — if hash matches existing document in same org, link to workspace without
+re-ingesting. Otherwise: stream to R2, create Document record (status=PENDING), dispatch
+intelligence pipeline Celery task.
+
+Output
+
+{ results: [{ filename, document_id, status: accepted|duplicate, queue }] }
+
+Rate limit
+
+10 req/min per org
+
+FR-WS-03
+
+Document intelligence pipeline
+
+Baseline
+
+Trigger
+
+Celery task dispatched after FR-WS-02 for new (non-duplicate) documents
+
+Stage 1
+
+Parse: PyMuPDF (digital PDF), GeminiOCR (scanned PDF), python-docx (DOCX). Detect document
+type.
+
+Stage 2
+
+Chunk: clause-boundary chunker using spaCy legal NER + regex header detection. Respect section
+boundaries. No sliding-window fallback until after clause detection fails. Chunk size: clause-level (not
+fixed token). Parent context window: 2,000 chars.
+
+Stage 3
+
+Embed: OpenAI text-embedding-3-large (dense primary) + legal-bert (dense secondary). Stored as
+named vectors in Qdrant. BM25 sparse index also built. All three available for RRF fusion.
+
+Stage 4
+
+Defined terms: spaCy + LLM-assisted extraction of all definitions sections. Per term: name, definition
+text, source document, page, clause reference. Stored in DefinedTermsRegistry. Cross-document
+conflict detection runs after all documents in workspace are processed.
+
+Stage 5
+
+Cross-reference graph: regex + LLM hybrid parser. Regex catches standard patterns (Section X.X,
+clause X.X(Y)). LLM catches natural language references ('as set forth in the Master Agreement',
+'subject to the terms of the SOW'). Nodes = clauses. Edges = references. Written to Neo4j.
+
+Stage 6
+
+Deadline extraction: LLM extracts all temporal obligation language. Resolves relative dates against
+execution date if available. Flags RELATIVE_UNRESOLVED if execution date missing. Writes to
+DeadlineRegistry. Conflict detection if two clauses define conflicting deadlines for same obligation.
+
+Completion
+
+Document.status = READY. Workspace intelligence summary updated. Frontend polling receives
+status update.
+
+On failure
+
+Document.status = FAILED with error_message. Reprocess endpoint available. Each stage failure is
+independent — partial intelligence packages are stored and flagged.
+
+FR-WS-04
+
+Create
+
+Workspace session management
+
+Baseline
+
+POST /workspaces/{id}/session — creates WorkspaceSession, links to user. Session persists until
+closed.
+
+Context
+
+Session carries: selected document subset (optional, default = all READY docs), prior goal results
+summary (updated after each goal), user preferences (retrieval mode default).
+
+Archive
+
+Auto-archive after 90 days inactivity. Archived sessions are read-only — results viewable, no new
+goals.
+
+Close
+
+DELETE /workspaces/{id}/session — closes session. Documents not deleted.
+
+5.2 Goal Submission & Intent Classification
+
+FR-GOAL-01
+
+Inputs
+
+Submit goal
+
+Baseline
+
+workspace_id, session_id, goal: str (max 2,000 chars), document_subset: list[UUID] (optional
+override)
+
+Processing
+
+1. Retrieve workspace document manifest + DefinedTermsRegistry conflict summary + prior session
+findings summary. 2. Call intent classifier (FR-GOAL-02). 3. If confidence >= 0.80: dispatch execution
+path immediately. 4. If confidence < 0.80: create WorkflowExecution with
+status=AWAITING_INTENT_CONFIRMATION, return classification for ambiguity gate.
+
+Output
+
+{ workflow_id, status, intent (if confident), ambiguity_gate (if not confident) }
+
+Rate limit
+
+20 req/min per org
+
+FR-GOAL-02
+
+Intent classification
+
+Baseline
+
+Model
+
+Claude Sonnet, temperature=0, JSON output, Pydantic v2 validation
+
+Prompt inputs
+
+Goal text, document manifest (filenames, types, count), pre-flagged DefinedTermsRegistry conflicts,
+prior session findings summary (truncated to 500 chars)
+
+Output schema
+
+IntentClassification: primary_intent, confidence, reasoning, requires_graph, requires_action,
+deadline_sensitive, urgency_score
+
+Retry
+
+On Pydantic validation failure: retry once with schema-explicit reprompt. On second failure:
+status=FAILED, log raw output to R2.
+
+Research
+
+Classification logged to ResearchLog: goal_hash, intent, confidence, requires_graph,
+requires_action. Powers intent classifier improvement loop.
+
+5.3 Ambiguity Resolution Gate
+FR-AMB-01
+
+Surface ambiguity to lawyer
+
+Baseline
+
+Trigger
+
+Intent classification confidence < 0.80
+
+Display
+
+Frontend renders: (1) system's best-guess classification in plain language — e.g. 'I read this as a
+question about liability risks across your deal folder — I'll run a full cross-document analysis'. (2)
+What that means it will do (one sentence). (3) Two buttons: Confirm and Change intent.
+
+On confirm
+
+WorkflowExecution updated: intent_confirmed_by_human=True,
+confirmed_intent=original_classification. Execution path dispatched.
+
+On change
+
+Three intent option buttons revealed. Lawyer selects one. WorkflowExecution updated:
+intent_confirmed_by_human=True, confirmed_intent=lawyer_selection, original_classification
+preserved. Execution path dispatched.
+
+TTL
+
+10 minutes. On expiry: status=AWAITING_INTENT_CONFIRMATION, no resources consumed
+beyond classification call. User may re-submit.
+
+Research
+
+All ambiguity gate events logged: original confidence, original intent, lawyer's decision, whether they
+agreed or changed. Direct training signal for classifier improvement.
+
+5.4 ANALYZE Execution Path
+FR-ANA-01
+
+Mode
+
+Retrieval execution
+
+Baseline
+
+Hybrid by default (dense + BM25 sparse, RRF fusion in Qdrant). Session carries user preference
+override.
+
+Scope
+
+Session document subset if specified. Otherwise all READY documents in workspace. Never crosses
+org boundary.
+
+Named vectors
+
+Query run against both text-embedding-3-large and legal-bert vectors independently. Results fused
+via RRF before reranking.
+
+Reranker
+
+Cohere Rerank v3. Instrumented: negation pair score, top-1 stability under premise shift, and
+premise-match score logged to ResearchLog on every call.
+
+Fallback
+
+If < 3 relevant chunks retrieved (relevance_score > 0.6): return UNDETERMINED — do not
+synthesise. Surface as escalation type INSUFFICIENT_COVERAGE.
+
+FR-ANA-02
+
+Answer synthesis
+
+Baseline
+
+Inputs
+
+Retrieved chunks + reranked scores + goal + workspace context
+
+Processing
+
+Claude Sonnet with explicit CoT prompt: (1) extract key claims step by step, (2) verify each claim
+against source chunk, (3) synthesise final answer. Temperature=0.
+
+Output schema
+
+AnalyzeResult: answer (str), confidence (float), source_citations (list[Citation]), retrieval_mode_used,
+chunks_used_count, undetermined (bool), undetermined_reason (str|None)
+
+Faithfulness
+
+Every claim in answer must map to a retrieved chunk. Hallucinated claims must be absent — prompt
+enforces this with negative examples. Faithfulness score logged to ResearchLog.
+
+5.5 REASON Execution Path
+FR-RSN-01
+
+Graph expansion
+
+Baseline
+
+Trigger
+
+After retrieval, before synthesis — every retrieved chunk is expanded
+
+Processing
+
+For each retrieved chunk: query Neo4j for outbound references (clauses this chunk cites) and
+inbound references (clauses that cite this chunk). Pull referenced clauses from Qdrant by clause_id.
+Add to synthesis context with reference_type label.
+
+Depth
+
+Two hops maximum. Beyond two hops, include clause_id reference in output but do not pull full text.
+
+Performance
+
+Neo4j queries batched per chunk. Total graph expansion adds < 3s to REASON path p95.
+
+FR-RSN-02
+
+Defined terms conflict detection
+
+Baseline
+
+Inputs
+
+Retrieved chunks + expanded graph context
+
+Processing
+
+For each chunk, check DefinedTermsRegistry: does any defined term appear in this chunk? If yes,
+does that term have conflict_flag=True (defined differently across documents)? Flag all conflicts with:
+term, conflicting definitions, source documents.
+
+Output
+
+FR-RSN-03
+
+Per-task findings
+
+List of DefinitionalConflict objects attached to each Finding.
+
+Findings generation & contradiction detection
+
+Baseline
+
+Claude Sonnet synthesises one Finding per retrieval task: claim, confidence, supporting_citations,
+reference_chain (graph-expanded clauses), definitional_conflicts.
+
+Cross-finding
+
+After all findings generated: contradiction detection pass. For any two findings that reference the
+
+contradictions
+
+same obligation but make conflicting claims — flag as Contradiction with source_a, source_b,
+description.
+
+Typed escalations
+
+Three types: INSUFFICIENT_COVERAGE (< 3 relevant chunks), DEFINITIONAL_CONFLICT (term
+defined differently across docs), STRUCTURAL_AMBIGUITY (clause language is inherently
+underspecified — LLM-classified with dedicated prompt).
+
+Output schema
+
+ReasonResult: goal, findings (list[Finding]), contradictions (list[Contradiction]), escalations
+(list[Escalation]), pre_ingestion_conflicts (from DefinedTermsRegistry), documents_analysed
+
+5.6 ACT Execution Path
+FR-ACT-01
+
+Inputs
+
+Action detection
+
+Baseline
+
+Goal + retrieval context + graph analysis result + DefinedTermsRegistry conflicts + DeadlineRegistry
+entries for this workspace
+
+Processing
+
+Claude Sonnet identifies required actions: type (DRAFT_RESPONSE | FILE_DOCUMENT |
+SEND_NOTICE | UPDATE_CASE_TRACKER | SET_REMINDER | ESCALATE_TO_COUNSEL),
+description, urgency_score, deadline_date (if from DeadlineRegistry), source_clause citation.
+
+Ordering
+
+Actions topologically sorted. Dependency graph validated as acyclic. urgency_score >= 0.85
+promotes to front regardless of order, unless dependency prevents it.
+
+Confirmation
+
+Action list presented to lawyer before any drafting begins — same HITL gate as prior spec. Lawyer
+may deselect actions. Frontend validates dependency integrity on removal.
+
+FR-ACT-02
+
+Draft generation
+
+Baseline
+
+Grounding
+
+Draft MUST be grounded in retrieved clause text. Every claim in draft maps to a Citation. No
+
+requirement
+
+LLM-only generation — all content sourced from retrieved chunks or graph-expanded clauses.
+
+Contradiction
+
+Before routing for approval: REASON path runs on the draft goal to detect contradictions the draft
+
+check
+
+might create. Conflicts surfaced in approval notification.
+
+Output schema
+
+DraftResult: draft_text, citations (list[Citation]), reference_chain (graph-expanded clauses used),
+definitional_conflicts (from REASON check), confidence
+
+Revision
+
+On rejection: revision_node receives draft + rejection_reason + original context. Revised draft
+re-enters approval gate. Max 3 revision cycles. On limit: status=ESCALATED.
+
+5.7 Approval Gate System
+The approval gate system applies to ACT path only. Full spec below.
+
+FR-GATE-01
+
+State persistence
+
+Issue approval request
+
+Baseline
+
+WorkflowExecution checkpointed to PostgreSQL (status=AWAITING_APPROVAL,
+langgraph_checkpoint serialised). All LangGraph state recoverable on restart.
+
+Token
+
+HMAC-SHA256(workflow_id + action_id + org_id + expires_at, org_scoped_secret). Stored hashed.
+Single-use. Embedded in approve/reject URLs.
+
+Notification
+
+Celery task: email + Slack (if configured). Shows: action description, draft excerpt (500 chars), full
+draft link, approve URL, reject URL, deadline if applicable.
+
+Delivery retry
+
+3× with 30s/60s/120s backoff per channel. On all-channel failure: in-app notification +
+NOTIFICATION_FAILED audit entry.
+
+FR-GATE-02
+
+Token verify
+
+Process approval response
+
+Baseline
+
+HMAC verified. expires_at checked. org_id in token verified against request org_id. Single-use
+enforced: second use returns 409 Conflict.
+
+On approve
+
+ApprovalRequest status=APPROVED. WorkflowExecution deserialized. LangGraph re-enqueued
+from checkpoint. status=EXECUTING.
+
+On reject
+
+ApprovalRequest status=REJECTED. rejection_reason required (min 20 chars). status=REVISING.
+Revision node enqueued with rejection_reason.
+
+Audit
+
+Every approval event written to AuditLog before re-enqueuing. No exceptions.
+
+FR-GATE-03
+
+TTL, expiry, re-issue
+
+Baseline
+
+Default TTL
+
+72 hours (configurable per org, range 1–168 hours)
+
+Expiry scan
+
+Celery Beat every 15 minutes. Expired gates: status=EXPIRED, status=ESCALATED, Admin
+notified.
+
+Re-issue
+
+Admin may re-issue for ESCALATED workflow. New token, TTL reset, history preserved.
+
+5.8 Execution Engine & Tool Recovery
+FR-EXEC-01
+
+Pre-execution invariant check
+
+Rule
+
+Baseline
+
+Before any external tool call: verify ApprovalRequest.status=APPROVED AND actor IS NOT NULL
+AND decision_timestamp IS NOT NULL for this action_id.
+
+On violation
+
+Abort. Write INVARIANT_VIOLATION to AuditLog. Escalate to Admin. Do not proceed under any
+circumstances.
+
+FR-EXEC-02
+
+Tool dispatch with idempotency
+
+Idempotency key
+
+Baseline
+
+SHA-256(workflow_id + action_id + tool_name + attempt_number). Written to ToolCallLog before
+call.
+
+On retry
+
+Check ToolCallLog for existing key with status=SUCCESS — if found, skip (already applied).
+
+Tool registry
+
+Each tool declares: idempotency_class (IDEMPOTENT|NON_IDEMPOTENT), compensation_fn,
+retry_policy (max_attempts, backoff_seconds, timeout_seconds).
+
+FR-EXEC-03
+
+Saga recovery
+
+Transient failure
+
+Retry with exponential backoff per tool retry_policy.
+
+Permanent failure
+
+Log TOOL_CALL_FAILED. Escalate. No compensation.
+
+Baseline
+
+— idempotent
+Permanent failure
+
+Execute compensation in reverse order. Log every step. If compensation fails:
+
+— non-idempotent
+
+UNCOMPENSATABLE_FAILURE, immediate escalation, full context in AuditLog.
+
+Uncompensatable
+
+Some tools (email send) cannot be undone. If one fails non-idempotently:
+UNCOMPENSATABLE_FAILURE logged immediately, Admin and Lawyer notified, workflow halted.
+
+5.9 Audit Trail
+
+FR-AUD-01
+
+Scope
+
+Immutable audit log
+
+Baseline
+
+Active for ACT path (full) and REASON path (findings log). ANALYZE path logs retrieval metrics to
+ResearchLog only.
+
+Events
+
+WORKFLOW_CREATED · INTENT_CLASSIFIED · AMBIGUITY_GATE_OPENED ·
+INTENT_CONFIRMED · RETRIEVAL_COMPLETED · GRAPH_EXPANDED ·
+FINDINGS_GENERATED · DRAFT_GENERATED · APPROVAL_ISSUED · APPROVED ·
+REJECTED · REVISION_GENERATED · EXECUTION_STARTED · TOOL_CALL_ATTEMPTED ·
+TOOL_CALL_SUCCEEDED · TOOL_CALL_FAILED · COMPENSATION_ATTEMPTED ·
+SAGA_ROLLBACK · WORKFLOW_COMPLETED · WORKFLOW_ESCALATED ·
+HUMAN_RESOLUTION · INVARIANT_VIOLATION · NOTIFICATION_FAILED
+
+Every LLM call
+
+Prompt SHA-256 hash + model name logged. Full prompt archived to R2 under
+audit/{audit_id}/prompt.txt. Post-hoc verifiable.
+
+Immutability
+
+INSERT only for application role. No UPDATE, no DELETE. DB-level constraint. Periodic integrity
+check job.
+
+Retention
+
+7 years minimum (configurable). Archive to R2 cold storage after retention threshold, never delete.
+
+5.10 Deadline Registry & Scanner
+FR-DEAD-01
+
+Processing
+
+Deadline extraction at ingestion
+
+Baseline
+
+LLM extracts all temporal obligations: description, raw date expression, resolved absolute date (if
+computable), obligation_type (RESPONSE|FILING|NOTICE|PAYMENT|OTHER), source clause
+citation.
+
+Conflicts
+
+Two clauses defining conflicting deadlines for same obligation: CONFLICTED status,
+conflict_description, both source citations. Escalated as DEFINITIONAL_CONFLICT.
+
+Workspace-level
+
+After all documents in workspace are ingested: cross-document deadline conflict scan. Same
+obligation, different deadlines across documents — flagged immediately.
+
+Baseline
+
+FR-DEAD-02
+
+Celery Beat scanner
+
+Schedule
+
+Every 15 minutes
+
+Logic
+
+For all ACTIVE deadlines: (1) days_remaining = deadline_date - now(). (2) days_remaining <= 1:
+urgency=0.95. (3) 1 < days_remaining <= 3: urgency=max(current, 0.85). (4) days_remaining < 0:
+OVERDUE — immediate Admin notification. (5) Push urgency updates to linked Actions in ACT
+workflows. (6) Re-notify approver if linked action in AWAITING_APPROVAL and urgency >= 0.85.
+
+5.11 Notification Layer
+
+FR-NOTIF-01
+
+Channels
+
+Channels and triggers
+
+Baseline
+
+Email (SMTP) + Slack (Incoming Webhook). Both configured per org by Admin. In-app fallback if both
+fail.
+
+Triggers
+
+Approval request issued · TTL expiry warning (24h) · TTL expired / escalation · High-urgency action
+(score >= 0.85) · Deadline overdue · Execution completed · REASON findings ready (if
+deadline_sensitive) · Workflow failed
+
+Dedup
+
+SHA-256(workflow_id + notification_type + recipient) — same notification not sent twice within 1
+hour.
+
+Retry
+
+3× per channel with 30s/60s/120s backoff. Independent per channel.
+
+5.12 Research Instrumentation
+Research instrumentation runs on every retrieval call, regardless of intent path. This is the passive data collection
+mechanism for the negation-aware reranking paper and future classifier improvement work.
+
+FR-RES-01
+
+Reranker negation
+
+Per-retrieval research logging
+
+Baseline
+
+For each reranked chunk pair (original + negated variant if synthetic negation is enabled):
+score_original, score_negated, delta. Feeds negation sensitivity analysis.
+
+Top-1 stability
+
+On queries with premise variants: top-1 chunk identity across variants logged. Measures reranker
+sycophancy.
+
+Faithfulness
+
+After synthesis: LLM self-evaluation of whether every claim maps to a retrieved chunk. Score
+0.0–1.0. Logged per WorkflowExecution.
+
+Intent data
+
+Every classification logged: goal_hash (SHA-256, not raw text), intent, confidence, confirmed_intent,
+lawyer_changed_intent (bool).
+
+Storage
+
+ResearchLog table — separate from AuditLog. No PII. goal_hash not reversible. Exportable for paper
+experiments.
+
+5.13 Frontend Application
+FR-FE-01
+
+Workspace view
+
+Baseline
+
+Path
+
+/workspaces/{id}
+
+Content
+
+Document library with status indicators. Upload area. Active session panel. Goal input with character
+counter. 'What do you need?' placeholder. Submit button.
+
+FR-FE-02
+
+ANALYZE result
+
+Adaptive results panel
+
+Baseline
+
+Answer text with inline citations. Confidence badge. Source clause cards (expandable).
+Undetermined banner if INSUFFICIENT_COVERAGE.
+
+REASON result
+
+Findings cards. Contradiction section. Typed escalation panels (INSUFFICIENT_COVERAGE |
+DEFINITIONAL_CONFLICT | STRUCTURAL_AMBIGUITY). Defined terms conflict banner at top if
+pre-ingestion conflicts exist.
+
+ACT result
+
+Action queue with urgency indicators. Approval inbox. Execution log. Audit trail accordion
+(Admin/Lawyer only). Draft preview with citation highlights.
+
+FR-FE-03
+
+Ambiguity gate UI
+
+Baseline
+
+Placement
+
+Appears inline in results panel before any result renders
+
+Display
+
+System's plain-language interpretation. What it will do. Confirm button. Change intent button (reveals
+three intent options on click).
+
+Mobile
+
+Designed mobile-first — all approval and ambiguity gate interactions must work on 375px viewport.
+Approval URLs open to mobile-optimised page.
+
+FR-FE-04
+
+Approval inbox
+
+Baseline
+
+Path
+
+/approvals
+
+Content
+
+Pending approvals sorted by urgency. Each row: action description, document, days remaining on
+TTL, urgency badge. Click → approval detail page with full draft, citation highlights, contradiction
+warnings, approve/reject buttons (reject requires reason, min 20 chars).
+
+FR-FE-05
+
+Escalations
+
+Escalation & audit views
+
+Baseline
+
+/escalations — Admin only. All active escalations, type, trigger, reviewer note. Mark resolved with
+resolution notes.
+
+Audit trail
+
+/workspaces/{id}/goals/{goal_id}/audit — Admin + Lawyer. Chronological event list. Expandable
+detail. Export PDF/JSON.
+
+Deadlines
+
+/workspaces/{id}/deadlines — All deadline registry entries. Status, urgency, source clause, days
+remaining.
+
+6. Non-Functional Requirements
+6.1 Performance
+ID
+
+Requirement
+
+Target
+
+NFR-PERF-01
+
+Intent classification
+
+< 3s p95 (single LLM call)
+
+NFR-PERF-02
+
+ANALYZE end-to-end
+
+< 12s p95 (retrieval + rerank + synthesis)
+
+NFR-PERF-03
+
+REASON end-to-end
+
+< 45s p95 (retrieval + graph expansion +
+findings)
+
+NFR-PERF-04
+
+ACT draft generation
+
+< 30s p95 (retrieval + graph +
+contradiction check + draft)
+
+NFR-PERF-05
+
+Document intelligence pipeline (10MB PDF)
+
+< 90s end-to-end (all 6 stages)
+
+NFR-PERF-06
+
+Document intelligence pipeline (scanned)
+
+< 300s end-to-end (OCR bottleneck)
+
+NFR-PERF-07
+
+Approval gate issue to notification
+
+< 10s p95
+
+NFR-PERF-08
+
+Approval response processing
+
+< 2s p95
+
+NFR-PERF-09
+
+Neo4j graph expansion per chunk
+
+< 150ms p95
+
+NFR-PERF-10
+
+Audit log write
+
+< 100ms p95 (synchronous, must not
+delay workflow)
+
+NFR-PERF-11
+
+API responses (non-LLM endpoints)
+
+< 200ms p95
+
+6.2 Reliability
+ID
+
+Requirement
+
+Implementation
+
+NFR-REL-01
+
+LangGraph state survives
+
+PostgreSQL checkpoint at every node transition. Resume from last
+
+process crash
+
+checkpoint on restart.
+
+Celery task persistence
+
+RabbitMQ durable queues. Tasks survive broker restart. Celery acks
+
+NFR-REL-02
+
+after state is persisted.
+NFR-REL-03
+
+Approval gate survives restart
+
+WorkflowExecution checkpointed before notification dispatch.
+Re-enqueue on restart if AWAITING_APPROVAL.
+
+NFR-REL-04
+
+Idempotent Celery retry
+
+ToolCallLog idempotency key checked before every tool execution.
+
+NFR-REL-05
+
+Intelligence pipeline partial failure
+
+Each pipeline stage is independently retryable. Partial packages
+stored and flagged — downstream layers use what's available.
+
+NFR-REL-06
+
+Audit log write failure
+
+Workflow paused. Admin alert. Do not continue execution until audit
+write confirmed successful.
+
+NFR-REL-07
+
+SHA-256 dedup
+
+Identical documents (same org) never re-ingested. Intelligence
+package reused.
+
+NFR-REL-08
+
+Service restart policy
+
+All Docker containers: restart: always.
+
+6.3 Security
+ID
+
+Requirement
+
+Implementation
+
+NFR-SEC-01
+
+Tenant isolation
+
+workspace_id and org_id enforced at PostgreSQL, Qdrant, Neo4j, and
+Redis layers. No cross-org data leakage possible at query level.
+
+NFR-SEC-02
+
+Approval token security
+
+HMAC-SHA256, org-scoped secret, single-use, expires_at enforced at verify
+time. Cross-org forgery impossible (org_id in token payload).
+
+NFR-SEC-03
+
+Prompt injection
+
+All user content sanitised before LLM insertion. LLM output always parsed
+via Pydantic — raw output never executed or rendered as HTML.
+
+NFR-SEC-04
+
+Tool credential storage
+
+External tool credentials encrypted at rest (AES-256 via pgcrypto). Never in
+env vars accessible to frontend.
+
+NFR-SEC-05
+
+Audit log access control
+
+INSERT only for application role. SELECT for admin role. No UPDATE or
+DELETE for any application role. DB-level constraint.
+
+NFR-SEC-06
+
+Password security
+
+bcrypt, 72-byte limit enforced.
+
+NFR-SEC-07
+
+API key storage
+
+SHA-256 hashed before persistence. Raw key shown once at issuance.
+
+NFR-SEC-08
+
+Document content
+
+Stored encrypted at rest in R2. Named vectors in Qdrant do not store raw
+text — text stored in PostgreSQL encrypted column.
+
+NFR-SEC-09
+
+TLS
+
+Nginx TLS termination, Let's Encrypt. All internal service traffic on private
+Docker bridge network.
+
+NFR-SEC-10
+
+Research log PII
+
+ResearchLog stores goal_hash (SHA-256), not raw goal text. Not reversible.
+Safe for export.
+
+6.4 Scalability
+ID
+
+Requirement
+
+Implementation
+
+NFR-SCALE-0
+
+Celery worker partitioning
+
+intelligence_worker (doc pipeline), action_worker (LangGraph ACT),
+
+1
+
+deadline_worker (scanner), notification_worker — separate containers,
+independently scalable.
+
+NFR-SCALE-0
+
+LLM rate limit management
+
+2
+NFR-SCALE-0
+
+(configurable). Queue excess, never reject.
+Qdrant partitioning
+
+3
+NFR-SCALE-0
+4
+
+Celery queue as token bucket. Max 5 concurrent LLM calls per org
+
+Named vector collections partitioned by org_id and workspace_id
+payload filters. No cross-org vector leakage.
+
+Neo4j workspace isolation
+
+Node property workspace_id on all clause nodes. All graph queries
+filtered by workspace_id.
+
+NFR-SCALE-0
+
+Concurrent workflow support
+
+5
+
+Multiple workflows per org execute concurrently. Each is an independent
+LangGraph instance with isolated state.
+
+6.5 Auditability
+ID
+
+Requirement
+
+Implementation
+
+NFR-AUD-01
+
+Full workflow reproducibility
+
+Given a workflow_id: every LLM prompt (hash + R2 archive), every tool
+call, every human decision, every result recoverable.
+
+NFR-AUD-02
+
+LLM version tracking
+
+Model name + version logged on every LLM call. Model changes
+reflected in audit trail exactly.
+
+NFR-AUD-03
+
+Intent classification trail
+
+Every classification logged with goal_hash, confidence,
+confirmed_intent, lawyer_override. Supports classifier retrospective
+analysis.
+
+NFR-AUD-04
+
+Integrity verification
+
+Admin-triggered check: SHA-256 of stored prompts verified against
+AuditLog entries. Discrepancy = INTEGRITY_VIOLATION alert.
+
+NFR-AUD-05
+
+Retention
+
+7 years minimum. Configurable per org. Archive to R2 cold storage after
+threshold. Never delete.
+
+7. Unified Data Model
+One PostgreSQL database. All tables below are in the same schema. Tables from prior per-system specs are
+consolidated — no duplication. All UUIDs are generated by uuid4. All timestamps are UTC TIMESTAMPTZ.
+
+7.1 workspaces
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+org_id
+
+UUID
+
+FK → organizations.id, INDEXED
+
+name
+
+VARCHAR(255)
+
+NOT NULL
+
+description
+
+TEXT
+
+NULLABLE
+
+document_count
+
+INTEGER
+
+NOT NULL, default 0 — maintained by trigger
+
+intelligence_status
+
+ENUM
+
+PENDING | PARTIAL | READY — READY when all docs have complete
+intelligence packages
+
+created_by
+
+UUID
+
+FK → users.id
+
+created_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+last_active_at
+
+TIMESTAMPTZ
+
+NOT NULL — updated on every goal submission
+
+archived_at
+
+TIMESTAMPTZ
+
+NULLABLE — set after 90d inactivity
+
+7.2 documents
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+workspace_id
+
+UUID
+
+FK → workspaces.id, INDEXED
+
+org_id
+
+UUID
+
+FK → organizations.id, INDEXED
+
+filename
+
+VARCHAR(500)
+
+NOT NULL
+
+file_hash
+
+VARCHAR(64)
+
+INDEXED — SHA-256
+
+file_type
+
+ENUM
+
+DIGITAL_PDF | SCANNED_PDF | DOCX
+
+r2_key
+
+VARCHAR(500)
+
+NOT NULL — Cloudflare R2 object key
+
+status
+
+ENUM
+
+PENDING | PROCESSING | READY | FAILED | DUPLICATE
+
+chunk_count
+
+INTEGER
+
+NULLABLE — set after ingestion
+
+intelligence_stages_comp
+
+JSONB
+
+{ parse, embed, defined_terms, cross_ref, deadlines } each: bool +
+
+lete
+
+completed_at
+
+error_message
+
+TEXT
+
+NULLABLE
+
+upload_date
+
+TIMESTAMPTZ
+
+NOT NULL
+
+7.3 goals
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+workspace_id
+
+UUID
+
+FK → workspaces.id, INDEXED
+
+session_id
+
+UUID
+
+FK → workspace_sessions.id, INDEXED
+
+org_id
+
+UUID
+
+FK → organizations.id
+
+user_id
+
+UUID
+
+FK → users.id
+
+goal_text
+
+TEXT
+
+NOT NULL
+
+goal_hash
+
+VARCHAR(64)
+
+SHA-256 of goal_text — used in ResearchLog (not reversible)
+
+document_subset
+
+UUID[]
+
+NULLABLE — if set, overrides session default
+
+created_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+7.4 workflow_executions
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+goal_id
+
+UUID
+
+FK → goals.id, INDEXED
+
+workspace_id
+
+UUID
+
+FK → workspaces.id
+
+org_id
+
+UUID
+
+FK → organizations.id
+
+intent
+
+ENUM
+
+ANALYZE | REASON | ACT | UNKNOWN
+
+intent_confidence
+
+FLOAT
+
+NOT NULL
+
+intent_reasoning
+
+TEXT
+
+NOT NULL
+
+intent_confirmed_by_hum
+
+BOOLEAN
+
+NOT NULL, default FALSE
+
+confirmed_intent
+
+ENUM
+
+NULLABLE — set if human confirmed or changed intent
+
+status
+
+ENUM
+
+CLASSIFYING | AWAITING_INTENT_CONFIRMATION | RETRIEVING
+
+an
+
+| EXPANDING | REASONING | DRAFTING | AWAITING_APPROVAL |
+EXECUTING | REVISING | RECOVERING | COMPLETED |
+ESCALATED | CANCELLED | FAILED
+langgraph_checkpoint
+
+JSONB
+
+Serialised LangGraph state — updated at every node transition
+
+result_ref
+
+VARCHAR(500)
+
+NULLABLE — R2 key to full result JSON if large
+
+created_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+completed_at
+
+TIMESTAMPTZ
+
+NULLABLE
+
+7.5 findings (REASON and ACT results)
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+workflow_id
+
+UUID
+
+FK → workflow_executions.id, INDEXED
+
+org_id
+
+UUID
+
+FK → organizations.id
+
+claim
+
+TEXT
+
+NOT NULL
+
+confidence
+
+FLOAT
+
+NOT NULL
+
+supporting_citations
+
+JSONB
+
+list[Citation]
+
+reference_chain
+
+JSONB
+
+NULLABLE — graph-expanded clauses
+
+definitional_conflicts
+
+JSONB
+
+NULLABLE — list[DefinitionalConflict]
+
+escalated
+
+BOOLEAN
+
+NOT NULL, default FALSE
+
+escalation_type
+
+ENUM
+
+NULLABLE — INSUFFICIENT_COVERAGE |
+DEFINITIONAL_CONFLICT | STRUCTURAL_AMBIGUITY
+
+created_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+7.6 actions (ACT path)
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+workflow_id
+
+UUID
+
+FK → workflow_executions.id, INDEXED
+
+org_id
+
+UUID
+
+FK → organizations.id
+
+action_type
+
+ENUM
+
+DRAFT_RESPONSE | FILE_DOCUMENT | SEND_NOTICE |
+UPDATE_CASE_TRACKER | SET_REMINDER |
+ESCALATE_TO_COUNSEL
+
+description
+
+TEXT
+
+NOT NULL
+
+urgency_score
+
+FLOAT
+
+NOT NULL
+
+status
+
+ENUM
+
+DETECTED | CONFIRMED | DRAFTING | AWAITING_APPROVAL |
+APPROVED | EXECUTING | EXECUTED | FAILED | ESCALATED |
+CANCELLED
+
+source_clause_ref
+
+JSONB
+
+Citation — source clause for this action
+
+deadline_id
+
+UUID
+
+FK → deadline_registry.id, NULLABLE
+
+revision_count
+
+INTEGER
+
+NOT NULL, default 0
+
+task_order
+
+INTEGER
+
+NOT NULL — position in confirmed task list
+
+created_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+updated_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+7.7 approval_requests
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+workflow_id
+
+UUID
+
+FK → workflow_executions.id, INDEXED
+
+action_id
+
+UUID
+
+FK → actions.id, INDEXED
+
+org_id
+
+UUID
+
+FK → organizations.id
+
+token_hash
+
+VARCHAR(255)
+
+UNIQUE, INDEXED — SHA-256 of raw HMAC token
+
+status
+
+ENUM
+
+PENDING | APPROVED | REJECTED | EXPIRED | USED
+
+actor
+
+UUID
+
+FK → users.id, NULLABLE — set on decision
+
+decision_timestamp
+
+TIMESTAMPTZ
+
+NULLABLE
+
+rejection_reason
+
+TEXT
+
+NULLABLE — required when REJECTED
+
+expires_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+revision_number
+
+INTEGER
+
+NOT NULL, default 0
+
+draft_r2_key
+
+VARCHAR(500)
+
+R2 key to full draft text for this revision
+
+created_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+workflow_id
+
+UUID
+
+FK → workflow_executions.id, INDEXED
+
+action_id
+
+UUID
+
+FK → actions.id, NULLABLE
+
+org_id
+
+UUID
+
+FK → organizations.id
+
+event_type
+
+VARCHAR(100)
+
+NOT NULL — see FR-AUD-01 for full list
+
+actor
+
+VARCHAR(100)
+
+NOT NULL — 'system' or user_id
+
+timestamp
+
+TIMESTAMPTZ
+
+NOT NULL — UTC, default now()
+
+7.8 audit_log
+
+llm_prompt_hash
+
+VARCHAR(64)
+
+NULLABLE — SHA-256 of prompt
+
+llm_model
+
+VARCHAR(100)
+
+NULLABLE
+
+input_summary
+
+TEXT
+
+NULLABLE — first 500 chars
+
+output_summary
+
+TEXT
+
+NULLABLE — first 500 chars
+
+full_input_r2_key
+
+VARCHAR(500)
+
+NULLABLE — R2 key if > 500 chars
+
+full_output_r2_key
+
+VARCHAR(500)
+
+NULLABLE
+
+tool_name
+
+VARCHAR(100)
+
+NULLABLE
+
+external_reference_id
+
+TEXT
+
+NULLABLE — ID returned by external system
+
+duration_ms
+
+INTEGER
+
+NULLABLE
+
+notes
+
+TEXT
+
+NULLABLE
+
+INSERT only for application role. No UPDATE or DELETE. DB-level constraint enforced.
+
+7.9 defined_terms_registry
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+workspace_id
+
+UUID
+
+FK → workspaces.id, INDEXED
+
+org_id
+
+UUID
+
+FK → organizations.id
+
+term
+
+VARCHAR(500)
+
+NOT NULL
+
+definition
+
+TEXT
+
+NOT NULL
+
+source_document_id
+
+UUID
+
+FK → documents.id
+
+page
+
+INTEGER
+
+NOT NULL
+
+clause_reference
+
+VARCHAR(200)
+
+NOT NULL
+
+conflict_flag
+
+BOOLEAN
+
+NOT NULL, default FALSE
+
+conflict_description
+
+TEXT
+
+NULLABLE — describes conflicting definitions if conflict_flag=True
+
+created_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+7.10 cross_reference_graph (Neo4j)
+Stored in Neo4j. PostgreSQL maintains a cross_reference_index for fast lookup of graph node IDs by
+clause_reference string.
+Element
+
+Type
+
+Properties
+
+Clause
+
+Node
+
+workspace_id, document_id, clause_reference (e.g. 'Section 4.2(b)'), chunk_id
+(FK to Qdrant point ID), page, clause_text_preview
+
+REFERENCES
+
+Edge
+
+source_clause → target_clause, reference_type
+(EXPLICIT|NATURAL_LANGUAGE), raw_reference_text, confidence (float, 0-1
+for LLM-parsed refs)
+
+7.11 deadline_registry
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+workspace_id
+
+UUID
+
+FK → workspaces.id, INDEXED
+
+org_id
+
+UUID
+
+FK → organizations.id
+
+obligation_description
+
+TEXT
+
+NOT NULL
+
+obligation_type
+
+ENUM
+
+RESPONSE | FILING | NOTICE | PAYMENT | OTHER
+
+raw_date_expression
+
+TEXT
+
+NOT NULL
+
+resolved_deadline
+
+TIMESTAMPTZ
+
+NULLABLE — null if RELATIVE_UNRESOLVED or CONFLICTED
+
+resolution_status
+
+ENUM
+
+RESOLVED | RELATIVE_UNRESOLVED | CONFLICTED
+
+conflict_flag
+
+BOOLEAN
+
+NOT NULL, default FALSE
+
+source_clause_a
+
+JSONB
+
+NOT NULL — primary Citation
+
+source_clause_b
+
+JSONB
+
+NULLABLE — secondary Citation if conflicted
+
+status
+
+ENUM
+
+ACTIVE | OVERDUE | COMPLETED | SUPERSEDED
+
+urgency_score
+
+FLOAT
+
+NOT NULL — updated by Celery Beat scanner
+
+created_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+Column
+
+Type
+
+Notes
+
+id
+
+UUID
+
+PK
+
+workflow_id
+
+UUID
+
+FK → workflow_executions.id, INDEXED
+
+action_id
+
+UUID
+
+FK → actions.id
+
+tool_name
+
+VARCHAR(100)
+
+NOT NULL
+
+idempotency_key
+
+VARCHAR(64)
+
+UNIQUE, INDEXED — SHA-256(workflow+action+tool+attempt)
+
+attempt_number
+
+INTEGER
+
+NOT NULL, default 1
+
+status
+
+ENUM
+
+PENDING | SUCCESS | FAILED | COMPENSATED |
+
+7.12 tool_call_log
+
+COMPENSATION_FAILED
+request_hash
+
+VARCHAR(64)
+
+SHA-256 of tool parameters
+
+response_summary
+
+TEXT
+
+NULLABLE — first 500 chars
+
+external_reference
+
+TEXT
+
+NULLABLE — ID from external system
+
+error_message
+
+TEXT
+
+NULLABLE
+
+duration_ms
+
+INTEGER
+
+NULLABLE
+
+created_at
+
+TIMESTAMPTZ
+
+NOT NULL
+
+8. API Specification
+All endpoints are prefixed /api/v1. Auth via Bearer token (sk_live_ API key or Supabase JWT).
+
+8.1 Auth
+Method
+
+Endpoint
+
+Auth
+
+Description
+
+POST
+
+/auth/signup
+
+None
+
+Register org + admin + issue API key
+
+POST
+
+/auth/login
+
+None
+
+Authenticate + issue API key
+
+GET
+
+/auth/me
+
+JWT
+
+Current user identity + org
+
+POST
+
+/auth/setup-org
+
+JWT
+
+Provision org for Supabase user
+
+POST
+
+/auth/invite
+
+Admin API key
+
+Generate invite token
+
+POST
+
+/auth/invite-by-email
+
+Admin JWT
+
+Send magic link invite
+
+POST
+
+/auth/accept-invite
+
+None
+
+Accept invite (new user)
+
+POST
+
+/auth/accept-invite-by-token
+
+JWT
+
+Accept invite (existing user)
+
+POST
+
+/auth/revoke
+
+Admin API key
+
+Revoke API key by prefix
+
+POST
+
+/auth/logout
+
+None
+
+Clear session cookies
+
+8.2 Workspaces
+Method
+
+Endpoint
+
+Auth
+
+Description
+
+POST
+
+/workspaces
+
+API key or JWT
+
+Create workspace
+
+GET
+
+/workspaces
+
+API key or JWT
+
+List workspaces for org
+
+GET
+
+/workspaces/{id}
+
+API key or JWT
+
+Workspace detail + document list
++ intelligence status
+
+POST
+
+/workspaces/{id}/documents
+
+API key or JWT
+
+Upload documents (multi-file)
+
+GET
+
+/workspaces/{id}/documents/{doc_id}/status
+
+API key or JWT
+
+Document intelligence pipeline
+status
+
+POST
+
+/workspaces/{id}/documents/{doc_id}/reprocess
+
+API key or JWT
+
+Re-trigger intelligence pipeline
+
+DELET
+
+/workspaces/{id}/documents/{doc_id}
+
+API key or JWT
+
+Remove document from
+
+E
+
+workspace
+
+POST
+
+/workspaces/{id}/session
+
+API key or JWT
+
+Open workspace session
+
+DELET
+
+/workspaces/{id}/session
+
+API key or JWT
+
+Close workspace session
+
+E
+
+GET
+
+/workspaces/{id}/defined-terms
+
+API key or JWT
+
+Defined terms registry (with
+conflicts)
+
+GET
+
+/workspaces/{id}/deadlines
+
+API key or JWT
+
+Deadline registry
+
+GET
+
+/workspaces/{id}/graph/expand
+
+API key or JWT
+
+Cross-reference graph expansion
+for clause
+
+8.3 Goals & Workflows
+Method
+
+Endpoint
+
+Auth
+
+Description
+
+POST
+
+/workspaces/{id}/goals
+
+API key or JWT
+
+Submit goal — triggers intent
+classification + execution
+
+GET
+
+/workspaces/{id}/goals
+
+API key or JWT
+
+List goals for workspace
+(paginated)
+
+GET
+
+/workspaces/{id}/goals/{goal_id}
+
+API key or JWT
+
+Goal detail + workflow
+execution status
+
+POST
+
+/workspaces/{id}/goals/{goal_id}/confirm-intent
+
+API key or JWT
+
+Confirm or change intent
+(ambiguity gate response)
+
+POST
+
+/workspaces/{id}/goals/{goal_id}/confirm-plan
+
+API key or JWT
+
+Confirm ACT action plan
+
+DELET
+
+/workspaces/{id}/goals/{goal_id}
+
+API key or JWT
+
+Cancel workflow (if not yet
+
+E
+GET
+
+executing)
+/workspaces/{id}/goals/{goal_id}/result
+
+API key or JWT
+
+Full result (answer | findings |
+action status)
+
+GET
+
+/workspaces/{id}/goals/{goal_id}/audit
+
+Admin or Lawyer JWT
+
+Audit trail for workflow
+
+8.4 Approvals & Actions
+Method
+
+Endpoint
+
+Auth
+
+Description
+
+GET
+
+/approvals
+
+API key or JWT
+
+List pending approval requests for org
+
+GET
+
+/approvals/{id}
+
+API key or JWT
+
+Approval detail with draft
+
+POST
+
+/workflows/{id}/approve
+
+Token or JWT
+
+Approve action
+
+POST
+
+/workflows/{id}/reject
+
+Token or JWT
+
+Reject action with reason
+
+POST
+
+/approvals/{id}/reissue
+
+Admin JWT
+
+Re-issue expired approval request
+
+GET
+
+/escalations
+
+Admin JWT
+
+All active escalations for org
+
+POST
+
+/escalations/{id}/resolve
+
+Admin JWT
+
+Mark escalation resolved with notes
+
+8.5 Admin & Health
+
+Method
+
+Endpoint
+
+Auth
+
+Description
+
+GET
+
+/org/members
+
+Admin JWT
+
+List org members
+
+DELET
+
+/org/members/{id}
+
+Admin JWT
+
+Remove member
+
+GET
+
+/research/export
+
+Admin JWT
+
+Export ResearchLog (date range, JSON)
+
+POST
+
+/integrations/test
+
+Admin JWT
+
+Test notification / tool connector
+
+GET
+
+/health
+
+None
+
+Liveness + subsystem health check
+
+E
+
+9. External Integrations & Tool Registry
+Tool
+
+Idempotency
+
+Compensation
+
+Retry
+
+On permanent failure
+
+Email (SMTP)
+
+NON_IDEMPOTE
+
+None possible
+
+3× /
+
+In-app fallback +
+
+30-60-120s
+
+NOTIFICATION_FAILED audit
+
+3× /
+
+In-app fallback +
+
+30-60-120s
+
+NOTIFICATION_FAILED audit
+
+5× / backoff
+
+Escalate — human must reconcile
+
+3× / backoff
+
+Escalate —
+
+NT
+Slack Webhook
+
+NON_IDEMPOTE
+
+None possible
+
+NT
+Case tracker
+
+IDEMPOTENT
+
+Update to
+
+(webhook)
+
+(key)
+
+PRE_EXECUTE
+
+Filing API (generic)
+
+NON_IDEMPOTE
+
+Cancel if
+
+NT
+
+supported
+
+UNCOMPENSATABLE_FAILURE
+if cancel fails
+
+Calendar/reminder
+
+IDEMPOTENT
+
+Delete created
+
+(key)
+
+event
+
+3× / backoff
+
+Non-critical — log only
+
+Qdrant
+
+IDEMPOTENT
+
+N/A
+
+5× / backoff
+
+Hard failure — pipeline paused
+
+Neo4j
+
+IDEMPOTENT
+
+N/A
+
+5× / backoff
+
+Hard failure — graph queries
+degraded
+
+PostgreSQL
+
+IDEMPOTENT
+
+N/A
+
+5× / backoff
+
+Hard failure — all operations
+paused
+
+Cloudflare R2
+
+IDEMPOTENT
+
+Delete object
+
+4× / backoff
+
+Hard failure — ingestion paused
+
+Claude Sonnet (LLM)
+
+IDEMPOTENT
+
+N/A
+
+2× / 5s
+
+Workflow paused, manual retry
+
+Cohere Reranker
+
+IDEMPOTENT
+
+N/A
+
+2× / 5s
+
+Proceed without rerank, log
+DEGRADED_MODE
+
+GeminiOCR
+
+IDEMPOTENT
+
+N/A
+
+3× / backoff
+
+Hard failure for scanned PDFs
+
+10. Failure Modes & Edge Cases
+Failure
+
+Ris
+k
+
+System response
+
+Goal is ambiguous — two intents
+
+ME
+
+Ambiguity gate surfaces best guess. Lawyer confirms or changes. confidence
+
+equally valid
+
+D
+
+logged. Never proceeds on a guess without confirmation below 0.80.
+
+LangGraph crashes
+
+HI
+
+PostgreSQL checkpoint loaded on restart. Node re-executes from last stable
+
+mid-REASON or mid-ACT
+
+GH
+
+state. Idempotency keys prevent double-execution of tool calls.
+
+Document intelligence partial
+
+ME
+
+Failed stage logged with error. Document marked PARTIAL intelligence.
+
+failure (one stage fails)
+
+D
+
+REASON and ACT paths note degraded mode — e.g. no graph expansion if
+cross-ref stage failed. ANALYZE still works.
+
+Approval token TTL expires with
+
+HI
+
+status=ESCALATED. Admin notified. Workflow halted. No action taken. Admin
+
+no response
+
+GH
+
+may re-issue.
+
+Same approval URL clicked twice
+
+ME
+
+Token USED on first click. Second click: 409 Conflict. Idempotency key on
+
+D
+
+ToolCallLog prevents double-execution even if 409 bypassed.
+
+Non-idempotent tool fails after
+
+HI
+
+Saga compensation in reverse order. If compensation fails:
+
+partial execution
+
+GH
+
+UNCOMPENSATABLE_FAILURE, immediate escalation, full context in
+AuditLog, human must resolve manually.
+
+LLM output fails Pydantic
+
+ME
+
+Retry once with schema-explicit reprompt. On second failure: status=FAILED,
+
+validation
+
+D
+
+raw output stored in R2 for debugging, error_message set.
+
+Defined terms conflict across
+
+HI
+
+Flagged at ingestion time. Pre-ingestion conflict banner shown in frontend
+
+workspace documents
+
+GH
+
+before any goal is submitted. Surfaces in every REASON and ACT result that
+touches conflicting terms.
+
+Retrieval returns < 3 relevant
+
+HI
+
+UNDETERMINED response. Do not synthesise. Escalation type
+
+chunks
+
+GH
+
+INSUFFICIENT_COVERAGE. Never hallucinate when evidence is insufficient.
+
+Cross-reference resolves to
+
+ME
+
+Graph edge flagged as EXTERNAL_REFERENCE. Note surfaced in finding:
+
+document not in workspace
+
+D
+
+'Referenced document not in workspace — analysis may be incomplete.'
+
+Deadline is relative and execution
+
+ME
+
+DeadlineRegistry: resolution_status=RELATIVE_UNRESOLVED.
+
+date unknown
+
+D
+
+Deadline_date=null. ACT path notes unconfirmed deadline in action and
+approval notification.
+
+Audit log write fails
+
+CR
+
+Workflow paused immediately. Admin alert. No execution continues until audit
+
+ITI
+
+write confirmed. Error in structured error log.
+
+CA
+L
+Lawyer removes dependent task
+
+ME
+
+Frontend validates dependency graph on removal. Backend re-validates at
+
+from ACT plan
+
+D
+
+confirm-plan endpoint. 422 with dependency conflict details if invalid.
+
+REASON path followed
+
+LO
+
+Prior REASON findings included in ACT context — orchestrator loads prior
+
+immediately by ACT on same
+
+W
+
+session findings summary. No re-reasoning required.
+
+goal
+
+Neo4j unavailable during
+
+HI
+
+Graph expansion skipped. Finding noted as DEGRADED — graph expansion
+
+REASON or ACT
+
+GH
+
+unavailable. Retrieval-only synthesis proceeds with warning. Not a hard failure
+for REASON; hard failure for ACT if contradiction check is required.
+
+11. Build Order
+Solo development. Each stage must be stable before the next begins. Research instrumentation (Stage 12) is built
+in parallel with Stage 11 — it only requires the retrieval layer to be complete.
+Sta
+ge
+
+Component
+
+Depends on
+
+Notes
+
+1
+
+Shared foundation setup
+
+—
+
+PostgreSQL schema + Alembic migrations for all unified
+tables. Supabase Auth. RabbitMQ + Celery base. Nginx.
+Docker Compose.
+
+2
+
+Document intelligence
+
+Stage 1
+
+pipeline
+
+Parser (PyMuPDF + python-docx). Clause-boundary
+chunker (spaCy + regex). Dual embedder (OpenAI +
+legal-bert). Qdrant named vectors. This is the foundation
+— everything depends on it.
+
+3
+
+Defined terms extractor
+
+Stage 2
+
+spaCy + LLM-assisted extraction. DefinedTermsRegistry
+writes. Cross-document conflict detection. Simpler than
+the graph — early win, demonstrable fast.
+
+4
+
+Cross-reference graph
+
+Stage 2
+
+(Neo4j)
+
+Hardest ingestion component. Regex + LLM hybrid
+parser. Neo4j node/edge writes. Graph expansion
+queries. Do while ingestion is fresh in memory.
+
+5
+
+Deadline extraction
+
+Stage 2
+
+LLM temporal obligation extraction. DeadlineRegistry
+writes. Conflict detection. Celery Beat scanner.
+
+6
+
+Workspace API + session
+
+Stages 1–5
+
+management
+7
+
+Intent classifier + ambiguity
+
+FR-WS-01 through FR-WS-04. Document upload +
+dedup. Frontend workspace view and document library.
+
+Stage 6
+
+gate
+
+FR-GOAL-01, FR-GOAL-02, FR-AMB-01. LangGraph
+shell with intent_node + ambiguity_gate_node. Validates
+Pydantic schema reliability before wiring full state
+machine.
+
+8
+
+ANALYZE path (retrieval +
+
+Stage 7
+
+FR-ANA-01, FR-ANA-02. Hybrid search + reranker +
+synthesis. First end-to-end goal → result flow. Frontend
+
+synthesis)
+
+adaptive results panel (ANALYZE variant).
+9
+
+REASON path (graph
+
+Stages 4,8
+
+intelligence)
+
+FR-RSN-01 through FR-RSN-03. Graph expansion node.
+Defined terms conflict detection. Findings generation.
+Contradiction detection. Typed escalations. Frontend
+findings report.
+
+10
+
+ACT path — draft + approval
+gate
+
+Stages 3,9
+
+FR-ACT-01, FR-ACT-02, FR-GATE-01 through
+FR-GATE-03. Action detection. Draft generation.
+Approval gate manager (HMAC, durable checkpoint,
+TTL). Frontend approval inbox.
+
+11
+
+ACT path — execution +
+
+Stage 10
+
+recovery
+
+FR-EXEC-01 through FR-EXEC-03. Tool registry.
+Idempotency keys. Saga compensation. External
+connectors (email, Slack, case tracker). Frontend action
+queue + escalation view.
+
+12
+
+Audit trail
+
+Stage 10
+
+FR-AUD-01. Append-only writes. AuditLog table
+constraints. Prompt archiving to R2. Frontend audit trail
+view.
+
+13
+
+Research instrumentation
+
+Stage 8
+
+FR-RES-01. ResearchLog writes on every retrieval.
+Negation pair logging. Faithfulness scoring. Intent
+classification logging. Export API. Build in parallel with
+Stage 11+.
+
+14
+
+Notification layer
+
+Stage 10
+
+FR-NOTIF-01. Email (SMTP) + Slack. Delivery retry.
+Dedup. In-app fallback.
+
+15
+
+CUAD evaluation scripts
+
+Stage 8+
+
+Recall@k, MRR on ANALYZE path. Reference resolution
+accuracy on REASON path. Offline — build alongside
+Stage 14.
+
+12. Open Questions
+ID
+
+Status
+
+Question
+
+Recommendation
+
+OQ-01
+
+Open
+
+0.80 confidence threshold for
+
+Start at 0.80. Instrument every gate event in ResearchLog.
+
+ambiguity gate
+
+Adjust threshold after 50 real goal submissions based on lawyer
+override rate. If lawyers rarely change the system's guess, lower
+threshold.
+
+OQ-02
+
+Open
+
+REASON path depth: how many
+
+Default: decompose goal into 4–8 retrieval tasks, one finding per
+
+findings per goal?
+
+task. Configurable per org (range 2–12). More tasks = more
+latency. Start at 4–6 for V1.
+
+OQ-03
+
+Open
+
+Filing API scope for V1
+
+Generic webhook connector only. Real court filing APIs require
+attorney credentials and firm-level legal liability — out of scope
+for V1. Clio (case management) has a documented API and is
+the priority integration.
+
+OQ-04
+
+Open
+
+Multi-approver support
+
+Defer to V2. V1 assumes single approver. Adding quorum logic
+(N of M approvers) is a clean additive change —
+ApprovalRequest.required_approvers list + quorum check.
+Architecture supports it.
+
+OQ-05
+
+Open
+
+Draft output format
+
+Structured Markdown rendered in-browser with download as
+DOCX via python-docx. Firm letterhead configurable per org.
+Plain text copy also available.
+
+OQ-06
+
+Open
+
+Cross-workspace retrieval
+
+Should a lawyer be able to query across workspaces (e.g. 'find
+all liability caps across all my deals')? V1: no — workspace
+isolation is the primary tenancy model. V2 consideration.
+
+OQ-07
+
+TBD
+
+Prompt versioning registry
+
+Prompts change during development. AuditLog stores prompt
+hash + R2 archive — but recovering which prompt version a
+hash corresponds to requires a prompt version registry. Build
+this in Stage 1 alongside schema.
+
+OQ-08
+
+Open
+
+Synthetic negation for research
+
+The reranker negation paper requires negation pair data. Option
+A: instrument live queries with synthetic negated variants (adds
+latency, rich data). Option B: offline evaluation against CUAD.
+Recommendation: offline for paper, live as optional org setting.
+
+13. Glossary
+Term
+
+Definition
+
+Workspace
+
+A named deal folder — documents + user context. Primary unit of work in Lex.
+
+Goal
+
+A plain-language statement from the lawyer. The system's input.
+
+Intent
+
+The orchestrator's classification of a goal: ANALYZE, REASON, or ACT.
+
+Ambiguity gate
+
+A durable pause when intent classification confidence < 0.80. System shows its best guess,
+lawyer confirms or changes.
+
+Document intelligence
+
+The complete set of artifacts built at ingestion: chunks, dual embeddings, defined terms,
+
+package
+
+cross-reference graph, deadline registry entries.
+
+Capability layer
+
+One of three composable modules: Retrieval, Graph Intelligence, Action.
+
+Named vectors
+
+Qdrant's per-point multiple vector support — text-embedding-3-large and legal-bert stored
+on the same point, queried independently and fused via RRF.
+
+RRF
+
+Reciprocal Rank Fusion — fusion algorithm combining dense and sparse retrieval rankings.
+
+Graph expansion
+
+Pulling Neo4j-referenced clauses into retrieval context — dependency-aware retrieval.
+
+Defined terms registry
+
+PostgreSQL table of all terms defined across workspace documents, with cross-document
+conflict detection.
+
+Deadline registry
+
+PostgreSQL table of time-bound obligations extracted at ingestion. Scanned by Celery Beat
+every 15 minutes.
+
+HITL
+
+Human-in-the-loop — any workflow step requiring a human decision before continuation.
+
+Approval gate
+
+Durable ACT-path HITL pause requiring explicit lawyer sign-off. HMAC-gated,
+TTL-enforced, single-use token.
+
+Saga
+
+Distributed transaction pattern: each tool call has a compensation action; used for
+non-idempotent failure recovery.
+
+Idempotency key
+
+SHA-256(workflow_id + action_id + tool_name + attempt_number) — prevents
+double-execution on Celery retry.
+
+UNDETERMINED
+
+Response mode when < 3 relevant chunks retrieved. Never synthesise without sufficient
+evidence.
+
+UNCOMPENSATABLE_FAIL
+
+Permanent failure of a non-idempotent tool where compensation is not supported. Always
+
+URE
+
+escalates immediately.
+
+ResearchLog
+
+Separate table from AuditLog. Stores retrieval metrics, reranker scores, faithfulness scores,
+intent classifications. No PII. Exportable for research.
+
+LangGraph
+
+Orchestration library managing the workflow as a directed graph of Python functions with
+durable PostgreSQL-backed state.
+
+Prompt hash
+
+SHA-256 of exact prompt text sent to LLM. Stored in AuditLog. Full prompt archived to R2.
+Enables post-hoc verification.
+
+PARTIAL intelligence
+
+A document whose intelligence pipeline completed some but not all stages. Downstream
+layers use available stages; degraded mode noted in results.
+
+Lex — Unified Legal AI Platform SRS v1.0 — Baseline. Generated 2026-04-30.
+
+

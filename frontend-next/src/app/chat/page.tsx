@@ -9,6 +9,7 @@ import { ChatThread } from "@/components/chat/ChatThread";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { AmbiguityGate } from "@/components/chat/AmbiguityGate";
 import { ActionQueue } from "@/components/goals/ActionQueue";
+import { ReasonResult } from "@/components/chat/ReasonResult";
 import { createClient } from "@/lib/supabase/client";
 import {
   getMe,
@@ -545,11 +546,17 @@ export default function ChatPage() {
       }
 
       // Completed: ACT with actions rendering via ActionQueue child
+      // Completed: REASON with findings rendered via ReasonResult child
       if (goal.status === "COMPLETED") {
         if (goal.intent === "ACT" && goal.actions && goal.actions.length > 0) {
           msgs.push({
             role: "assistant",
             content: goal.answer || "Draft ready for review.",
+          });
+        } else if (goal.intent === "REASON") {
+          msgs.push({
+            role: "assistant",
+            content: goal.answer || "Reasoning complete.",
           });
         } else {
           msgs.push({
@@ -645,6 +652,15 @@ export default function ChatPage() {
                   key={`actions-${goal.id}`}
                   actions={goal.actions}
                   draft={goal.answer}
+                />
+              );
+            }
+            if (goal.intent === "REASON") {
+              return (
+                <ReasonResult
+                  key={`reason-${goal.id}`}
+                  answer={goal.answer}
+                  logs={goal.logs}
                 />
               );
             }

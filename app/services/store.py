@@ -1,4 +1,5 @@
 import os
+import uuid
 from typing import Dict, List, Optional
 
 import cohere
@@ -389,6 +390,39 @@ def search_hybrid_qdrant(
             extra={"error": str(rerank_err)[:200]},
         )
         reranked_results = sorted(raw_results, key=lambda x: x["score"], reverse=True)
+
+    # ── ResearchLog: Log retrieval data for evaluation ──────────────────────
+    try:
+        from app.database import AsyncSessionLocal
+        from app.models import ResearchLog
+
+        async def _log_research():
+            async with AsyncSessionLocal() as log_db:
+                log_entry = ResearchLog(
+                    id=uuid.uuid4(),
+                    workflow_id=None,
+                    goal_id=None,
+                    org_id=uuid.UUID(org_id) if isinstance(org_id, str) else org_id,
+                    query_text=query_text,
+                    retrieved_chunks={
+                        "count": len(raw_results),
+                        "top_scores": [r.get("score", 0) for r in reranked_results[:5]],
+                    },
+                    reranker_scores={
+                        "model": "rerank-english-v3.0",
+                        "top_scores": [r.get("score", 0) for r in reranked_results[:5]],
+                    },
+                    faithfulness_score=None,
+                    negation_sensitivity_score=None,
+                )
+                log_db.add(log_entry)
+                await log_db.commit()
+
+        import asyncio
+
+        asyncio.ensure_future(_log_research())
+    except Exception:
+        pass  # Research logging is best-effort
 
     # ── Apply Token Budget / Hierarchical Deduplication ───────────────────────
     deduplicated = _deduplicate_by_parent(reranked_results, max_context_chars=12000)
