@@ -373,7 +373,7 @@ export default function ChatPage() {
                   !response.workflow_id &&
                   !response.answer &&
                   response.intent_confidence !== undefined &&
-                  response.intent_confidence < 0.7,
+                  response.intent_confidence < 0.8,
                 suggestedIntent:
                   (response.primary_intent as GoalIntent) || undefined,
               }
