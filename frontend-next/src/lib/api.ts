@@ -534,3 +534,71 @@ export function markAllNotificationsRead(token: string, orgSlug?: string) {
     method: "POST",
   });
 }
+
+// ── Audit ────────────────────────────────────────────────────────────────────
+
+export function getGoalAuditTrail(
+  token: string,
+  workspaceId: string,
+  goalId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{
+    goal_id: string;
+    goal_text: string;
+    events: {
+      timestamp: string;
+      type: string;
+      detail: Record<string, unknown>;
+    }[];
+  }>(`/workspaces/${workspaceId}/goals/${goalId}/audit`, { token, orgSlug });
+}
+
+// ── Deadlines ────────────────────────────────────────────────────────────────
+
+export function listDeadlines(
+  token: string,
+  workspaceId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<
+    {
+      id: string;
+      obligation_description: string;
+      obligation_type: string;
+      raw_date_expression: string;
+      resolved_deadline: string | null;
+      resolution_status: string;
+      conflict_flag: boolean;
+      status: string;
+      urgency_score: number;
+      days_remaining?: number;
+    }[]
+  >(`/workspaces/${workspaceId}/deadlines`, { token, orgSlug });
+}
+
+// ── Escalations ──────────────────────────────────────────────────────────────
+
+export function listEscalations(token: string, orgSlug?: string) {
+  return apiFetch<
+    {
+      id: string;
+      status: string;
+      intent: string;
+      error_context?: string;
+      created_at: string;
+    }[]
+  >("/escalations", { token, orgSlug });
+}
+
+export function resolveEscalation(
+  token: string,
+  escalationId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ message: string }>(`/escalations/${escalationId}/resolve`, {
+    token,
+    orgSlug,
+    method: "POST",
+  });
+}
