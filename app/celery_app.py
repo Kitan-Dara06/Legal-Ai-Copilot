@@ -72,12 +72,21 @@ celery_app = Celery(
 )
 
 # Base serialisation — safe for string-based task dispatch
-celery_app.conf.update(
-    task_serializer="json",
-    result_serializer="json",
-    accept_content=["json"],
-    task_ignore_result=False,
-)
+base_config = {
+    "task_serializer": "json",
+    "result_serializer": "json",
+    "accept_content": ["json"],
+    "task_ignore_result": False,
+}
+
+# Broker failover: if a backup URL is configured, set the failover strategy
+if broker_failover:
+    base_config["broker_transport_options"] = {
+        "failover_strategy": "shuffle",
+        "connect_timeout": 30,
+    }
+
+celery_app.conf.update(**base_config)
 
 # Explicit SSL configuration for rediss result backend
 if REDIS_URL.startswith("rediss://"):
