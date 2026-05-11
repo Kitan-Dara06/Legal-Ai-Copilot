@@ -20,7 +20,9 @@ const URGENCY_COLORS: Record<string, string> = {
   "0.9": "red",
 };
 
-function getUrgencyColor(score: number): string {
+function getUrgencyColor(
+  score: number,
+): "success" | "warning" | "error" | "info" | "default" {
   if (score >= 0.9) return "error";
   if (score >= 0.7) return "warning";
   if (score >= 0.5) return "warning";
