@@ -37,11 +37,14 @@ def get_global_qdrant() -> QdrantClient:
     return _qdrant_client
 
 
-def get_cohere_client() -> cohere.ClientV2:
+def get_cohere_client() -> cohere.ClientV2 | None:
     global _cohere_client
+    api_key = os.getenv("COHERE_API_KEY")
+    if not api_key:
+        return None
     if _cohere_client is None:
         _cohere_client = cohere.ClientV2(
-            api_key=os.getenv("COHERE_API_KEY"),
+            api_key=api_key,
             httpx_client=httpx.Client(timeout=120.0),
         )
     return _cohere_client
@@ -362,34 +365,40 @@ def search_hybrid_qdrant(
     cohere_client = get_cohere_client()
     documents_for_rerank = [res["text"] for res in raw_results]
 
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
-    )
-    def fetch_rerank():
-        return cohere_client.rerank(
-            model="rerank-english-v3.0",
-            query=query_text,
-            documents=documents_for_rerank,
-            top_n=len(raw_results),
-        )
-
-    try:
-        rerank_response = fetch_rerank()
-        # Rebuild list in the order decided by Cohere
-        reranked_results = []
-        for result in rerank_response.results:
-            original_doc = raw_results[result.index]
-            original_doc["score"] = result.relevance_score
-            reranked_results.append(original_doc)
-    except Exception as rerank_err:
-        # Cohere unavailable — fall back to Qdrant RRF scores (already fused)
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "Cohere rerank failed, using Qdrant RRF scores as fallback",
-            extra={"error": str(rerank_err)[:200]},
-        )
+    if cohere_client is None:
+        # No Cohere API key — use Qdrant RRF scores directly
         reranked_results = sorted(raw_results, key=lambda x: x["score"], reverse=True)
+    else:
+
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+        )
+        def fetch_rerank():
+            return cohere_client.rerank(
+                model="rerank-english-v3.0",
+                query=query_text,
+                documents=documents_for_rerank,
+                top_n=len(raw_results),
+            )
+
+        try:
+            rerank_response = fetch_rerank()
+            reranked_results = []
+            for result in rerank_response.results:
+                original_doc = raw_results[result.index]
+                original_doc["score"] = result.relevance_score
+                reranked_results.append(original_doc)
+        except Exception as rerank_err:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Cohere rerank failed, using Qdrant RRF scores as fallback",
+                extra={"error": str(rerank_err)[:200]},
+            )
+            reranked_results = sorted(
+                raw_results, key=lambda x: x["score"], reverse=True
+            )
 
     # ── ResearchLog: Log retrieval data for evaluation ──────────────────────
     try:

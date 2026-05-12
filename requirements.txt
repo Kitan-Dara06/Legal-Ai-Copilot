@@ -25,7 +25,7 @@ redis                 # Python client for Redis
 
 celery[redis]                  # Task queue; RabbitMQ broker + Redis result backend
 
-qdrant-client         # Python client for Qdrant
+qdrant-client>=1.16,<1.17  # Python client for Qdrant (match server version)
 
 pypdf                 # Read PDFs, detect if scanned or digital
 pdfplumber            # High-fidelity digital PDF extraction (preserves tables)
