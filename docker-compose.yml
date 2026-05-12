@@ -87,6 +87,8 @@ services:
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost}
     env_file:
       - .env.production
+    ports:
+      - "8000:8000"
     # API concurrency (HTTP). Background processing is still handled by Celery workers.
     # Override on the host: UVICORN_WORKERS=2 docker compose up -d --build api
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-4} --proxy-headers --forwarded-allow-ips=*
