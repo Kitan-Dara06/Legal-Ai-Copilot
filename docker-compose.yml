@@ -1,202 +1,201 @@
 services:
-    db:
-        image: postgres:15-alpine
-        restart: always
-        environment:
-            POSTGRES_USER: ${POSTGRES_USER:-postgres}
-            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-            POSTGRES_DB: ${POSTGRES_DB:-legal_rag}
-        volumes:
-            - postgres_data:/var/lib/postgresql/data
-        networks:
-            - internal
-        healthcheck:
-            test:
-                ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-            interval: 10s
-            timeout: 5s
-            retries: 5
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-legal_rag}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-    qdrant:
-        image: qdrant/qdrant:v1.7.0
-        restart: always
-        ports:
-            - "6333:6333"
-            - "6334:6334"
-        volumes:
-            - qdrant_data:/qdrant/storage
-        networks:
-            - internal
-        healthcheck:
-            test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
-            interval: 10s
-            timeout: 5s
-            retries: 5
+  qdrant:
+    image: qdrant/qdrant:v1.7.0
+    restart: always
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-    neo4j:
-        image: neo4j:5.15.0
-        restart: always
-        environment:
-            NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-neo4j_password}
-            NEO4J_server_memory_heap_initial__size: 1G
-            NEO4J_server_memory_heap_max__size: 2G
-            NEO4J_server_memory_pagecache_size: 1G
-            # Disabling lazy-loading for immediate availability
-            NEO4J_dbms_databases_default__to__read__only: "false"
-        ports:
-            - "7474:7474"
-            - "7687:7687"
-        volumes:
-            - neo4j_data:/data
-        networks:
-            - internal
-        healthcheck:
-            test: ["CMD", "wget", "http://localhost:7474", "-O", "-"]
-            interval: 15s
-            timeout: 10s
-            retries: 5
+  neo4j:
+    image: neo4j:5.15.0
+    restart: always
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-neo4j_password}
+      NEO4J_server_memory_heap_initial__size: 1G
+      NEO4J_server_memory_heap_max__size: 2G
+      NEO4J_server_memory_pagecache_size: 1G
+      # Disabling lazy-loading for immediate availability
+      NEO4J_dbms_databases_default__to__read__only: "false"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "wget", "http://localhost:7474", "-O", "-"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
 
-    redis:
-        image: redis:7-alpine
-        restart: always
-        networks:
-            - internal
-        healthcheck:
-            test: ["CMD", "redis-cli", "ping"]
-            interval: 10s
-            timeout: 5s
-            retries: 5
+  redis:
+    image: redis:7-alpine
+    restart: always
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-    migrations:
-        build:
-            context: .
-            dockerfile: Dockerfile
-        env_file:
-            - .env.production
-        command: alembic upgrade head
-        depends_on:
-            db:
-                condition: service_healthy
-        networks:
-            - internal
+  migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.production
+    command: alembic upgrade head
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
 
-    api:
-        build:
-            context: .
-            dockerfile: Dockerfile
-        environment:
-            - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost}
-        env_file:
-            - .env.production
-        # API concurrency (HTTP). Background processing is still handled by Celery workers.
-        # Override on the host: UVICORN_WORKERS=2 docker compose up -d --build api
-        command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-4} --proxy-headers --forwarded-allow-ips=*
-        restart: always
-        depends_on:
-            db:
-                condition: service_healthy
-            redis:
-                condition: service_healthy
-            rabbitmq:
-                condition: service_healthy
-            migrations:
-                condition: service_completed_successfully
-        healthcheck:
-            test: ["CMD", "curl", "-f", "http://localhost:8000/live"]
-            interval: 30s
-            timeout: 10s
-            retries: 5
-            start_period: 180s
-        networks:
-            - internal
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost}
+    env_file:
+      - .env.production
+    # API concurrency (HTTP). Background processing is still handled by Celery workers.
+    # Override on the host: UVICORN_WORKERS=2 docker compose up -d --build api
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-4} --proxy-headers --forwarded-allow-ips=*
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    networks:
+      - internal
 
-    worker_pdf:
-        build:
-            context: .
-            dockerfile: Dockerfile
-        env_file:
-            - .env.production
-        command: celery -A app.worker worker -Q default -n pdf_worker@%h -c 2
-        restart: always
-        depends_on:
-            db:
-                condition: service_healthy
-            redis:
-                condition: service_healthy
-            rabbitmq:
-                condition: service_healthy
-        networks:
-            - internal
+  worker_pdf:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.production
+    command: celery -A app.worker worker -Q default -n pdf_worker@%h -c 1
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - internal
 
-    worker_ocr:
-        build:
-            context: .
-            dockerfile: Dockerfile
-        env_file:
-            - .env.production
-        command: celery -A app.worker worker -Q ocr -n ocr_worker@%h -c 1
-        restart: always
-        depends_on:
-            db:
-                condition: service_healthy
-            redis:
-                condition: service_healthy
-            rabbitmq:
-                condition: service_healthy
-        networks:
-            - internal
+  worker_ocr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.production
+    command: celery -A app.worker worker -Q ocr -n ocr_worker@%h -c 1
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - internal
 
-    rabbitmq:
-        image: rabbitmq:3-management-alpine
-        ports:
-            - "5672:5672"
-            - "15672:15672"
-        environment:
-            RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
-            RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
-        restart: always
-        networks:
-            - internal
-        volumes:
-            - rabbitmq_data:/var/lib/rabbitmq
-        healthcheck:
-            test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-            interval: 10s
-            timeout: 5s
-            retries: 5
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    restart: always
+    networks:
+      - internal
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-    nginx:
-        image: nginx:alpine
-        volumes:
-            - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
-            - letsencrypt_certs:/etc/letsencrypt:ro
-            - ./certbot_challenge:/var/www/certbot:ro
-        ports:
-            - "80:80"
-            - "443:443"
-        depends_on:
-            api:
-                condition: service_healthy
-        restart: always
-        networks:
-            - internal
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - letsencrypt_certs:/etc/letsencrypt:ro
+      - ./certbot_challenge:/var/www/certbot:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: always
+    networks:
+      - internal
 
-    certbot:
-        image: certbot/certbot
-        volumes:
-            - letsencrypt_certs:/etc/letsencrypt
-            - ./certbot_challenge:/var/www/certbot
-        entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
-        networks:
-            - internal
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - letsencrypt_certs:/etc/letsencrypt
+      - ./certbot_challenge:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - internal
 
 networks:
-    internal:
-        driver: bridge
+  internal:
+    driver: bridge
 
 volumes:
-    rabbitmq_data:
-    postgres_data:
-    qdrant_data:
-    neo4j_data:
-    letsencrypt_certs:
+  rabbitmq_data:
+  postgres_data:
+  qdrant_data:
+  neo4j_data:
+  letsencrypt_certs:
