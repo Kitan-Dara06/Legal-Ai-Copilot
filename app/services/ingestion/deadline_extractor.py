@@ -79,8 +79,13 @@ _DATE_PARSERS = [
     # MM/DD/YYYY or DD/MM/YYYY
     (
         re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})"),
-        lambda m: (int(m[2]), int(m[1]), int(m[3])),
+        lambda m: (int(m[3]), int(m[1]), int(m[2])),
     ),
+
+
+def _validate_date(year: int, month: int, day: int) -> bool:
+    """Check if year/month/day values are valid."""
+    return 1 <= month <= 12 and 1 <= day <= 31
 ]
 
 
@@ -131,6 +136,8 @@ def _find_absolute_date(text: str) -> Optional[datetime]:
             result = parser(m)
             if result:
                 year, month, day = result
+                if not _validate_date(year, month, day):
+                    continue
                 return datetime(year, month, day, tzinfo=timezone.utc)
     return None
 

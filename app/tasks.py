@@ -308,9 +308,7 @@ def is_definition_chunk(chunk: dict) -> bool:
             return True
     # Also check the text itself for a strong signal
     text_start = (chunk.get("text", "") or "")[:200].lower()
-    if any(
-        text_start.startswith(kw) for kw in ["definition", "definitions", "glossary"]
-    ):
+    if any(kw in text_start for kw in ["definition", "definitions", "glossary"]):
         return True
     return False
 
