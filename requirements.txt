@@ -41,6 +41,9 @@ python-json-logger    # Structured JSON log formatting
 python-jose[cryptography]  # JWT verification (Supabase auth)
 supabase  # Supabase client (frontend auth)
 
+# Pydantic email validation (EmailStr)
+email-validator>=2.0
+
 psycopg2-binary==2.9.9
 
 # ── Master Orchestrator (LangGraph + Groq LLM) ──────────────────────────────
