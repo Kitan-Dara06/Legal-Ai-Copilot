@@ -537,6 +537,7 @@ async def get_org_id_unified(
         ctx = await _build_supabase_auth_context(claims, db)
         org_id = await _resolve_for_user(ctx.user.id, ctx.user.personal_org_id)
         request.state.org_id = org_id
+        request.state.user_id = ctx.user.id
         return org_id
 
     if x_api_key:

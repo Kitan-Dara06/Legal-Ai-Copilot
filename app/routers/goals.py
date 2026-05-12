@@ -327,9 +327,11 @@ async def create_goal(
     goal_hash = hashlib.sha256(safe_text.encode("utf-8")).hexdigest()
 
     # --- Create Goal row ---
+    user_id = getattr(request.state, "user_id", None)
     goal = Goal(
         workspace_id=workspace_id,
         org_id=org_uuid,
+        user_id=user_id,
         goal_text=safe_text,
         goal_hash=goal_hash,
         mode=req.mode,
