@@ -42,7 +42,13 @@ class LegalEmbedder:
     ):
         self.collection_name = collection_name
         self.qdrant_client = (
-            client if client is not None else QdrantClient(path=QDRANT_PATH)
+            client
+            if client is not None
+            else QdrantClient(
+                path=os.getenv("QDRANT_PATH"),
+                url=os.getenv("QDRANT_URL"),
+                api_key=os.getenv("QDRANT_API_KEY"),
+            )
         )
 
         voyage_key = os.environ.get("VOYAGE_API_KEY")

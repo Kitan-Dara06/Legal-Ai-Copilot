@@ -324,13 +324,13 @@ def search_hybrid_qdrant(
                 prefetch=[
                     Prefetch(
                         query=query_vector,
-                        using="dense",
+                        using="dense_voyage",
                         filter=search_filter,
                         limit=top_k * 5,
                     ),
                     Prefetch(
                         query=sparse_vec,
-                        using="text-sparse",
+                        using="sparse_legal",
                         filter=search_filter,
                         limit=top_k * 5,
                     ),
