@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
-from openai import AsyncOpenAI
+from groq import AsyncGroq
 
 from app.database import AsyncSessionLocal
 from app.models import (
@@ -222,14 +222,8 @@ def _obligations_conflict(desc_a: str, date_a: str, desc_b: str, date_b: str) ->
 
 class DeadlineExtractor:
     def __init__(self):
-        self.client = AsyncOpenAI(
-            api_key=os.environ.get("OPENROUTER_API_KEY")
-            or os.environ.get("OPENAI_API_KEY"),
-            base_url=os.environ.get(
-                "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
-            ).rstrip("/"),
-        )
-        self.model = "meta-llama/llama-3.1-8b-instruct"
+        self.client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+        self.model = "llama-3.3-70b-versatile"
 
     async def _extract_execution_date(
         self, chunks: List[Dict], org_id: uuid.UUID

@@ -20,7 +20,7 @@ import traceback
 import uuid
 from typing import Dict, List
 
-from openai import AsyncOpenAI
+from groq import AsyncGroq
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
@@ -31,14 +31,8 @@ from app.tasks import is_definition_chunk
 
 class DefinedTermExtractor:
     def __init__(self):
-        self.client = AsyncOpenAI(
-            api_key=os.environ.get("OPENROUTER_API_KEY")
-            or os.environ.get("OPENAI_API_KEY"),
-            base_url=os.environ.get(
-                "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
-            ).rstrip("/"),
-        )
-        self.model = "meta-llama/llama-3.1-8b-instruct"  # OpenRouter fallback
+        self.client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+        self.model = "llama-3.3-70b-versatile"
 
     async def extract_and_store(
         self,

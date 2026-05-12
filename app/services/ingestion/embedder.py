@@ -228,6 +228,10 @@ class LegalEmbedder:
                     vector=vector_dict,
                     payload={
                         "document_name": document_name,
+                        "org_id": str(chunk.get("org_id", "")),
+                        "file_id": chunk.get("file_id"),
+                        "workspace_id": str(chunk.get("workspace_id", "")),
+                        "filename": chunk.get("filename", document_name),
                         "hierarchy_path": chunk.get("hierarchy", []),
                         "raw_text": chunk["text"],
                         "rich_text": rich_text,

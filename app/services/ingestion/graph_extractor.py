@@ -23,8 +23,8 @@ import os
 import re
 from typing import Dict, List, Optional
 
+from groq import AsyncGroq
 from neo4j import Driver, GraphDatabase
-from openai import AsyncOpenAI
 
 from app.redis_client import acquire_llm_slot, create_redis_pool, release_llm_slot
 
@@ -286,13 +286,8 @@ class LLMReferenceParser:
     """
 
     def __init__(self):
-        self.client = AsyncOpenAI(
-            api_key=os.environ.get("OPENAI_API_KEY"),
-            base_url=os.environ.get(
-                "OPENAI_API_BASE", "https://api.groq.com/openai/v1"
-            ),
-        )
-        self.model = "llama-3.1-8b-instant"
+        self.client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+        self.model = "llama-3.3-70b-versatile"
 
     async def resolve_references(
         self,
@@ -348,7 +343,8 @@ Focus on natural-language references like "as defined in the Master Agreement",
 "pursuant to the Governing Law clause", or "subject to the terms of the SOW".
 Also extract any standard references like Section X or Article Y if present.
 
-Return ONLY a valid JSON list of strings. If none found, return [].
+Return ONLY a valid JSON object with a "references" field containing the list of strings.
+If none found, return: {{"references": []}}
 Do not include any explanation or markdown.
 
 Text: {text}"""
@@ -367,13 +363,15 @@ Text: {text}"""
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.0,
+                    response_format={"type": "json_object"},
                 )
 
                 raw = response.choices[0].message.content.strip()
                 if raw.startswith("```"):
                     raw = re.sub(r"^```(?:json)?", "", raw).rstrip("```").strip()
 
-                refs = json.loads(raw)
+                parsed = json.loads(raw)
+                refs = parsed.get("references", [])
 
                 clean_refs = []
                 for ref in refs:
