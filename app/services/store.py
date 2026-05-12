@@ -15,6 +15,7 @@ from qdrant_client.models import (
     MatchValue,
     Prefetch,
 )
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 load_dotenv()
 
