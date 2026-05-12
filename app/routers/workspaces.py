@@ -412,6 +412,7 @@ async def upload_document(
                 "filename": filename,
                 "blob_name": blob_name,
             },
+            queue="ocr",
         )
     else:
         celery_app.send_task(
@@ -423,6 +424,7 @@ async def upload_document(
                 "filename": filename,
                 "blob_name": blob_name,
             },
+            queue="default",
         )
 
     logger.info(
