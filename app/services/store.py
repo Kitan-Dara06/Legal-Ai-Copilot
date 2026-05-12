@@ -11,11 +11,8 @@ from qdrant_client.models import (
     Filter,
     Fusion,
     FusionQuery,
-    MatchAny,
-    MatchValue,
     Prefetch,
 )
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 load_dotenv()
 
@@ -366,24 +363,15 @@ def search_hybrid_qdrant(
     documents_for_rerank = [res["text"] for res in raw_results]
 
     if cohere_client is None:
-        # No Cohere API key — use Qdrant RRF scores directly
         reranked_results = sorted(raw_results, key=lambda x: x["score"], reverse=True)
     else:
-
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=10),
-        )
-        def fetch_rerank():
-            return cohere_client.rerank(
+        try:
+            rerank_response = cohere_client.rerank(
                 model="rerank-english-v3.0",
                 query=query_text,
                 documents=documents_for_rerank,
                 top_n=len(raw_results),
             )
-
-        try:
-            rerank_response = fetch_rerank()
             reranked_results = []
             for result in rerank_response.results:
                 original_doc = raw_results[result.index]
