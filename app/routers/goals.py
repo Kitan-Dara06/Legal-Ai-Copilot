@@ -25,6 +25,7 @@ from app.database import get_db
 from app.dependencies import get_org_id_unified
 from app.models import (
     Action,
+    Finding,
     Goal,
     GoalStatus,
     IntentLog,
@@ -134,6 +135,10 @@ class GoalResultResponse(BaseModel):
     logs: List[dict] = Field(
         default_factory=list,
         description="Tool execution logs.",
+    )
+    findings: List[dict] = Field(
+        default_factory=list,
+        description="Structured findings with citations and reference chains (REASON intents).",
     )
 
 
@@ -556,6 +561,7 @@ async def get_goal_result(
 
     actions_list = []
     logs_list = []
+    findings_list = []
 
     if workflow:
         org_uuid = uuid.UUID(org_id)
@@ -596,6 +602,28 @@ async def get_goal_result(
                 }
             )
 
+        # Fetch findings
+        findings_res = await db.execute(
+            select(Finding)
+            .where(Finding.workflow_id == workflow.id)
+            .order_by(Finding.created_at)
+        )
+        for f in findings_res.scalars().all():
+            findings_list.append(
+                {
+                    "id": str(f.id),
+                    "claim": f.claim,
+                    "confidence": f.confidence,
+                    "supporting_citations": f.supporting_citations,
+                    "reference_chain": f.reference_chain,
+                    "definitional_conflicts": f.definitional_conflicts,
+                    "escalated": f.escalated,
+                    "escalation_type": f.escalation_type.value
+                    if f.escalation_type
+                    else None,
+                }
+            )
+
     return GoalResultResponse(
         goal_id=str(goal.id),
         status=goal.status.value if goal.status else "UNKNOWN",
@@ -603,6 +631,7 @@ async def get_goal_result(
         answer=goal.answer,
         actions=actions_list,
         logs=logs_list,
+        findings=findings_list,
     )
 
 

@@ -402,6 +402,16 @@ export function getGoalResult(
       summary: string;
       created_at: string;
     }[];
+    findings?: {
+      id: string;
+      claim: string;
+      confidence: number;
+      supporting_citations?: any;
+      reference_chain?: any;
+      definitional_conflicts?: any;
+      escalated: boolean;
+      escalation_type?: string | null;
+    }[];
   }>(`/workspaces/${workspaceId}/goals/${goalId}/result`, { token, orgSlug });
 }
 

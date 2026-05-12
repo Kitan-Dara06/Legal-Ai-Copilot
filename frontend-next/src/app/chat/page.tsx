@@ -55,6 +55,16 @@ interface GoalMessage {
     summary: string;
     created_at: string;
   }[];
+  findings?: {
+    id: string;
+    claim: string;
+    confidence: number;
+    supporting_citations?: any;
+    reference_chain?: any;
+    definitional_conflicts?: any;
+    escalated: boolean;
+    escalation_type?: string | null;
+  }[];
   created_at: string;
   // Ambiguity gate state
   needsIntentConfirmation?: boolean;
@@ -297,6 +307,7 @@ export default function ChatPage() {
                       intent: (result.intent as GoalIntent) || g.intent,
                       actions: result.actions,
                       logs: result.logs,
+                      findings: result.findings,
                     }
                   : g,
               ),
@@ -662,6 +673,7 @@ export default function ChatPage() {
                 <ReasonResult
                   key={`reason-${goal.id}`}
                   answer={goal.answer}
+                  findings={goal.findings}
                   logs={goal.logs}
                 />
               );
