@@ -359,8 +359,7 @@ async def create_goal(
     if classification.primary_intent == "ANALYZE":
         # Synchronous ANALYZE path: search + generate answer
         try:
-            all_chunks = await run_in_threadpool(
-                search_tool,
+            all_chunks = await search_tool(
                 query=safe_text,
                 mode=req.mode,
                 top_k=5,
