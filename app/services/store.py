@@ -151,7 +151,7 @@ def search_hybrid(
     search_filter = Filter(must=list(must_conditions)) if must_conditions else None
 
     sparse_vec = compute_sparse_vector(query_text)
-    nomic_vector = get_nomic_embedding(query_text) if use_nomic else None
+    nomic_vector = get_nomic_embedding(query_text) if nomic_vector is not None else None
 
     prefetches = [
         Prefetch(
