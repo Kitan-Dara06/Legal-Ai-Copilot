@@ -15,7 +15,6 @@ from qdrant_client.models import (
     MatchValue,
     Prefetch,
 )
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 load_dotenv()
 
@@ -152,46 +151,53 @@ def search_hybrid(
     search_filter = Filter(must=list(must_conditions)) if must_conditions else None
 
     sparse_vec = compute_sparse_vector(query_text)
+    nomic_vector = get_nomic_embedding(query_text) if use_nomic else None
 
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
-    )
-    def fetch_qdrant_points():
-        prefetches = [
-            Prefetch(
-                query=query_vector,
-                using="dense_voyage",
-                filter=search_filter,
-                limit=top_k * 3,
-            ),
-            Prefetch(
-                query=sparse_vec,
-                using="sparse_legal",
-                filter=search_filter,
-                limit=top_k * 3,
-            ),
-        ]
-        if nomic_vector:
-            prefetches.append(
-                Prefetch(
-                    query=nomic_vector,
-                    using="dense_nomic",
-                    filter=search_filter,
-                    limit=top_k * 3,
-                )
-            )
-        return qdrant.query_points(
-            collection_name="legal_chunks",
-            prefetch=prefetches,
-            query=FusionQuery(fusion=Fusion.RRF),
+    prefetches = [
+        Prefetch(
+            query=query_vector,
+            using="dense_voyage",
+            filter=search_filter,
             limit=top_k * 3,
-            with_payload=True,
-        ).points
+        ),
+        Prefetch(
+            query=sparse_vec,
+            using="sparse_legal",
+            filter=search_filter,
+            limit=top_k * 3,
+        ),
+    ]
+    if nomic_vector:
+        prefetches.append(
+            Prefetch(
+                query=nomic_vector,
+                using="dense_nomic",
+                filter=search_filter,
+                limit=top_k * 3,
+            )
+        )
 
-    hits = fetch_qdrant_points()
+    for attempt in range(3):
+        try:
+            qdrant_results = qdrant.query_points(
+                collection_name="legal_chunks",
+                prefetch=prefetches,
+                query=FusionQuery(fusion=Fusion.RRF),
+                limit=top_k * 3,
+                with_payload=True,
+            ).points
+            break
+        except Exception as qe:
+            if attempt < 2:
+                import time
 
-    if not hits:
-        return []
+                time.sleep(2**attempt)
+                continue
+            logger.warning("Qdrant query failed after 3 retries: %s", str(qe)[:100])
+            qdrant_results = []
+            break
+
+    hits = qdrant_results
 
     raw_results = []
     for hit in hits:
@@ -307,35 +313,38 @@ def search_hybrid_qdrant(
     sparse_vec = compute_sparse_vector(query_text)
 
     # ── Native Hybrid Search via Qdrant Prefetch API ──────────────────────────
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
-    )
-    def fetch_qdrant_points():
-        return qdrant.query_points(
-            collection_name="legal_chunks",
-            prefetch=[
-                Prefetch(
-                    query=query_vector,
-                    using="dense",
-                    filter=search_filter,
-                    limit=top_k * 5,
-                ),
-                Prefetch(
-                    query=sparse_vec,
-                    using="text-sparse",
-                    filter=search_filter,
-                    limit=top_k * 5,
-                ),
-            ],
-            query=FusionQuery(fusion=Fusion.RRF),
-            limit=top_k * 5,
-            with_payload=True,
-        ).points
+    qdrant_results = []
+    for attempt in range(3):
+        try:
+            qdrant_results = qdrant.query_points(
+                collection_name="legal_chunks",
+                prefetch=[
+                    Prefetch(
+                        query=query_vector,
+                        using="dense",
+                        filter=search_filter,
+                        limit=top_k * 5,
+                    ),
+                    Prefetch(
+                        query=sparse_vec,
+                        using="text-sparse",
+                        filter=search_filter,
+                        limit=top_k * 5,
+                    ),
+                ],
+                query=FusionQuery(fusion=Fusion.RRF),
+                limit=top_k * 5,
+                with_payload=True,
+            ).points
+            break
+        except Exception as qe:
+            if attempt < 2:
+                import time
 
-    hits = fetch_qdrant_points()
-
-    if not hits:
-        return []
+                time.sleep(2**attempt)
+                continue
+            logger.warning("Qdrant query failed after 3 retries: %s", str(qe)[:100])
+            break
 
     # ── Format into structural payload (mimicking the Chroma Output) ──────────
     raw_results = []
