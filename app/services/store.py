@@ -11,6 +11,8 @@ from qdrant_client.models import (
     Filter,
     Fusion,
     FusionQuery,
+    MatchAny,
+    MatchValue,
     Prefetch,
 )
 
