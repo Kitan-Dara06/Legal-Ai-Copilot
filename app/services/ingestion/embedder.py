@@ -96,7 +96,7 @@ class LegalEmbedder:
                 self.qdrant_client.create_payload_index(
                     collection_name=self.collection_name,
                     field_name=field,
-                    field_type="keyword",
+                    field_schema="keyword",
                 )
             except Exception:
                 pass  # Index already exists
