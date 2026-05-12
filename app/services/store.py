@@ -183,7 +183,7 @@ def search_hybrid(
     for attempt in range(3):
         try:
             qdrant_results = qdrant.query_points(
-                collection_name="legal_chunks",
+                collection_name="lex_unified_chunks",
                 prefetch=prefetches,
                 query=FusionQuery(fusion=Fusion.RRF),
                 limit=top_k * 3,
@@ -257,7 +257,7 @@ def get_all_contract_names(org_id: str):
     )
 
     records, _ = qdrant.scroll(
-        collection_name="legal_chunks",
+        collection_name="lex_unified_chunks",
         limit=10000,
         with_payload=["filename"],
         with_vectors=False,
@@ -320,7 +320,7 @@ def search_hybrid_qdrant(
     for attempt in range(3):
         try:
             qdrant_results = qdrant.query_points(
-                collection_name="legal_chunks",
+                collection_name="lex_unified_chunks",
                 prefetch=[
                     Prefetch(
                         query=query_vector,
