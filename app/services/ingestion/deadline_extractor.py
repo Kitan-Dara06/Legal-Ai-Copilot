@@ -81,12 +81,12 @@ _DATE_PARSERS = [
         re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})"),
         lambda m: (int(m[3]), int(m[1]), int(m[2])),
     ),
+]
 
 
 def _validate_date(year: int, month: int, day: int) -> bool:
     """Check if year/month/day values are valid."""
     return 1 <= month <= 12 and 1 <= day <= 31
-]
 
 
 def _parse_month_name_date(text: str) -> Optional[Tuple[int, int, int]]:
