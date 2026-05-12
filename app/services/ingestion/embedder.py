@@ -90,6 +90,17 @@ class LegalEmbedder:
         else:
             print(f"Collection '{self.collection_name}' already exists — ready.")
 
+        # Ensure payload indexes exist for filtered fields
+        for field in ["org_id", "file_id", "workspace_id", "filename"]:
+            try:
+                self.qdrant_client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field,
+                    field_type="keyword",
+                )
+            except Exception:
+                pass  # Index already exists
+
     # ------------------------------------------------------------------
     # Text formatting
     # ------------------------------------------------------------------
