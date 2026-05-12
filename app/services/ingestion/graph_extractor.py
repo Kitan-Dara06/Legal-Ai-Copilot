@@ -90,13 +90,19 @@ class DependencyGraph:
             self._graph = None
 
     def _ensure_indexes(self):
-        """Create uniqueness constraint once on Clause.id + doc pair.
-        Uses old Cypher syntax compatible with FalkorDB v4.x."""
-        cypher = (
-            "CREATE CONSTRAINT ON (c:Clause) "
-            "ASSERT (c.id, c.doc, c.workspace_id) IS UNIQUE"
-        )
-        self._graph.query(cypher)
+        """Create indexes for faster lookups.
+        FalkorDB v4.x doesn't support composite uniqueness constraints,
+        so we create simple single-property indexes instead."""
+        indexes = [
+            "CREATE INDEX ON :Clause(id)",
+            "CREATE INDEX ON :Clause(doc)",
+            "CREATE INDEX ON :Clause(workspace_id)",
+        ]
+        for idx in indexes:
+            try:
+                self._graph.query(idx)
+            except Exception:
+                pass  # Index may already exist
 
     def close(self):
         """No-op for backward compatibility with callers that close Neo4j drivers."""
