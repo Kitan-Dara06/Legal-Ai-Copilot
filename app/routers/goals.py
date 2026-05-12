@@ -228,7 +228,7 @@ async def _classify_intent(goal_text: str, groq_client) -> IntentClassification:
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            response_model={"type": "json_object"},
+            response_format={"type": "json_object"},
             temperature=0,
         )
         import json
@@ -366,8 +366,13 @@ async def create_goal(
                 top_k=5,
                 org_id=org_id,
             )
+            chunk_texts = (
+                [c.get("text", "") for c in all_chunks]
+                if isinstance(all_chunks, list)
+                else []
+            )
             answer = await run_in_threadpool(
-                generate_final_answer, safe_text, all_chunks, groq_client
+                generate_final_answer, safe_text, chunk_texts, groq_client
             )
         except Exception as e:
             logger.error("ANALYZE processing failed for goal %s: %s", goal_id, e)
