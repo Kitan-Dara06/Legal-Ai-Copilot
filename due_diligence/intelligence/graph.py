@@ -29,6 +29,7 @@ load_dotenv()
 
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
+FALKORDB_USERNAME = os.environ.get("FALKORDB_USERNAME", "falkordb")
 FALKORDB_PASSWORD = os.environ.get("FALKORDB_PASSWORD", "")
 FALKORDB_SSL = os.environ.get("FALKORDB_SSL", "true").lower() == "true"
 FALKORDB_GRAPH = os.environ.get("FALKORDB_GRAPH", "legal_rag")
@@ -39,6 +40,7 @@ def _get_connection_params() -> dict:
     params = {
         "host": FALKORDB_HOST,
         "port": FALKORDB_PORT,
+        "username": FALKORDB_USERNAME,
         "password": FALKORDB_PASSWORD,
     }
     if FALKORDB_SSL:

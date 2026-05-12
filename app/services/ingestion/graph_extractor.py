@@ -31,6 +31,7 @@ from app.redis_client import acquire_llm_slot, create_redis_pool, release_llm_sl
 
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
+FALKORDB_USERNAME = os.environ.get("FALKORDB_USERNAME", "falkordb")
 FALKORDB_PASSWORD = os.environ.get("FALKORDB_PASSWORD", "")
 FALKORDB_SSL = os.environ.get("FALKORDB_SSL", "true").lower() == "true"
 FALKORDB_GRAPH = os.environ.get("FALKORDB_GRAPH", "legal_rag")
@@ -41,6 +42,7 @@ def _get_connection_params() -> dict:
     params = {
         "host": FALKORDB_HOST,
         "port": FALKORDB_PORT,
+        "username": FALKORDB_USERNAME,
         "password": FALKORDB_PASSWORD,
     }
     if FALKORDB_SSL:
@@ -82,7 +84,9 @@ class DependencyGraph:
             self._ensure_indexes()
             print("✅ Connected to FalkorDB Cloud.")
         except Exception as e:
-            print(f"⚠️  FalkorDB connection failed: {e}. Graph features will be disabled.")
+            print(
+                f"⚠️  FalkorDB connection failed: {e}. Graph features will be disabled."
+            )
             self._graph = None
 
     def _ensure_indexes(self):
@@ -338,4 +342,118 @@ class LLMReferenceParser:
         cross_doc_edges = 0
 
         _CROSS_DOC_SIGNALS = re.compile(
-            r"\b(master
+            r"\b(master agreement|statement of work|sow|amendment|side letter|"
+            r"exhibit|schedule|governing agreement|framework agreement|"
+            r"as defined in the|pursuant to the|as set forth in the|"
+            r"subject to the terms of the)\b",
+            re.IGNORECASE,
+        )
+
+        print(f"Resolving cross-references in {len(chunks)} chunks (hybrid mode)...")
+
+        async def process_chunk(chunk):
+            nonlocal regex_hits, llm_hits, llm_skips, cross_doc_edges
+            text = chunk.get("text", "")
+            current_path = chunk.get("hierarchy", [])
+            node_id = " > ".join(current_path) if current_path else "Unknown"
+
+            # Step 1: Regex pre-pass
+            regex_refs = _regex_extract_references(text)
+            if regex_refs:
+                clean_refs = [
+                    r
+                    for r in regex_refs
+                    if not self._is_self_reference(r, current_path)
+                ]
+                chunk["dependencies_clauses"] = clean_refs
+                if clean_refs:
+                    regex_hits += 1
+                llm_skips += 1
+                return
+
+            # Step 2: LLM fallback
+            prompt = f"""Extract legal cross-references from the following text.
+Focus on natural-language references like "as defined in the Master Agreement",
+"pursuant to the Governing Law clause", or "subject to the terms of the SOW".
+Also extract any standard references like Section X or Article Y if present.
+
+Return ONLY a valid JSON object with a "references" field containing the list of strings.
+If none found, return: {{"references": []}}
+Do not include any explanation or markdown.
+
+Text: {text}"""
+
+            # Acquire LLM Token Bucket Lease (Queueing behavior)
+            lease_id = None
+            _redis = create_redis_pool()
+            try:
+                while True:
+                    lease_id = await acquire_llm_slot(str(org_id), _redis, max_slots=5)
+                    if lease_id:
+                        break
+                    await asyncio.sleep(0.5)
+
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    response_format={"type": "json_object"},
+                )
+
+                raw = response.choices[0].message.content.strip()
+                if raw.startswith("```"):
+                    raw = re.sub(r"^```(?:json)?", "", raw).rstrip("```").strip()
+
+                parsed = json.loads(raw)
+                refs = parsed.get("references", [])
+
+                clean_refs = []
+                for ref in refs:
+                    if self._is_self_reference(ref, current_path):
+                        continue
+                    clean_refs.append(ref)
+
+                    if graph and doc_name and _CROSS_DOC_SIGNALS.search(ref):
+                        try:
+                            graph.link_cross_doc_ref(
+                                from_node_id=node_id,
+                                from_doc=doc_name,
+                                to_node_id=ref,
+                                to_doc="__cross_doc__",
+                                edge_type="cross_doc_pending",
+                                workspace_id=workspace_id,
+                            )
+                            cross_doc_edges += 1
+                        except Exception as ge:
+                            print(f"  ⚠️  Graph link failed for '{ref}': {ge}")
+
+                chunk["dependencies_clauses"] = clean_refs
+                if clean_refs:
+                    llm_hits += 1
+
+            except Exception as e:
+                print(f"  ⚠️ LLM extraction failed on chunk: {e}")
+                chunk["dependencies_clauses"] = []
+            finally:
+                if lease_id:
+                    await release_llm_slot(str(org_id), lease_id, _redis)
+                await _redis.aclose()
+
+        # Run all chunks concurrently
+        await asyncio.gather(*(process_chunk(c) for c in chunks))
+
+        print(
+            f"  ⤴️ Regex resolved {regex_hits} chunks | "
+            f"LLM resolved {llm_hits} chunks | "
+            f"LLM skipped {llm_skips} chunks | "
+            f"Cross-doc FalkorDB edges created: {cross_doc_edges}."
+        )
+        return chunks
+
+    def _is_self_reference(self, ref: str, current_path: List[str]) -> bool:
+        """Returns True if the reference points back at the current clause."""
+        if not current_path:
+            return False
+        flat_path = " ".join(current_path).replace(".", "").lower()
+        clean_ref = re.sub(r"[^a-z0-9 ]", "", ref.lower())
+        return flat_path in clean_ref or clean_ref in flat_path
