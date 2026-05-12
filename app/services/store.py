@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 from typing import Dict, List, Optional
@@ -5,6 +6,8 @@ from typing import Dict, List, Optional
 import cohere
 import httpx
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     FieldCondition,
