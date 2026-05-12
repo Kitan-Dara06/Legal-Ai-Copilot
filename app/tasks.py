@@ -214,6 +214,12 @@ async def run_intelligence_pipeline_async(
 
     async def task_embed():
         logger.info(f"[{document_id}] Starting embedding...")
+        # Add metadata fields to each chunk for Qdrant payload
+        for chunk in chunks:
+            chunk["org_id"] = str(org_id)
+            chunk["workspace_id"] = str(workspace_id)
+            chunk["file_id"] = str(document_id)
+            chunk["filename"] = filename
         await loop.run_in_executor(None, embedder.index_document, filename, chunks)
         return "embedding_complete"
 
