@@ -88,10 +88,11 @@ class DependencyGraph:
             self._graph = None
 
     def _ensure_indexes(self):
-        """Create uniqueness constraint once on Clause.id + doc pair."""
+        """Create uniqueness constraint once on Clause.id + doc pair.
+        Uses old Cypher syntax compatible with FalkorDB v4.x."""
         cypher = (
-            "CREATE CONSTRAINT clause_unique IF NOT EXISTS "
-            "FOR (c:Clause) REQUIRE (c.id, c.doc, c.workspace_id) IS UNIQUE"
+            "CREATE CONSTRAINT ON (c:Clause) "
+            "ASSERT (c.id, c.doc, c.workspace_id) IS UNIQUE"
         )
         self._graph.query(cypher)
 
