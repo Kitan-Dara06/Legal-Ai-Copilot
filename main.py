@@ -137,6 +137,13 @@ async def lifespan(app: FastAPI):
         print("⚠️  GROQ_API_KEY not set — Groq features disabled.")
         app.state.groq_client = None
 
+    # ── Cohere API Key Check ─────────────────────────────────────────────
+    cohere_key = os.getenv("COHERE_API_KEY")
+    if cohere_key:
+        print(f"✅ COHERE_API_KEY is set ({cohere_key[:8]}...{cohere_key[-4:]})")
+    else:
+        print("⚠️  COHERE_API_KEY not set — reranker disabled, using Qdrant RRF")
+
     # ── Storage readiness check: fail fast in production by default.
     storage_strict = (
         os.getenv("STORAGE_STRICT_STARTUP", "true" if not is_dev else "false").lower()

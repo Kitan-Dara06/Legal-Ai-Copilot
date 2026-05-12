@@ -363,6 +363,9 @@ def search_hybrid_qdrant(
     documents_for_rerank = [res["text"] for res in raw_results]
 
     if cohere_client is None:
+        logger.warning(
+            "COHERE_API_KEY not set — using Qdrant RRF scores (no reranking)"
+        )
         reranked_results = sorted(raw_results, key=lambda x: x["score"], reverse=True)
     else:
         try:
@@ -378,11 +381,10 @@ def search_hybrid_qdrant(
                 original_doc["score"] = result.relevance_score
                 reranked_results.append(original_doc)
         except Exception as rerank_err:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "Cohere rerank failed, using Qdrant RRF scores as fallback",
-                extra={"error": str(rerank_err)[:200]},
+            logger.error(
+                "[COHERE_FAIL] Reranker failed for query '%s': %s — falling back to Qdrant RRF",
+                query_text[:80],
+                str(rerank_err)[:200],
             )
             reranked_results = sorted(
                 raw_results, key=lambda x: x["score"], reverse=True
