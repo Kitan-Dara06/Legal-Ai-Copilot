@@ -605,11 +605,11 @@ async def synthesis_node(state: PointerOnlyState) -> Dict[str, Any]:
 
 async def graph_expansion_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
-    Expands retrieved chunks via Neo4j cross-reference graph (REASON path).
+    Expands retrieved chunks via FalkorDB cross-reference graph (REASON path).
 
     - 2-hop limit: hop 1 = full text, hop 2 = clause_id only
     - Hydrates clause text from Qdrant for hop 1 references
-    - Graceful degradation: if Neo4j is down, sets graph_degraded=True
+    - Graceful degradation: if FalkorDB is down, sets graph_degraded=True
     """
     state = _adapt_state(state)
     workflow_id = state["workflow_id"]
@@ -642,7 +642,7 @@ async def graph_expansion_node(state: PointerOnlyState) -> Dict[str, Any]:
             "reference_chain": [],
         }
 
-    # Query Neo4j with graceful degradation
+    # Query FalkorDB with graceful degradation
     try:
         from app.services.ingestion.graph_extractor import DependencyGraph
 
@@ -695,7 +695,7 @@ async def graph_expansion_node(state: PointerOnlyState) -> Dict[str, Any]:
         )
 
     except Exception as e:
-        logger.warning("[%s] Neo4j unavailable — DEGRADED mode: %s", workflow_id, e)
+        logger.warning("[%s] FalkorDB unavailable — DEGRADED mode: %s", workflow_id, e)
         graph_degraded = True
 
     # Format expansion into context
@@ -962,7 +962,7 @@ async def escalation_node(state: PointerOnlyState) -> Dict[str, Any]:
             }
         )
 
-    # DEGRADED warning from Neo4j unavailability
+    # DEGRADED warning from FalkorDB unavailability
     if graph_degraded:
         escalations.append(
             {

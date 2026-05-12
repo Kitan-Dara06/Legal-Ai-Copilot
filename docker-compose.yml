@@ -32,29 +32,6 @@ services:
       timeout: 5s
       retries: 5
 
-  neo4j:
-    image: neo4j:5.15.0
-    restart: always
-    environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-neo4j_password}
-      NEO4J_server_memory_heap_initial__size: 1G
-      NEO4J_server_memory_heap_max__size: 2G
-      NEO4J_server_memory_pagecache_size: 1G
-      # Disabling lazy-loading for immediate availability
-      NEO4J_dbms_databases_default__to__read__only: "false"
-    ports:
-      - "7474:7474"
-      - "7687:7687"
-    volumes:
-      - neo4j_data:/data
-    networks:
-      - internal
-    healthcheck:
-      test: ["CMD", "wget", "http://localhost:7474", "-O", "-"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-
   redis:
     image: redis:7-alpine
     restart: always
@@ -199,5 +176,4 @@ volumes:
   rabbitmq_data:
   postgres_data:
   qdrant_data:
-  neo4j_data:
   letsencrypt_certs:

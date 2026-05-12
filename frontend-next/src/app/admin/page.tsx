@@ -97,7 +97,7 @@ export default function AdminPage() {
       <h2 className="text-lg font-semibold text-white mb-4">System Health</h2>
       <Card className="p-4">
         <div className="space-y-3">
-          {["Qdrant", "Neo4j", "RabbitMQ", "PostgreSQL", "Redis"].map(
+          {["Qdrant", "FalkorDB", "RabbitMQ", "PostgreSQL", "Redis"].map(
             (service) => (
               <div
                 key={service}

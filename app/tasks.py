@@ -8,7 +8,7 @@
 #   3. Runs parallel intelligence extraction via asyncio.gather:
 #      - Multi-vector embedding (Voyage + BGE + SPLADE)
 #      - Defined terms extraction
-#      - Cross-reference graph extraction (Neo4j)
+#      - Cross-reference graph extraction (FalkorDB)
 #      - Deadline extraction
 
 import asyncio
@@ -207,7 +207,7 @@ async def run_intelligence_pipeline_async(
     terms_extractor = DefinedTermExtractor()
     deadline_extractor = DeadlineExtractor()
     graph_extractor = LLMReferenceParser()
-    neo4j_graph = DependencyGraph()
+    falkordb_graph = DependencyGraph()
 
     # Step A: Run synchronous Embedder inside an executor
     loop = asyncio.get_running_loop()
@@ -261,19 +261,19 @@ async def run_intelligence_pipeline_async(
         resolved_chunks = await graph_extractor.resolve_references(
             chunks,
             filename,
-            neo4j_graph,
+            falkordb_graph,
             org_id=org_id,
             workspace_id=str(workspace_id),
         )
-        # Build neo4j graph
+        # Build FalkorDB graph
         await loop.run_in_executor(
             None,
-            neo4j_graph.build_graph,
+            falkordb_graph.build_graph,
             resolved_chunks,
             filename,
             str(workspace_id),
         )
-        neo4j_graph.close()
+        falkordb_graph.close()
         return "graph_complete"
 
     # Run them all concurrently

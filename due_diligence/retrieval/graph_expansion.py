@@ -1,8 +1,7 @@
 """
-Graph Expander — Neo4j AuraDB
-==============================
-Replaces the NetworkX graph_expansion.py.
-Traverses the persistent Neo4j graph to pull dependency chains for each hit.
+Graph Expander — FalkorDB
+==========================
+Traverses the persistent FalkorDB graph to pull dependency chains for each hit.
 Now propagates source_document for cross-document reference provenance.
 """
 
@@ -11,12 +10,12 @@ from typing import Dict, List
 
 class GraphExpander:
     """
-    Takes the direct semantic hits from Qdrant and traverses the Neo4j
+    Takes the direct semantic hits from Qdrant and traverses the FalkorDB
     dependency graph to pull in all referenced clauses (intra- and cross-doc).
     """
 
     def __init__(self, graph_engine, workspace_id: str = ""):
-        self.graph = graph_engine  # DependencyGraph (Neo4j) instance
+        self.graph = graph_engine  # DependencyGraph (FalkorDB) instance
         self.workspace_id = workspace_id
 
     def expand_context(self, vector_hits: List[Dict]) -> List[Dict]:

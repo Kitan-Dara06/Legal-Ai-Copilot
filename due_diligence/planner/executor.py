@@ -58,7 +58,7 @@ class StateMachineExecutor:
     Tasks are sorted by priority (1 = highest) before execution.
 
     Supported tools:
-      - graph_search   : traverse Neo4j dependency graph
+      - graph_search   : traverse FalkorDB dependency graph
       - registry_check : look up term definitions + conflicts in PostgreSQL
       - hybrid_search  : query Qdrant dense+sparse (requires retriever + embedder)
     """

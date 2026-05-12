@@ -84,7 +84,7 @@ class LLMReferenceParser:
         Args:
             chunks:   List of chunk dicts (must contain 'text' and 'hierarchy').
             doc_name: Name of the document being parsed.
-            graph:    DependencyGraph (Neo4j) instance. When provided, LLM-detected
+            graph:    DependencyGraph instance. When provided, LLM-detected
                       cross-document references are persisted via link_cross_doc_ref().
         """
         regex_hits = 0
@@ -158,7 +158,7 @@ Text: {text}"""
                         continue
                     clean_refs.append(ref)
 
-                    # Wire cross-document edges into Neo4j if graph provided
+                    # Wire cross-document edges into graph if provided
                     if graph and doc_name and _CROSS_DOC_SIGNALS.search(ref):
                         try:
                             graph.link_cross_doc_ref(
@@ -185,7 +185,7 @@ Text: {text}"""
             f"  ⤴️ Regex resolved {regex_hits} chunks | "
             f"LLM resolved {llm_hits} chunks | "
             f"LLM skipped {llm_skips} chunks | "
-            f"Cross-doc Neo4j edges created: {cross_doc_edges}."
+            f"Cross-doc FalkorDB edges created: {cross_doc_edges}."
         )
         return chunks
 

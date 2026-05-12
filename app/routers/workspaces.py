@@ -922,18 +922,18 @@ async def expand_graph(
     """
     GET /workspaces/{workspace_id}/graph/expand
 
-    Neo4j graph expander (placeholder).
-    Will be implemented when Neo4j ingestion is active.
+    FalkorDB graph expander (placeholder).
+    Will be implemented when FalkorDB ingestion is active.
 
     Currently returns a descriptive placeholder indicating
-    that the Neo4j graph visualizer is not yet available.
+    that the FalkorDB graph visualizer is not yet available.
     """
     return {
         "workspace_id": str(workspace_id),
         "status": "unavailable",
-        "message": "Neo4j graph visualization is not yet available. "
-        "This endpoint will be implemented when Neo4j ingestion is active.",
-        "documentation_reference": "SRS Section 7.2 — Neo4j Knowledge Graph",
+        "message": "FalkorDB graph visualization is not yet available. "
+        "This endpoint will be implemented when FalkorDB ingestion is active.",
+        "documentation_reference": "SRS Section 7.2 — FalkorDB Knowledge Graph",
     }
 
 

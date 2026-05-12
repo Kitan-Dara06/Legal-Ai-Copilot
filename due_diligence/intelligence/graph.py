@@ -1,10 +1,10 @@
 """
-Neo4j AuraDB — Cross-Reference Dependency Graph
-=================================================
-Replaces the in-memory NetworkX DiGraph with a persistent Neo4j AuraDB graph.
+FalkorDB Cloud — Cross-Reference Dependency Graph
+==================================================
+Replaces the in-memory NetworkX DiGraph with a persistent FalkorDB Cloud graph.
 
 Changes from the old implementation:
-  - Nodes and edges survive server restarts (AuraDB cloud persistence)
+  - Nodes and edges survive server restarts (FalkorDB cloud persistence)
   - Cross-document edges are fully supported via MERGE on (doc, node_id)
   - `build_graph` is additive: calling it for a new document does NOT reset
     edges from previous documents
@@ -18,68 +18,87 @@ Edge schema:
 """
 
 import os
+import ssl
 from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
-from neo4j import Driver, GraphDatabase
+from falkordb import FalkorDB
 
 load_dotenv()
 
 
-def _get_driver() -> Driver:
-    neo4j_uri = (os.environ.get("NEO4J_URI") or "").strip()
-    neo4j_user = (
-        os.environ.get("NEO4J_USERNAME") or os.environ.get("NEO4J_USER") or "neo4j"
-    ).strip()
-    neo4j_pass = (os.environ.get("NEO4J_PASSWORD") or "").strip()
-    if not neo4j_uri:
-        raise ValueError("NEO4J_URI is not configured.")
-    return GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_pass))
+FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
+FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
+FALKORDB_PASSWORD = os.environ.get("FALKORDB_PASSWORD", "")
+FALKORDB_SSL = os.environ.get("FALKORDB_SSL", "true").lower() == "true"
+FALKORDB_GRAPH = os.environ.get("FALKORDB_GRAPH", "legal_rag")
+
+
+def _get_connection_params() -> dict:
+    """Return keyword-args dict for FalkorDB() constructor."""
+    params = {
+        "host": FALKORDB_HOST,
+        "port": FALKORDB_PORT,
+        "password": FALKORDB_PASSWORD,
+    }
+    if FALKORDB_SSL:
+        params["ssl"] = True
+        params["ssl_cert_reqs"] = ssl.CERT_NONE
+    return params
 
 
 class DependencyGraph:
     """
-    Persistent cross-reference graph backed by Neo4j AuraDB.
+    Persistent cross-reference graph backed by FalkorDB Cloud.
 
     Public API is backward-compatible with the old NetworkX version so that
     graph_expansion.py and executor.py require no changes.
     """
 
     def __init__(self):
-        self._driver: Optional[Driver] = None
+        self._graph = None
         self._connect()
+
+    @staticmethod
+    def _result_to_dicts(result) -> List[Dict]:
+        """
+        Convert a FalkorDB query result to a list of dicts.
+        Each dict maps column name -> value.
+        """
+        if not result or not result.result_set:
+            return []
+        columns = result.header
+        rows = result.result_set
+        return [dict(zip(columns, row)) for row in rows]
 
     def _connect(self):
         try:
-            self._driver = _get_driver()
-            self._driver.verify_connectivity()
+            db = FalkorDB(**_get_connection_params())
+            self._graph = db.select_graph(FALKORDB_GRAPH)
+            # Smoke-test connectivity
+            self._graph.query("RETURN 1")
             self._ensure_indexes()
-            print("✅ Connected to Neo4j AuraDB.")
+            print("✅ Connected to FalkorDB Cloud.")
         except Exception as e:
-            print(f"⚠️  Neo4j connection failed: {e}. Graph features will be disabled.")
-            self._driver = None
-
-    def _ensure_driver(self) -> bool:
-        """Best-effort reconnect so graph can recover after transient startup failures."""
-        if self._driver is not None:
-            return True
-        self._connect()
-        return self._driver is not None
+            print(
+                f"⚠️  FalkorDB connection failed: {e}. Graph features will be disabled."
+            )
+            self._graph = None
 
     def _ensure_indexes(self):
         """Create uniqueness constraint once on Clause.id + doc pair."""
-        with self._driver.session() as session:
-            session.run(
-                "CREATE CONSTRAINT clause_unique IF NOT EXISTS "
-                "FOR (c:Clause) REQUIRE (c.id, c.doc, c.workspace_id) IS UNIQUE"
-            )
+        cypher = (
+            "CREATE CONSTRAINT clause_unique IF NOT EXISTS "
+            "FOR (c:Clause) REQUIRE (c.id, c.doc, c.workspace_id) IS UNIQUE"
+        )
+        self._graph.query(cypher)
 
     def close(self):
-        if self._driver:
-            self._driver.close()
+        """No-op for backward compatibility with callers that close Neo4j drivers."""
+        pass
 
     # ------------------------------------------------------------------
-    # Build graph (additive — call once per ingested document)
+    # Build graph (additive -- call once per ingested document)
     # ------------------------------------------------------------------
 
     def build_graph(
@@ -90,44 +109,47 @@ class DependencyGraph:
     ):
         """
         MERGE clause nodes and intra-document REFERENCES edges.
-        Safe to call multiple times — MERGE prevents duplicates.
+        Safe to call multiple times -- MERGE prevents duplicates.
         """
-        if not self._ensure_driver():
+        if not self._graph:
             return
 
-        with self._driver.session() as session:
-            for chunk in enriched_chunks:
-                node_id = " > ".join(chunk.get("hierarchy", [])) or "Unknown"
-                text = chunk.get("text", "")
-                doc = doc_name or chunk.get("document_name", "Unknown")
+        for chunk in enriched_chunks:
+            node_id = " > ".join(chunk.get("hierarchy", [])) or "Unknown"
+            text = chunk.get("text", "")
+            doc = doc_name or chunk.get("document_name", "Unknown")
 
-                # Upsert clause node
-                session.run(
+            # Upsert clause node
+            self._graph.query(
+                """
+                MERGE (c:Clause {id: $id, doc: $doc, workspace_id: $workspace_id})
+                SET c.text = $text
+                """,
+                {
+                    "id": node_id,
+                    "doc": doc,
+                    "workspace_id": workspace_id,
+                    "text": text,
+                },
+            )
+
+            # Intra-document dependency edges
+            for dep in chunk.get("dependencies_clauses", []):
+                self._graph.query(
                     """
-                    MERGE (c:Clause {id: $id, doc: $doc, workspace_id: $workspace_id})
-                    SET c.text = $text
+                    MERGE (src:Clause {id: $src_id, doc: $doc, workspace_id: $workspace_id})
+                    MERGE (tgt:Clause {id: $tgt_id, doc: $doc, workspace_id: $workspace_id})
+                    MERGE (src)-[:REFERENCES {edge_type: 'intra_doc'}]->(tgt)
                     """,
-                    id=node_id,
-                    doc=doc,
-                    workspace_id=workspace_id,
-                    text=text,
+                    {
+                        "src_id": node_id,
+                        "tgt_id": dep,
+                        "doc": doc,
+                        "workspace_id": workspace_id,
+                    },
                 )
 
-                # Intra-document dependency edges
-                for dep in chunk.get("dependencies_clauses", []):
-                    session.run(
-                        """
-                        MERGE (src:Clause {id: $src_id, doc: $doc, workspace_id: $workspace_id})
-                        MERGE (tgt:Clause {id: $tgt_id, doc: $doc, workspace_id: $workspace_id})
-                        MERGE (src)-[:REFERENCES {edge_type: 'intra_doc'}]->(tgt)
-                        """,
-                        src_id=node_id,
-                        tgt_id=dep,
-                        doc=doc,
-                        workspace_id=workspace_id,
-                    )
-
-        print(f"[Graph] Merged clauses from '{doc_name}' into Neo4j graph.")
+        print(f"[Graph] Merged clauses from '{doc_name}' into FalkorDB graph.")
 
     # ------------------------------------------------------------------
     # Cross-document edge creation
@@ -146,22 +168,23 @@ class DependencyGraph:
         Creates a REFERENCES edge across two documents.
         Called by reference_parser.py when an LLM resolves a cross-doc ref.
         """
-        if not self._ensure_driver():
+        if not self._graph:
             return
-        with self._driver.session() as session:
-            session.run(
-                """
-                MERGE (src:Clause {id: $from_id, doc: $from_doc, workspace_id: $workspace_id})
-                MERGE (tgt:Clause {id: $to_id, doc: $to_doc, workspace_id: $workspace_id})
-                MERGE (src)-[:REFERENCES {edge_type: $edge_type}]->(tgt)
-                """,
-                from_id=from_node_id,
-                from_doc=from_doc,
-                to_id=to_node_id,
-                to_doc=to_doc,
-                edge_type=edge_type,
-                workspace_id=workspace_id,
-            )
+        self._graph.query(
+            """
+            MERGE (src:Clause {id: $from_id, doc: $from_doc, workspace_id: $workspace_id})
+            MERGE (tgt:Clause {id: $to_id, doc: $to_doc, workspace_id: $workspace_id})
+            MERGE (src)-[:REFERENCES {edge_type: $edge_type}]->(tgt)
+            """,
+            {
+                "from_id": from_node_id,
+                "from_doc": from_doc,
+                "to_id": to_node_id,
+                "to_doc": to_doc,
+                "edge_type": edge_type,
+                "workspace_id": workspace_id,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Query: dependency chains (Cypher BFS up to 5 hops)
@@ -179,22 +202,24 @@ class DependencyGraph:
 
         Return format: [{"node": str, "text": str, "source_document": str}]
         """
-        if not self._ensure_driver():
+        if not self._graph:
             return []
 
-        with self._driver.session() as session:
-            result = session.run(
-                """
-                MATCH (start:Clause {id: $id, workspace_id: $workspace_id})
-                OPTIONAL MATCH path = (start)-[:REFERENCES*0..$hops]->(dep:Clause)
-                WHERE dep.workspace_id = $workspace_id
-                RETURN DISTINCT dep.id AS node, dep.text AS text, dep.doc AS source_document
-                """,
-                id=node_id,
-                hops=max_hops,
-                workspace_id=workspace_id,
-            )
-            records = result.data()
+        result = self._graph.query(
+            """
+            MATCH (start:Clause {id: $id, workspace_id: $workspace_id})
+            OPTIONAL MATCH path = (start)-[:REFERENCES*0..$hops]->(dep:Clause)
+            WHERE dep.workspace_id = $workspace_id
+            RETURN DISTINCT dep.id AS node, dep.text AS text, dep.doc AS source_document
+            """,
+            {
+                "id": node_id,
+                "hops": max_hops,
+                "workspace_id": workspace_id,
+            },
+        )
+
+        records = self._result_to_dicts(result)
 
         # Filter nulls (unmatched OPTIONAL) and deduplicate
         seen = set()
@@ -216,18 +241,16 @@ class DependencyGraph:
     # ------------------------------------------------------------------
 
     def number_of_nodes(self) -> int:
-        if not self._ensure_driver():
+        if not self._graph:
             return 0
-        with self._driver.session() as session:
-            r = session.run("MATCH (c:Clause) RETURN count(c) AS n")
-            return r.single()["n"]
+        result = self._graph.query("MATCH (c:Clause) RETURN count(c) AS n")
+        return result.result_set[0][0]
 
     def number_of_edges(self) -> int:
-        if not self._ensure_driver():
+        if not self._graph:
             return 0
-        with self._driver.session() as session:
-            r = session.run("MATCH ()-[r:REFERENCES]->() RETURN count(r) AS n")
-            return r.single()["n"]
+        result = self._graph.query("MATCH ()-[r:REFERENCES]->() RETURN count(r) AS n")
+        return result.result_set[0][0]
 
     # ------------------------------------------------------------------
     # Backward-compat: old code accessed graph.graph.number_of_nodes()

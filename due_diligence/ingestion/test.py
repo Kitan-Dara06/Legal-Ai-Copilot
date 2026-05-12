@@ -25,7 +25,7 @@ def run_pipeline(pdf_path: str) -> List[Dict]:
     term_extractor = DefinedTermExtractor()
     term_extractor.extract_and_store(chunks, document_name=pdf_path.split("/")[-1])
 
-    # 3. Resolve Cross-References (NetworkX/Neo4j Graph Prep)
+    # 3. Resolve Cross-References (NetworkX/FalkorDB Graph Prep)
     print("\n[3/4] Resolving internal cross-references via LLM...")
     ref_parser = LLMReferenceParser()
     enriched_chunks = ref_parser.resolve_reference(chunks)

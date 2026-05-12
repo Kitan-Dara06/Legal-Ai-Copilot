@@ -23,7 +23,9 @@ class GoalDecomposer:
     def __init__(self):
         self.client = OpenAI(
             api_key=os.environ.get("OPENAI_API_KEY"),
-            base_url=os.environ.get("OPENAI_API_BASE", "https://api.groq.com/openai/v1"),
+            base_url=os.environ.get(
+                "OPENAI_API_BASE", "https://api.groq.com/openai/v1"
+            ),
         )
         self.model = "llama-3.3-70b-versatile"
 
@@ -59,7 +61,10 @@ class GoalDecomposer:
             lines = []
             for c in pre_conflicts[:10]:  # cap at 10 for prompt size
                 term = c.get("term", "")
-                docs = [d.get("document_name", d.get("document", "?")) for d in c.get("definitions", [])]
+                docs = [
+                    d.get("document_name", d.get("document", "?"))
+                    for d in c.get("definitions", [])
+                ]
                 lines.append(f"  - '{term}' defined differently in: {', '.join(docs)}")
             conflict_text = "Pre-ingestion definitional conflicts:\n" + "\n".join(lines)
 
@@ -68,7 +73,7 @@ class GoalDecomposer:
 Available tools:
   1. "hybrid_search"   — Semantic + keyword retrieval from Qdrant. Use for clause-level facts.
   2. "registry_check"  — Check PostgreSQL registry for defined terms and cross-document conflicts.
-  3. "graph_search"    — Traverse Neo4j cross-reference graph for dependency chains.
+  3. "graph_search"    — Traverse FalkorDB cross-reference graph for dependency chains.
 """
 
         prompt = f"""You are a senior legal due diligence analyst orchestrating an AI agent.

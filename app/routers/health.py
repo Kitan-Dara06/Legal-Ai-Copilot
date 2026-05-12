@@ -60,20 +60,18 @@ async def _check_qdrant() -> dict:
         return {"ok": False, "error": str(e)[:200]}
 
 
-async def _check_neo4j() -> dict:
+async def _check_falkordb() -> dict:
     try:
-        import asyncio
+        from falkordb import FalkorDB
 
-        from app.services.ingestion.graph_extractor import _get_driver
+        from app.services.ingestion.graph_extractor import (
+            FALKORDB_GRAPH,
+            _get_connection_params,
+        )
 
-        driver = _get_driver()
-        if not driver:
-            return {"ok": False, "error": "Neo4j driver failed to initialize."}
-
-        def _verify():
-            driver.verify_connectivity()
-
-        await asyncio.get_event_loop().run_in_executor(None, _verify)
+        db = FalkorDB(**_get_connection_params())
+        g = db.select_graph(FALKORDB_GRAPH)
+        g.query("RETURN 1")
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
@@ -101,10 +99,10 @@ async def health():
     pg = await _check_postgres()
     rd = await _check_redis()
     qd = await _check_qdrant()
-    nj = await _check_neo4j()
+    fd = await _check_falkordb()
     rmq = await _check_rabbitmq()
 
-    all_ok = all(c["ok"] for c in [pg, rd, qd, nj, rmq])
+    all_ok = all(c["ok"] for c in [pg, rd, qd, fd, rmq])
 
     return {
         "status": "ok" if all_ok else "degraded",
@@ -113,7 +111,7 @@ async def health():
             "postgres": pg,
             "redis": rd,
             "qdrant": qd,
-            "neo4j": nj,
+            "falkordb": fd,
             "rabbitmq": rmq,
         },
     }
@@ -127,14 +125,14 @@ async def ready():
     pg = await _check_postgres()
     rd = await _check_redis()
     qd = await _check_qdrant()
-    nj = await _check_neo4j()
+    fd = await _check_falkordb()
     rmq = await _check_rabbitmq()
 
     checks = {
         "postgres": pg,
         "redis": rd,
         "qdrant": qd,
-        "neo4j": nj,
+        "falkordb": fd,
         "rabbitmq": rmq,
     }
     all_ok = all(c["ok"] for c in checks.values())
