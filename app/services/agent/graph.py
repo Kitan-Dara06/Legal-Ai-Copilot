@@ -19,6 +19,8 @@ Routing logic:
 
 import logging
 
+from langgraph.graph import END, START, StateGraph
+
 from app.models import WorkflowStatus
 from app.services.agent.agent_state import PointerOnlyState
 from app.services.agent.nodes import (
@@ -35,11 +37,11 @@ from app.services.agent.nodes import (
     human_approval_node,
     intent_node,
     plan_node,
+    qa_node,
     result_node,
     retrieval_node,
     synthesis_node,
 )
-from langgraph.graph import END, START, StateGraph
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,7 @@ def create_action_agent_graph() -> StateGraph:
     # ACT path
     workflow.add_node("detect", detect_node)
     workflow.add_node("draft", draft_node)
+    workflow.add_node("qa", qa_node)
     workflow.add_node("plan", plan_node)
     workflow.add_node("human_approval", human_approval_node)
     workflow.add_node("execute", execute_node)
@@ -185,7 +188,8 @@ def create_action_agent_graph() -> StateGraph:
 
     # ACT edges
     workflow.add_edge("detect", "draft")
-    workflow.add_edge("draft", "plan")
+    workflow.add_edge("draft", "qa")
+    workflow.add_edge("qa", "plan")
     workflow.add_edge("plan", "human_approval")  # graph pauses BEFORE this node
     workflow.add_edge("human_approval", "execute")
 

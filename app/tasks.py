@@ -1040,68 +1040,89 @@ def process_workflow(self, workflow_id: str):
     """
     Celery task that runs the LangGraph for a REASON or ACT workflow.
     Dispatched automatically when a goal is classified as REASON or ACT.
-    Uses sync operations since Celery prefork workers don't support asyncio well.
+
+    Uses sync psycopg2 for DB reads (Celery prefork compatible),
+    then asyncio.run() only for the LangGraph execution.
     """
+    import json
     import logging
-    import os
+    import uuid
 
     log = logging.getLogger(__name__)
+    wf_uuid = uuid.UUID(workflow_id)
 
-    import asyncio
+    # ── Step 1: Sync DB reads ──────────────────────────────────────────────
+    from app.tasks import get_pg_pool
 
-    from sqlalchemy import select
-
-    from app.database import AsyncSessionLocal
-    from app.models import Goal, WorkflowExecution
-
-    async def _run():
-        async with AsyncSessionLocal() as db:
-            wf_res = await db.execute(
-                select(WorkflowExecution).where(WorkflowExecution.id == workflow_id)
+    pg_pool = get_pg_pool()
+    conn = pg_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, workspace_id, org_id, intent, intent_confidence, goal_id "
+                "FROM workflow_executions WHERE id = %s",
+                (workflow_id,),
             )
-            wf = wf_res.scalar_one_or_none()
-            if not wf:
+            wf_row = cur.fetchone()
+            if not wf_row:
                 log.error("Workflow %s not found", workflow_id)
                 return
 
-            goal_res = await db.execute(select(Goal).where(Goal.id == wf.goal_id))
-            goal = goal_res.scalar_one_or_none()
-            if not goal:
-                log.error("Goal %s not found for workflow %s", wf.goal_id, workflow_id)
+            wf_id, ws_id, org_id_str, intent_val, conf, goal_id = wf_row
+
+            cur.execute(
+                "SELECT goal_text FROM goals WHERE id = %s",
+                (goal_id,),
+            )
+            goal_row = cur.fetchone()
+            if not goal_row:
+                log.error("Goal not found for workflow %s", workflow_id)
                 return
 
-            wf.status = WorkflowStatus.CLASSIFYING
-            await db.commit()
+            goal_text = goal_row[0]
 
-        from app.services.agent.agent_state import (
-            CURRENT_GRAPH_VERSION,
-            PointerOnlyState,
-        )
+            cur.execute(
+                "UPDATE workflow_executions SET status = 'CLASSIFYING' WHERE id = %s",
+                (workflow_id,),
+            )
+            conn.commit()
+    except Exception as e:
+        log.error("DB read failed for workflow %s: %s", workflow_id, e)
+        return
+    finally:
+        pg_pool.putconn(conn)
+
+    # ── Step 2: Async LangGraph execution ──────────────────────────────────
+    from app.models import WorkflowStatus as WS
+    from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
+    from app.services.agent.graph import create_action_agent_graph
+
+    initial_state = PointerOnlyState(
+        graph_version=CURRENT_GRAPH_VERSION,
+        workflow_id=str(workflow_id),
+        workspace_id=str(ws_id),
+        org_id=str(org_id_str),
+        document_id="",
+        primary_intent=intent_val,
+        intent_confidence=conf or 0.0,
+        intent_confirmed_by_human=False,
+        goal_text=goal_text,
+        context_text=None,
+        plan_id=None,
+        current_task_index=0,
+        total_tasks=0,
+        status=WS.CLASSIFYING.value,
+        findings_summary="",
+        action_count=0,
+        messages=[],
+        error_context=None,
+        retry_count=0,
+    )
+
+    import asyncio
+
+    async def _run_graph():
         from app.services.agent.checkpointer import get_checkpointer
-        from app.services.agent.graph import create_action_agent_graph
-        from app.services.agent.nodes import WorkflowStatus
-
-        initial_state = PointerOnlyState(
-            graph_version=CURRENT_GRAPH_VERSION,
-            workflow_id=str(workflow_id),
-            workspace_id=str(wf.workspace_id),
-            org_id=str(wf.org_id),
-            document_id="",
-            primary_intent=wf.intent.value if wf.intent else None,
-            intent_confidence=wf.intent_confidence or 0.0,
-            intent_confirmed_by_human=False,
-            goal_text=goal.goal_text,
-            context_text=None,
-            plan_id=None,
-            current_task_index=0,
-            total_tasks=0,
-            status=WorkflowStatus.CLASSIFYING.value,
-            findings_summary="",
-            action_count=0,
-            messages=[],
-            error_context=None,
-            retry_count=0,
-        )
 
         async with get_checkpointer() as checkpointer:
             app = create_action_agent_graph().compile(
@@ -1111,10 +1132,9 @@ def process_workflow(self, workflow_id: str):
             config = {"configurable": {"thread_id": str(workflow_id)}}
             await app.ainvoke(initial_state, config=config)
 
-        log.info("Workflow %s processed successfully", workflow_id)
-
     try:
-        asyncio.run(_run())
+        asyncio.run(_run_graph())
+        log.info("Workflow %s processed successfully", workflow_id)
     except Exception as e:
         log.error("Workflow %s processing failed: %s", workflow_id, e, exc_info=True)
         try:

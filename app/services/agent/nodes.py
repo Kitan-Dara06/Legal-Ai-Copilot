@@ -46,6 +46,7 @@ from app.models import (
     WorkflowStatus,
 )
 from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
+from app.services.notifications import notify_approval_needed
 from app.services.object_storage import upload_bytes
 from app.utils import sanitize_goal_text
 
@@ -1155,6 +1156,147 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
     return {"status": WorkflowStatus.DRAFTING.value}
 
 
+async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
+    """
+    Validates drafted action quality by checking for contradictions with source
+    documents, unsupported claims, and internal inconsistencies.
+
+    Runs after draft_node and before plan_node. Each drafted action is
+    analysed via Groq and any issues found are recorded on the draft_payload.
+    """
+    state = _adapt_state(state)
+    workflow_id = state["workflow_id"]
+    wf_uuid = _uuid.UUID(workflow_id)
+
+    logger.info("[%s] qa_node: validating draft quality", workflow_id)
+    await _set_wf_status(workflow_id, WorkflowStatus.DRAFTING)
+
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        temperature=0.0,
+        api_key=os.getenv("GROQ_API_KEY", ""),
+    )
+
+    issue_count = 0
+
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(
+            select(Action).where(
+                Action.workflow_id == wf_uuid,
+                Action.status == ActionStatus.DETECTED,
+                Action.draft_payload.isnot(None),
+            )
+        )
+        actions = res.scalars().all()
+
+        for action in actions:
+            draft_text = (action.draft_payload or {}).get("draft_text", "")
+            if not draft_text:
+                continue
+
+            clause_ref = action.source_clause_ref or {}
+
+            prompt = (
+                f"You are a legal QA auditor. Your job is to critically review a drafted legal action "
+                f"for any defects before it is submitted for human approval.\n\n"
+                f"Action Type: {action.action_type.value}\n"
+                f"Description: {action.description}\n"
+                f"Source Clause Reference: {json.dumps(clause_ref, indent=2)}\n\n"
+                f"Draft Text:\n{draft_text}\n\n"
+                f"Analyse the draft for the following categories of issues:\n"
+                f"1. **Contradictions** — Does any claim in the draft directly contradict "
+                f"the referenced source clause?\n"
+                f"2. **Unsupported claims** — Does the draft make factual or legal claims "
+                f"that are not supported by the source clause?\n"
+                f"3. **Internal inconsistencies** — Does the draft contradict itself "
+                f"(e.g. conflicting statements, contradictory obligations)?\n\n"
+                f"Return your answer as a JSON object with exactly this structure, and nothing else:\n"
+                f"{{\n"
+                f'  "action_id": "{action.id}",\n'
+                f'  "has_issues": true or false,\n'
+                f'  "issues": [\n'
+                f"    {{\n"
+                f'      "category": "contradiction|unsupported_claim|inconsistency",\n'
+                f'      "description": "Brief explanation of the issue",\n'
+                f'      "severity": "low|medium|high"\n'
+                f"    }}\n"
+                f"  ],\n"
+                f'  "summary": "One-sentence overall verdict"\n'
+                f"}}\n\n"
+                f"If the draft is completely sound, return has_issues: false and an empty issues list."
+            )
+
+            try:
+                response = await llm.ainvoke(prompt)
+                raw = response.content.strip()
+                # Strip markdown code fences if present
+                if raw.startswith("```"):
+                    first_nl = raw.find("\n")
+                    if first_nl != -1:
+                        raw = raw[first_nl + 1 :]
+                    if raw.endswith("```"):
+                        raw = raw[:-3].strip()
+
+                result = json.loads(raw)
+                issues = result.get("issues", [])
+                has_issues = result.get("has_issues", len(issues) > 0)
+
+                # Store QA results on the draft_payload
+                payload = action.draft_payload or {}
+                payload["qa"] = {
+                    "has_issues": has_issues,
+                    "issues": issues,
+                    "summary": result.get("summary", ""),
+                }
+                action.draft_payload = payload
+
+                if has_issues and issues:
+                    issue_count += len(issues)
+                    logger.info(
+                        "[%s] qa_node: found %d issue(s) in action %s",
+                        workflow_id,
+                        len(issues),
+                        action.id,
+                    )
+                else:
+                    logger.info(
+                        "[%s] qa_node: action %s passed QA", workflow_id, action.id
+                    )
+
+            except (json.JSONDecodeError, KeyError, Exception) as e:
+                logger.error(
+                    "[%s] qa_node: QA analysis failed for action %s: %s",
+                    workflow_id,
+                    action.id,
+                    e,
+                )
+                payload = action.draft_payload or {}
+                payload["qa"] = {
+                    "has_issues": True,
+                    "issues": [
+                        {
+                            "category": "analysis_error",
+                            "description": f"QA analysis failed: {e}",
+                            "severity": "medium",
+                        }
+                    ],
+                    "summary": "QA analysis could not be completed due to an error.",
+                }
+                action.draft_payload = payload
+                issue_count += 1
+
+        await db.commit()
+
+    logger.info(
+        "[%s] qa_node: complete — %d total issue(s) found across %d drafted action(s)",
+        workflow_id,
+        issue_count,
+        len(actions),
+    )
+
+    return {"status": WorkflowStatus.DRAFTING.value, "qa_issues": issue_count}
+
+
 async def plan_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Sorts detected actions by urgency, assigns task_order, and transitions to AWAITING_APPROVAL.
@@ -1162,6 +1304,7 @@ async def plan_node(state: PointerOnlyState) -> Dict[str, Any]:
     state = _adapt_state(state)
     workflow_id = state["workflow_id"]
     wf_uuid = _uuid.UUID(workflow_id)
+    org_id_str = state.get("org_id", "")
 
     logger.info("[%s] plan_node: ordering task plan", workflow_id)
 
@@ -1227,7 +1370,58 @@ async def plan_node(state: PointerOnlyState) -> Dict[str, Any]:
             action.draft_payload = action.draft_payload or {}
             action.draft_payload["approval_token"] = token
 
+        # ── Collect deadline info for notification ──
+        deadline_map: dict[str, int | None] = {}
+        for action in actions:
+            if action.deadline_id:
+                dl_res = await db.execute(
+                    select(DeadlineRegistry).where(
+                        DeadlineRegistry.id == action.deadline_id
+                    )
+                )
+                deadline = dl_res.scalar_one_or_none()
+                if deadline and deadline.resolved_deadline:
+                    delta = deadline.resolved_deadline - datetime.now(timezone.utc)
+                    deadline_map[str(action.id)] = max(delta.days, 0)
+                else:
+                    deadline_map[str(action.id)] = None
+            else:
+                deadline_map[str(action.id)] = None
+
+        # ── Build notification data list ──
+        notif_data = []
+        for action in actions:
+            draft_payload = action.draft_payload or {}
+            draft_text = draft_payload.get("draft_text", "")
+            summary = action.description or action.action_type.value
+            notif_data.append(
+                {
+                    "action_id": str(action.id),
+                    "summary": summary,
+                    "draft_preview": draft_text,
+                    "days_remaining": deadline_map.get(str(action.id)),
+                }
+            )
+
         await db.commit()
+
+    # ── Send approval notifications ──
+    # Fire-and-forget: failures are caught & logged inside notify_approval_needed
+    for item in notif_data:
+        try:
+            notify_approval_needed(
+                workflow_id=workflow_id,
+                action_summary=item["summary"],
+                draft_preview=item["draft_preview"],
+                days_remaining=item["days_remaining"],
+            )
+        except Exception as e:
+            logger.error(
+                "[%s] Failed to send approval notification for action %s: %s",
+                workflow_id,
+                item["action_id"],
+                e,
+            )
 
     plan_summary = f"Task plan ready: {total} ordered actions. Awaiting lawyer approval before execution."
     logger.info("[%s] plan_node complete: %s", workflow_id, plan_summary)
@@ -1421,6 +1615,24 @@ async def execute_node(state: PointerOnlyState) -> Dict[str, Any]:
                 result_summary = await _dispatch_tool(task)
                 final_status = ToolCallStatus.SUCCESS
                 task.status = ActionStatus.EXECUTED
+
+                # ── Log delivery confirmation & record external reference ──
+                action_ref = task.draft_payload or {}
+                # Generate a deterministic external reference ID so downstream
+                # systems can correlate this delivery back to the Action.
+                external_ref = hashlib.sha256(
+                    f"{workflow_id}:{task.id}:{idempotency_key}".encode("utf-8")
+                ).hexdigest()[:16]
+                action_ref["external_reference_id"] = external_ref
+                task.draft_payload = action_ref
+
+                logger.info(
+                    "[%s] Delivery confirmed for task %d (action=%s, ref=%s)",
+                    workflow_id,
+                    current_idx,
+                    task.id,
+                    external_ref,
+                )
             except Exception as exc:
                 result_summary = str(exc)
                 final_status = ToolCallStatus.FAILED
