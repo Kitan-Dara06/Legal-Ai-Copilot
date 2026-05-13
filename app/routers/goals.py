@@ -419,6 +419,16 @@ async def create_goal(
         db=db,
     )
 
+    # Dispatch async Celery task to run the LangGraph
+    if classification.primary_intent in ("REASON", "ACT"):
+        from app.celery_app import celery_app
+
+        celery_app.send_task(
+            "app.tasks.process_workflow",
+            args=[str(workflow_id)],
+            queue="default",
+        )
+
     return CreateGoalResponse(
         goal_id=str(goal_id),
         status=GoalStatus.PROCESSING.value,

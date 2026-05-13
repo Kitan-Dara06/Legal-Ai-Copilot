@@ -1028,6 +1028,97 @@ def process_scanned_pdf(
             os.remove(local_temp_path)
 
 
+@celery_app.task(
+    name="app.tasks.process_workflow",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=30,
+    queue="default",
+    acks_late=True,
+)
+def process_workflow(self, workflow_id: str):
+    """
+    Celery task that runs the LangGraph for a REASON or ACT workflow.
+    Dispatched automatically when a goal is classified as REASON or ACT.
+    """
+    import asyncio
+    import os
+
+    from app.database import get_checkpointer
+    from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
+    from app.services.agent.graph import create_action_agent_graph
+    from app.services.agent.nodes import WorkflowStatus
+
+    logger = logger or logging.getLogger(__name__)
+
+    async def _run():
+        from sqlalchemy import select
+
+        from app.database import AsyncSessionLocal
+        from app.models import Goal, WorkflowExecution
+
+        async with AsyncSessionLocal() as db:
+            wf_res = await db.execute(
+                select(WorkflowExecution).where(WorkflowExecution.id == workflow_id)
+            )
+            wf = wf_res.scalar_one_or_none()
+            if not wf:
+                logger.error("Workflow %s not found", workflow_id)
+                return
+
+            goal_res = await db.execute(select(Goal).where(Goal.id == wf.goal_id))
+            goal = goal_res.scalar_one_or_none()
+            if not goal:
+                logger.error(
+                    "Goal %s not found for workflow %s", wf.goal_id, workflow_id
+                )
+                return
+
+            wf.status = WorkflowStatus.CLASSIFYING
+            await db.commit()
+
+        initial_state = PointerOnlyState(
+            graph_version=CURRENT_GRAPH_VERSION,
+            workflow_id=str(workflow_id),
+            workspace_id=str(wf.workspace_id),
+            org_id=str(wf.org_id),
+            document_id="",
+            primary_intent=wf.intent.value if wf.intent else None,
+            intent_confidence=wf.intent_confidence or 0.0,
+            intent_confirmed_by_human=False,
+            goal_text=goal.goal_text,
+            context_text=None,
+            plan_id=None,
+            current_task_index=0,
+            total_tasks=0,
+            status=WorkflowStatus.CLASSIFYING.value,
+            findings_summary="",
+            action_count=0,
+            messages=[],
+            error_context=None,
+            retry_count=0,
+        )
+
+        async with get_checkpointer() as checkpointer:
+            app = create_action_agent_graph().compile(
+                checkpointer=checkpointer,
+                interrupt_before=["ambiguity_gate", "human_approval"],
+            )
+            config = {"configurable": {"thread_id": str(workflow_id)}}
+            await app.ainvoke(initial_state, config=config)
+
+        logger.info("Workflow %s processed successfully", workflow_id)
+
+    try:
+        asyncio.run(_run())
+    except Exception as e:
+        logger.error("Workflow %s processing failed: %s", workflow_id, e)
+        try:
+            self.retry(exc=e)
+        except Exception:
+            logger.error("Workflow %s exhausted retries", workflow_id)
+
+
 @celery_app.task(name="app.tasks.cleanup_stale_data")
 def cleanup_stale_data():
     """
