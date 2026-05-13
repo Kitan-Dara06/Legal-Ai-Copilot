@@ -1049,7 +1049,7 @@ def process_workflow(self, workflow_id: str):
     from app.services.agent.graph import create_action_agent_graph
     from app.services.agent.nodes import WorkflowStatus
 
-    logger = logger or logging.getLogger(__name__)
+    log = logging.getLogger(__name__)
 
     async def _run():
         from sqlalchemy import select
@@ -1063,15 +1063,13 @@ def process_workflow(self, workflow_id: str):
             )
             wf = wf_res.scalar_one_or_none()
             if not wf:
-                logger.error("Workflow %s not found", workflow_id)
+                log.error("Workflow %s not found", workflow_id)
                 return
 
             goal_res = await db.execute(select(Goal).where(Goal.id == wf.goal_id))
             goal = goal_res.scalar_one_or_none()
             if not goal:
-                logger.error(
-                    "Goal %s not found for workflow %s", wf.goal_id, workflow_id
-                )
+                log.error("Goal %s not found for workflow %s", wf.goal_id, workflow_id)
                 return
 
             wf.status = WorkflowStatus.CLASSIFYING
@@ -1107,16 +1105,16 @@ def process_workflow(self, workflow_id: str):
             config = {"configurable": {"thread_id": str(workflow_id)}}
             await app.ainvoke(initial_state, config=config)
 
-        logger.info("Workflow %s processed successfully", workflow_id)
+        log.info("Workflow %s processed successfully", workflow_id)
 
     try:
         asyncio.run(_run())
     except Exception as e:
-        logger.error("Workflow %s processing failed: %s", workflow_id, e)
+        log.error("Workflow %s processing failed: %s", workflow_id, e)
         try:
             self.retry(exc=e)
         except Exception:
-            logger.error("Workflow %s exhausted retries", workflow_id)
+            log.error("Workflow %s exhausted retries", workflow_id)
 
 
 @celery_app.task(name="app.tasks.cleanup_stale_data")
