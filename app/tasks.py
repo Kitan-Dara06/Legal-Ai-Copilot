@@ -1044,8 +1044,8 @@ def process_workflow(self, workflow_id: str):
     import asyncio
     import os
 
-    from app.database import get_checkpointer
     from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
+    from app.services.agent.checkpointer import get_checkpointer
     from app.services.agent.graph import create_action_agent_graph
     from app.services.agent.nodes import WorkflowStatus
 
