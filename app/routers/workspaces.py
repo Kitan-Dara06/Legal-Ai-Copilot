@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.celery_app import celery_app
@@ -994,6 +994,20 @@ async def delete_workspace_document(
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Delete dependent records first to avoid FK violations
+    from app.models import DeadlineRegistry, DefinedTermRegistry
+
+    await db.execute(
+        delete(DefinedTermRegistry).where(
+            DefinedTermRegistry.source_document_id == document_id
+        )
+    )
+    await db.execute(
+        delete(DeadlineRegistry).where(
+            DeadlineRegistry.source_document_id == document_id
+        )
+    )
 
     await db.delete(doc)
     await db.commit()
