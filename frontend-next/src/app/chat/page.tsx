@@ -665,7 +665,10 @@ export default function ChatPage() {
                 <ActionQueue
                   key={`actions-${goal.id}`}
                   actions={goal.actions}
+                  workflowId={goal.id}
                   draft={goal.answer}
+                  token={token || undefined}
+                  orgSlug={orgSlug || undefined}
                 />
               );
             }
