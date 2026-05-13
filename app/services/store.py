@@ -205,8 +205,8 @@ def search_hybrid(
     raw_results = []
     for hit in hits:
         p = hit.payload or {}
-        display_text = p.get("section_text") or p.get("chunk_text", "")
-        formatted_text = f"[Source: {p.get('filename', 'Unknown')}, Page: {p.get('page_number', '?')}]\\nContent: {display_text}"
+        display_text = p.get("raw_text") or p.get("rich_text", "")
+        formatted_text = f"[Source: {p.get('filename', 'Unknown')}, Page: {p.get('page_number', '?')}]\nContent: {display_text}"
 
         raw_results.append(
             {
@@ -353,7 +353,7 @@ def search_hybrid_qdrant(
     raw_results = []
     for hit in hits:
         p = hit.payload or {}
-        display_text = p.get("section_text") or p.get("chunk_text", "")
+        display_text = p.get("raw_text") or p.get("rich_text", "")
         formatted_text = f"[Source: {p.get('filename', 'Unknown')}, Page: {p.get('page_number', '?')}]\nContent: {display_text}"
 
         raw_results.append(

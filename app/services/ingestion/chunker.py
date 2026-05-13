@@ -106,15 +106,18 @@ class ClauseChunker:
 
     def build_chunks(self, raw_blocks: List[Dict]) -> List[Dict]:
         current_hierarchy = []
-        current_section_blocks = []
+        current_section_blocks = []  # List of (text, page_number) tuples
         chunks = []
 
         # Helper to process accumulated text blocks for a section using spaCy SBD
-        def _process_section(hierarchy: List[str], text_blocks: List[str]):
+        def _process_section(hierarchy: List[str], text_blocks: List):
             if not text_blocks:
                 return
 
-            full_text = " ".join(text_blocks)
+            # Determine the page number for this section (use first block's page)
+            section_page = min((p for _, p in text_blocks if p), default=0)
+
+            full_text = " ".join(t for t, _ in text_blocks)
             # Use spaCy for Sentence Boundary Detection
             doc = nlp(full_text)
 
@@ -132,6 +135,7 @@ class ClauseChunker:
                             {
                                 "hierarchy": list(hierarchy),
                                 "text": current_chunk_text.strip(),
+                                "page_number": section_page,
                             }
                         )
                         current_chunk_text = ""
@@ -145,6 +149,7 @@ class ClauseChunker:
                                 {
                                     "hierarchy": list(hierarchy),
                                     "text": temp_slice.strip(),
+                                    "page_number": section_page,
                                 }
                             )
                             temp_slice = word
@@ -161,6 +166,7 @@ class ClauseChunker:
                         {
                             "hierarchy": list(hierarchy),
                             "text": current_chunk_text.strip(),
+                            "page_number": section_page,
                         }
                     )
                     current_chunk_text = sent_text
@@ -176,6 +182,7 @@ class ClauseChunker:
                     {
                         "hierarchy": list(hierarchy),
                         "text": current_chunk_text.strip(),
+                        "page_number": section_page,
                     }
                 )
 
@@ -190,7 +197,7 @@ class ClauseChunker:
                 current_section_blocks = []
                 current_hierarchy = self._update_hierarchy(current_hierarchy, node_id)
 
-            current_section_blocks.append(block["text"])
+            current_section_blocks.append((block["text"], block.get("page_number", 0)))
 
         # Flush the final section
         _process_section(current_hierarchy, current_section_blocks)
