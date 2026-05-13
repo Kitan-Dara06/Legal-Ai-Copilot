@@ -424,6 +424,12 @@ async def create_goal(
     if classification.primary_intent in ("REASON", "ACT"):
         from app.celery_app import celery_app
 
+        logger.info(
+            "Dispatching process_workflow for %s (intent=%s, confidence=%.2f)",
+            workflow_id,
+            classification.primary_intent,
+            classification.confidence,
+        )
         celery_app.send_task(
             "app.tasks.process_workflow",
             args=[str(workflow_id)],
