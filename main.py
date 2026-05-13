@@ -144,6 +144,15 @@ async def lifespan(app: FastAPI):
     else:
         print("⚠️  COHERE_API_KEY not set — reranker disabled, using Qdrant RRF")
 
+    # ── Voyage API Key Check ────────────────────────────────────────────
+    voyage_key = os.getenv("VOYAGE_API_KEY")
+    if voyage_key:
+        print(f"✅ VOYAGE_API_KEY is set ({voyage_key[:8]}...{voyage_key[-4:]})")
+    else:
+        print(
+            "⚠️  VOYAGE_API_KEY not set — voyage-rerank-2 disabled, embeddings will fail"
+        )
+
     # ── Storage readiness check: fail fast in production by default.
     storage_strict = (
         os.getenv("STORAGE_STRICT_STARTUP", "true" if not is_dev else "false").lower()
