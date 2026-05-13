@@ -1040,23 +1040,21 @@ def process_workflow(self, workflow_id: str):
     """
     Celery task that runs the LangGraph for a REASON or ACT workflow.
     Dispatched automatically when a goal is classified as REASON or ACT.
+    Uses sync operations since Celery prefork workers don't support asyncio well.
     """
-    import asyncio
+    import logging
     import os
-
-    from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
-    from app.services.agent.checkpointer import get_checkpointer
-    from app.services.agent.graph import create_action_agent_graph
-    from app.services.agent.nodes import WorkflowStatus
 
     log = logging.getLogger(__name__)
 
+    import asyncio
+
+    from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+    from app.models import Goal, WorkflowExecution
+
     async def _run():
-        from sqlalchemy import select
-
-        from app.database import AsyncSessionLocal
-        from app.models import Goal, WorkflowExecution
-
         async with AsyncSessionLocal() as db:
             wf_res = await db.execute(
                 select(WorkflowExecution).where(WorkflowExecution.id == workflow_id)
@@ -1074,6 +1072,14 @@ def process_workflow(self, workflow_id: str):
 
             wf.status = WorkflowStatus.CLASSIFYING
             await db.commit()
+
+        from app.services.agent.agent_state import (
+            CURRENT_GRAPH_VERSION,
+            PointerOnlyState,
+        )
+        from app.services.agent.checkpointer import get_checkpointer
+        from app.services.agent.graph import create_action_agent_graph
+        from app.services.agent.nodes import WorkflowStatus
 
         initial_state = PointerOnlyState(
             graph_version=CURRENT_GRAPH_VERSION,
@@ -1110,11 +1116,11 @@ def process_workflow(self, workflow_id: str):
     try:
         asyncio.run(_run())
     except Exception as e:
-        log.error("Workflow %s processing failed: %s", workflow_id, e)
+        log.error("Workflow %s processing failed: %s", workflow_id, e, exc_info=True)
         try:
             self.retry(exc=e)
-        except Exception:
-            log.error("Workflow %s exhausted retries", workflow_id)
+        except Exception as retry_err:
+            log.error("Workflow %s exhausted retries: %s", workflow_id, retry_err)
 
 
 @celery_app.task(name="app.tasks.cleanup_stale_data")
