@@ -17,134 +17,8 @@ from app.services.store import (
 
 logger = logging.getLogger(__name__)
 
-
-def _clean_json_output(raw: str) -> str:
-    """Removes markdown code blocks commonly hallucinated by Qwen/Llama models around JSON."""
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-    return raw
-
-
-class Claim(BaseModel):
-    statement: str = Field(
-        description="A single factual statement answering a part of the user's prompt."
-    )
-    exact_quote: str = Field(
-        description="The EXACT verbatim text from the search context that proves this statement. Do not paraphrase."
-    )
-    source_document: str = Field(
-        description="The source document name and page number this quote came from."
-    )
-
-
-class FinalAnswer(BaseModel):
-    claims_list: List[Claim] = Field(
-        description="A list of facts extracted directly from the text."
-    )
-    synthesized_response: str = Field(
-        description="A cohesive, natural language response built EXCLUSIVELY from the claims_list. Must include inline citations (filename.pdf, Page X)."
-    )
-
-
 load_dotenv()
-
 groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
-
-
-async def generate_legal_concepts(question: str) -> List[str]:
-    """
-    Generates relevant legal terms of art, synonyms, and latin maxims.
-    Used to bridge the vocabulary gap.
-    """
-    system_prompt = """
-    You are a Senior Legal Research Assistant.
-    Analyze the user's question and extract 3-5 specific legal concepts, terms of art, or keywords.
-
-    Example:
-    User: "What if they don't pay on time?"
-    Output: ["late payment penalty", "interest on arrears", "event of default", "insolvency"]
-
-    User: "Can I fire the contractor?"
-    Output: ["termination for cause", "termination for convenience", "breach of contract", "notice period"]
-
-    OUTPUT RULES:
-    - Return ONLY a JSON list of strings
-    - Do not repeat words from the question
-    - Focus on formal legal terminology
-    """
-
-    response = await groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.3,
-    )
-
-    try:
-        raw = response.choices[0].message.content if response.choices else "{}"
-        raw = _clean_json_output(raw)
-        parsed = json.loads(raw or "{}")
-        if isinstance(parsed, dict):
-            concepts = parsed.get("concepts") or parsed.get("list") or []
-            if not concepts and parsed:
-                concepts = next(iter(parsed.values()), [])
-        else:
-            concepts = parsed or []
-        if isinstance(concepts, str):
-            concepts = [c.strip() for c in concepts.split(",") if c.strip()]
-        if not concepts:
-            concepts = []
-        logger.info("Legal concepts generated: %s", concepts)
-        return concepts
-    except Exception as e:
-        logger.warning("Error parsing legal concepts: %s", e)
-        return []
-
-
-async def generate_multi_queries(question: str) -> List[str]:
-    """
-    Generates different phrasings/angles of the same question.
-    Used to bridge the phrasing gap.
-    """
-    system_prompt = """
-    You are a Legal AI.
-    Generate 3 distinct variations of the user's question to maximize search recall.
-    1. A formal version
-    2. A specific scenario version
-    3. A broad conceptual version
-
-    OUTPUT ONLY a valid JSON object with a single key "queries" containing a list of strings.
-    """
-
-    response = await groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.5,
-    )
-
-    try:
-        raw = response.choices[0].message.content if response.choices else "{}"
-        raw = _clean_json_output(raw)
-        parsed = json.loads(raw or "{}")
-        if isinstance(parsed, dict):
-            queries = parsed.get("queries") or next(iter(parsed.values()), [])
-        else:
-            queries = parsed or []
-        if isinstance(queries, str):
-            queries = [q.strip() for q in queries.split(",") if q.strip()]
-        logger.info("Multi-queries generated: %s", queries)
-        return queries or [question]
-    except Exception:
-        return [question]
 
 
 async def search_tool(
@@ -152,105 +26,65 @@ async def search_tool(
     specific_contracts: Optional[List[str]] = None,
     keyword_filter: Optional[str] = None,
     top_k: int = 5,
-    mode: str = "hybrid",  # Options: hybrid, concept, multiquery
-    file_ids: Optional[
-        List[int]
-    ] = None,  # Session scope: search only these Qdrant file IDs
+    mode: str = "hybrid",
+    file_ids: Optional[List[int]] = None,
     *,
-    org_id: str,  # Required — no default to prevent accidental cross-tenant leakage
-    **kwargs,  # Absorbs legacy params
+    org_id: str,
+    **kwargs,
 ) -> List[Dict]:
     """
-    Finds relevant chunks using the specified retrieval strategy.
-    Returns a list of rich result dicts: {"text", "score", "metadata": {"file_id", "source", "page"}}.
-
-    Modes:
-    - 'hybrid': Standard Vector + BM25 fusion
-    - 'concept': Expands extra keywords -> joins them to query -> Hybrid Search
-    - 'multiquery': Generates 3 questions -> Hybrid Search for each -> Pools results
+    Hybrid search over Qdrant (dense + sparse + RRF fusion).
+    Returns list of dicts: {"text", "score", "metadata": {"file_id", "source", "page"}}.
     """
     if not org_id:
         raise ValueError("org_id must be provided for tenant isolation.")
 
-    # --- STRATEGY SELECTION ---
-    queries_to_run = []
+    logger.info("Running hybrid search for query: %.80s", query)
 
-    if mode == "multiquery":
-        logger.info("Running multi-query search")
-        variations = await generate_multi_queries(query)
-        queries_to_run = [query] + variations[:2]  # original + 2 variations
+    embeddings = get_embedding([query])
+    if not embeddings:
+        logger.warning("Embedding failed for query: %.50s — skipping", query)
+        return []
+    q_vector = embeddings[0]
 
-    elif mode == "concept":
-        logger.info("Running concept-expansion search")
-        concepts = await generate_legal_concepts(query)
-        expanded_query = f"{query} {' '.join(concepts)}"
-        logger.info("Expanded query: %s", expanded_query)
-        queries_to_run = [expanded_query]
-
-    else:  # Default 'hybrid'
-        queries_to_run = [query]
-
-    # --- EXECUTION ---
-    raw_results: List[List[Dict]] = []
-
-    for q_text in queries_to_run:
-        logger.info("Running hybrid search for query: %.80s", q_text)
-
-        embeddings = get_embedding([q_text])
-        if not embeddings:
-            logger.warning("Embedding failed for query: %.50s — skipping", q_text)
-            continue
-        q_vector = embeddings[0]
-
-        # Route: session-scoped (by file_ids) vs. org-wide
-        if file_ids:
-            logger.info("Session-scoped search: %d file(s)", len(file_ids))
-            results = search_hybrid_qdrant(
-                q_text, q_vector, file_ids=file_ids, org_id=org_id, top_k=top_k
+    if file_ids:
+        logger.info("Session-scoped search: %d file(s)", len(file_ids))
+        results = search_hybrid_qdrant(
+            query, q_vector, file_ids=file_ids, org_id=org_id, top_k=top_k
+        )
+    elif specific_contracts:
+        results = []
+        for contract in specific_contracts:
+            batch = search_hybrid(
+                query, q_vector, top_k=top_k, specific_contract=contract, org_id=org_id
             )
-            raw_results.append(results)
-        elif specific_contracts:
-            for contract in specific_contracts:
-                results = search_hybrid(
-                    q_text,
-                    q_vector,
-                    top_k=top_k,
-                    specific_contract=contract,
-                    org_id=org_id,
-                )
-                raw_results.append(results)
-        else:
-            results = search_hybrid(q_text, q_vector, top_k=top_k, org_id=org_id)
-            raw_results.append(results)
+            if isinstance(batch, dict):
+                results.extend(batch.get("results", batch))
+            elif isinstance(batch, list):
+                results.extend(batch)
+    else:
+        results = search_hybrid(query, q_vector, top_k=top_k, org_id=org_id)
 
-    # Flatten (handle new dict return format from search_hybrid)
-    flat_results: List[Dict] = []
-    for batch in raw_results:
-        if isinstance(batch, dict):
-            batch_results = batch.get("results", batch)
-        else:
-            batch_results = batch
-        if isinstance(batch_results, list):
-            flat_results.extend(batch_results)
-        else:
-            flat_results.append(batch_results)
+    # Normalize return format
+    if isinstance(results, dict):
+        results = results.get("results", results)
+    if not isinstance(results, list):
+        results = []
 
     # Deduplicate by text
-    unique_results: List[Dict] = []
-    seen_texts: set = set()
-    for item in flat_results:
+    seen: set = set()
+    unique = []
+    for item in results:
         text = item.get("text", "")
-        if text not in seen_texts:
-            seen_texts.add(text)
-            unique_results.append(item)
+        if text and text not in seen:
+            seen.add(text)
+            unique.append(item)
 
-    # Sort by score and take top_k
-    unique_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    final_output = unique_results[:top_k]
+    unique.sort(key=lambda x: x.get("score", 0), reverse=True)
+    final_output = unique[:top_k]
 
-    # Keyword post-filter (legacy support)
+    # Keyword post-filter
     if keyword_filter:
-        logger.debug("Applying keyword filter: %s", keyword_filter)
         filtered = [
             r
             for r in final_output
@@ -258,11 +92,6 @@ async def search_tool(
         ]
         if filtered:
             final_output = filtered
-        else:
-            logger.warning(
-                "Keyword filter '%s' removed all results — returning unfiltered.",
-                keyword_filter,
-            )
 
     logger.info("Search complete: %d chunks returned", len(final_output))
     return final_output
