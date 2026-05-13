@@ -63,7 +63,15 @@ async def main():
         workspace_id=workspace_id if workspace_id else None,
     )
 
+    reranker_model = "none"
     if isinstance(results, dict):
+        reranker_metrics = results.get("reranker_metrics", {})
+        if reranker_metrics.get("score_count", 0) > 0:
+            reranker_model = reranker_metrics.get("model", "unknown")
+            print(f"Reranker: {reranker_model}")
+            print(f"  top_1_score={reranker_metrics['top_1_score']:.3f}")
+            print(f"  score_spread={reranker_metrics['score_spread']:.3f}")
+            print(f"  mean_score={reranker_metrics['mean_score']:.3f}")
         results = results.get("results", results)
     if not isinstance(results, list):
         results = []

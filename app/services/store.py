@@ -128,10 +128,12 @@ def search_hybrid(
     org_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
     nomic_vector: Optional[list[float]] = None,
-) -> List[Dict]:
+) -> Dict:
     """
     Hybrid Search using dual dense (voyage + nomic) + sparse (SPLADE) with RRF.
+    Results are then reranked by voyage-rerank-2 for improved relevance.
     Filtered by org_id (mandatory) + optionally workspace_id + specific_contract.
+    Returns: {"results": [...], "reranker_metrics": {...}}
     """
     qdrant = get_global_qdrant()
 
@@ -154,7 +156,6 @@ def search_hybrid(
     search_filter = Filter(must=list(must_conditions)) if must_conditions else None
 
     sparse_vec = compute_sparse_vector(query_text)
-    nomic_vector = get_nomic_embedding(query_text) if nomic_vector is not None else None
 
     prefetches = [
         Prefetch(
@@ -167,7 +168,7 @@ def search_hybrid(
             query=sparse_vec,
             using="sparse_legal",
             filter=search_filter,
-            limit=top_k * 3,
+            limit=top_k * 10,  # BM25/SPLADE boost
         ),
     ]
     if nomic_vector:
@@ -202,6 +203,7 @@ def search_hybrid(
 
     hits = qdrant_results
 
+    # ── Format raw results ──────────────────────────────────────────────────
     raw_results = []
     for hit in hits:
         p = hit.payload or {}
@@ -217,7 +219,7 @@ def search_hybrid(
                     "source": p.get("filename", ""),
                     "page": p.get("page_number", 0),
                     "parent_id": p.get("parent_id", ""),
-                    "section_context": p.get("section_text", ""),
+                    "section_context": p.get("raw_text", ""),
                     "file_id": p.get("file_id"),
                     "org_id": p.get("org_id"),
                     "clause_reference": p.get("clause_reference", ""),
@@ -227,6 +229,58 @@ def search_hybrid(
 
     deduplicated = _deduplicate_by_parent(raw_results, max_context_chars=12000)
 
+    # ── Voyage Reranker v2 ──────────────────────────────────────────────────
+    voyage_key = os.environ.get("VOYAGE_API_KEY")
+    voyage_rerank_available = bool(voyage_key)
+    reranker_metrics = {
+        "top_1_score": 0.0,
+        "score_spread": 0.0,
+        "mean_score": 0.0,
+        "score_count": 0,
+    }
+
+    if voyage_rerank_available and deduplicated:
+        try:
+            import voyageai
+
+            vo_client = voyageai.Client(api_key=voyage_key)
+
+            documents_for_rerank = [d["text"] for d in deduplicated]
+            rerank_response = vo_client.rerank(
+                query=query_text,
+                documents=documents_for_rerank,
+                model="rerank-2",
+                top_k=len(deduplicated),
+            )
+
+            reranked = []
+            for result in rerank_response.results:
+                original = deduplicated[result.index]
+                original["score"] = result.relevance_score
+                reranked.append(original)
+
+            reranked.sort(key=lambda x: x["score"], reverse=True)
+            deduplicated = reranked
+
+            scores = [d["score"] for d in deduplicated]
+            reranker_metrics["top_1_score"] = max(scores)
+            reranker_metrics["score_spread"] = max(scores) - min(scores)
+            reranker_metrics["mean_score"] = sum(scores) / len(scores)
+            reranker_metrics["score_count"] = len(scores)
+            reranker_metrics["model"] = "voyage-rerank-2"
+            logger.info(
+                "Voyage reranker applied: top_1=%.3f, spread=%.3f",
+                reranker_metrics["top_1_score"],
+                reranker_metrics["score_spread"],
+            )
+        except Exception as rerank_err:
+            logger.warning(
+                "Voyage reranker failed: %s — using RRF scores", str(rerank_err)[:200]
+            )
+    else:
+        logger.debug("VOYAGE_API_KEY not set — no reranking applied")
+
+    # ── Final output ────────────────────────────────────────────────────────
     final_output = []
     for doc in deduplicated[:top_k]:
         final_output.append(
@@ -237,7 +291,7 @@ def search_hybrid(
             }
         )
 
-    return final_output
+    return {"results": final_output, "reranker_metrics": reranker_metrics}
 
 
 def get_all_contract_names(org_id: str):
@@ -332,7 +386,7 @@ def search_hybrid_qdrant(
                         query=sparse_vec,
                         using="sparse_legal",
                         filter=search_filter,
-                        limit=top_k * 5,
+                        limit=top_k * 15,  # BM25/SPLADE boost
                     ),
                 ],
                 query=FusionQuery(fusion=Fusion.RRF),
