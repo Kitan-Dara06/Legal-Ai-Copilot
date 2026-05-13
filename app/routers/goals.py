@@ -96,6 +96,7 @@ class GoalSummary(BaseModel):
     status: str
     intent: Optional[str] = None
     mode: Optional[str] = None
+    answer: Optional[str] = None
     created_at: str
 
 
@@ -463,7 +464,7 @@ async def list_goals(
     query = (
         select(Goal)
         .where(Goal.workspace_id == workspace_id, Goal.org_id == org_uuid)
-        .order_by(Goal.created_at.desc())
+        .order_by(Goal.created_at.asc())
     )
 
     if status_filter:
@@ -479,9 +480,9 @@ async def list_goals(
 
     # Get total count
     count_res = await db.execute(
-        select(Goal.id)
-        .where(Goal.workspace_id == workspace_id, Goal.org_id == org_uuid)
-        .order_by(Goal.created_at.desc())
+        select(Goal.id).where(
+            Goal.workspace_id == workspace_id, Goal.org_id == org_uuid
+        )
     )
     total = len(count_res.scalars().all())
 

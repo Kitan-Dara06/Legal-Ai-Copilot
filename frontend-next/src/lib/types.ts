@@ -217,6 +217,7 @@ export interface GoalSummary {
   status: string;
   intent?: GoalIntent | null;
   mode?: string | null;
+  answer?: string | null;
   created_at: string;
 }
 

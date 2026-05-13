@@ -249,6 +249,7 @@ export default function ChatPage() {
             goal_text: g.goal_text,
             status: g.status,
             intent: g.intent,
+            answer: g.answer || undefined,
             created_at: g.created_at,
           }),
         );
