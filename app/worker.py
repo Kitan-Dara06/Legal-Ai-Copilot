@@ -66,6 +66,7 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.process_digital_pdf": {"queue": "default"},
         "app.tasks.process_scanned_pdf": {"queue": "ocr"},
+        "app.tasks.process_workflow": {"queue": "default"},
         "app.tasks.cleanup_stale_data": {"queue": "default"},
         "app.tasks.deadline_scanner": {"queue": "deadline"},
         "app.tasks.resolve_defined_term_conflicts": {"queue": "default"},
