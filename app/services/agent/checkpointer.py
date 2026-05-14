@@ -10,8 +10,9 @@ Key decisions:
     timeout killing the DDL migrations (CREATE TABLE IF NOT EXISTS).
   - We use the standard postgresql:// DSN (no +asyncpg prefix).
 """
-import os
+
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -22,20 +23,31 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+_pool: AsyncConnectionPool | None = None
+# Checkpoint tables are pre-created via `scripts/setup_checkpointer.py`.
+_tables_created = True
+
+
+def _reset_checkpointer_pool():
+    """Reset pool after Celery fork."""
+    global _pool
+    _pool = None
+
+
+try:
+    os.register_at_fork(after_in_child=_reset_checkpointer_pool)
+except AttributeError:
+    pass
+
+
 def _get_dsn() -> str:
     """Resolve DSN, stripping SQLAlchemy driver prefixes."""
     url = os.getenv("DATABASE_URL_SYNC") or os.getenv("DATABASE_URL", "")
     for prefix in ("postgresql+asyncpg://", "postgresql+psycopg2://"):
         if url.startswith(prefix):
-            url = "postgresql://" + url[len(prefix):]
+            url = "postgresql://" + url[len(prefix) :]
             break
     return url
-
-
-_pool: AsyncConnectionPool | None = None
-# Checkpoint tables are pre-created via `scripts/setup_checkpointer.py`.
-# Set to True to skip runtime DDL (avoids statement_timeout on Supabase).
-_tables_created = True
 
 
 async def _ensure_pool() -> AsyncConnectionPool:
