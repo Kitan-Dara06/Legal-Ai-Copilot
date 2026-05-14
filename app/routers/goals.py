@@ -430,11 +430,15 @@ async def create_goal(
             classification.primary_intent,
             classification.confidence,
         )
-        celery_app.send_task(
-            "app.tasks.process_workflow",
-            args=[str(workflow_id)],
-            queue="default",
-        )
+        try:
+            celery_app.send_task(
+                "app.tasks.process_workflow",
+                args=[str(workflow_id)],
+                queue="default",
+            )
+            logger.info("send_task succeeded for %s", workflow_id)
+        except Exception as e:
+            logger.error("send_task FAILED for %s: %s", workflow_id, e, exc_info=True)
 
     return CreateGoalResponse(
         goal_id=str(goal_id),
