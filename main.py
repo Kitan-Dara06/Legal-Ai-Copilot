@@ -16,7 +16,8 @@ from slowapi.errors import RateLimitExceeded
 from starlette.types import ExceptionHandler
 
 from app.config_validation import validate_config
-from app.database import Base, engine
+from app.database import Base
+from app.database import _get_engine as get_db_engine
 from app.dependencies import get_org_id_for_rate_limit
 from app.logging_config import configure_logging
 from app.routers import (
@@ -95,7 +96,7 @@ async def lifespan(app: FastAPI):
         try:
             import asyncio
 
-            async with engine.begin() as conn:
+            async with get_db_engine().begin() as conn:
                 await asyncio.wait_for(
                     conn.run_sync(Base.metadata.create_all), timeout=5.0
                 )
