@@ -15,6 +15,20 @@ _engine = None
 _async_session_local = None
 
 
+def _reset_engine():
+    """Reset engine globals — called after Celery fork to force fresh pool creation."""
+    global _engine, _async_session_local
+    _engine = None
+    _async_session_local = None
+
+
+# Register fork handler so each Celery child process creates its own async engine
+try:
+    os.register_at_fork(after_in_child=_reset_engine)
+except AttributeError:
+    pass  # Windows doesn't support fork
+
+
 def _get_engine():
     """Lazy engine creation — ensures each forked Celery worker gets its own pool."""
     global _engine
@@ -43,7 +57,6 @@ def get_async_session() -> async_sessionmaker:
 
 
 # Backward-compatible alias for existing imports
-# This is a callable that creates the sessionmaker lazily on first use
 class _LazyAsyncSessionMaker:
     """Lazy proxy: first call creates engine + sessionmaker, subsequent calls reuse."""
 
