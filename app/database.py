@@ -50,9 +50,9 @@ def _get_engine():
         _engine = create_async_engine(
             get_database_url_async(),
             echo=False,
-            pool_size=5,
-            max_overflow=10,
-            pool_timeout=5,
+            pool_size=3,
+            max_overflow=2,
+            pool_timeout=10,
             pool_pre_ping=True,
         )
         _engine_loop_id = current_loop_id

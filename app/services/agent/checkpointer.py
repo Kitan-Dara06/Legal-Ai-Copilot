@@ -53,6 +53,12 @@ def _get_dsn() -> str:
     return url
 
 
+_pool: AsyncConnectionPool | None = None
+# Checkpoint tables are pre-created via `scripts/setup_checkpointer.py`.
+# Set to True to skip runtime DDL (avoids statement_timeout on Supabase).
+_tables_created = True
+
+
 async def _ensure_pool() -> AsyncConnectionPool:
     """Lazy-init singleton connection pool with event loop detection."""
     global _pool, _pool_loop_id
@@ -66,7 +72,7 @@ async def _ensure_pool() -> AsyncConnectionPool:
     if _pool is None:
         _pool = AsyncConnectionPool(
             conninfo=_get_dsn(),
-            max_size=20,
+            max_size=5,
             kwargs={"autocommit": True, "prepare_threshold": 0},
             open=False,
         )
