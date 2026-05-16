@@ -11,6 +11,7 @@ Key decisions:
   - We use the standard postgresql:// DSN (no +asyncpg prefix).
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -24,14 +25,16 @@ logger = logging.getLogger(__name__)
 
 
 _pool: AsyncConnectionPool | None = None
-# Checkpoint tables are pre-created via `scripts/setup_checkpointer.py`.
-_tables_created = True
+_pool_loop_id = None
+# Checkpoint tables are created on first use via _setup_tables().
+_tables_created = False
 
 
 def _reset_checkpointer_pool():
-    """Reset pool after Celery fork."""
-    global _pool
+    """Reset pool after Celery fork or event loop change."""
+    global _pool, _pool_loop_id
     _pool = None
+    _pool_loop_id = None
 
 
 try:
@@ -51,8 +54,15 @@ def _get_dsn() -> str:
 
 
 async def _ensure_pool() -> AsyncConnectionPool:
-    """Lazy-init singleton connection pool."""
-    global _pool
+    """Lazy-init singleton connection pool with event loop detection."""
+    global _pool, _pool_loop_id
+    try:
+        current_loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:
+        current_loop_id = None
+    if _pool is not None and _pool_loop_id != current_loop_id:
+        _pool = None
+        _pool_loop_id = None
     if _pool is None:
         _pool = AsyncConnectionPool(
             conninfo=_get_dsn(),
@@ -60,11 +70,13 @@ async def _ensure_pool() -> AsyncConnectionPool:
             kwargs={"autocommit": True, "prepare_threshold": 0},
             open=False,
         )
-    try:
-        if not _pool._opened:
+        _pool_loop_id = current_loop_id
+    if _pool is not None:
+        try:
+            if not _pool._opened:
+                await _pool.open()
+        except AttributeError:
             await _pool.open()
-    except AttributeError:
-        await _pool.open()
     return _pool
 
 
