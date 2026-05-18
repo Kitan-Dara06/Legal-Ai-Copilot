@@ -81,12 +81,14 @@ export default function WorkspaceDetailPage() {
           goalId,
           orgSlug || undefined,
         );
+        console.log("[Lex] Goal status response:", JSON.stringify(res));
         setWorkflowStatus(res.status);
 
         const workflows = (res as any).workflows as any[] | undefined;
         if (res.status === "AWAITING_APPROVAL" && workflows && workflows.length > 0) {
           const wfId = workflows[0].id;
           try {
+            console.log("[Lex] Fetching actions for workflow:", wfId);
             const actData = await getWorkflowActions(token, wfId, orgSlug || undefined);
             setActResult({ actions: actData.actions, workflow_id: wfId });
           } catch (e) {
