@@ -43,19 +43,29 @@ export function ActionQueue({
         setLoading(true);
         try {
             const baseUrl = process.env.NEXT_PUBLIC_API_URL || "";
-            const res = await fetch(
-                `${baseUrl}/api/agent/approve/${workflowId}`,
-                {
-                    method: "POST",
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                        "Content-Type": "application/json",
-                        ...(orgSlug ? { "x-org-slug": orgSlug } : {}),
-                    },
+            const res = await fetch(`${baseUrl}/agent/approve/${workflowId}`, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    "Content-Type": "application/json",
+                    ...(orgSlug ? { "x-org-slug": orgSlug } : {}),
                 },
-            );
+                body: JSON.stringify({}),
+            });
             if (res.ok) {
                 setApproved(true);
+            } else {
+                let errMsg = `Server returned ${res.status}`;
+                try {
+                    const errBody = await res.json();
+                    if (errBody.detail) {
+                        errMsg =
+                            typeof errBody.detail === "string"
+                                ? errBody.detail
+                                : JSON.stringify(errBody.detail);
+                    }
+                } catch {}
+                console.error("Approve failed:", errMsg);
             }
         } catch (err) {
             console.error("Approve failed:", err);
@@ -69,16 +79,32 @@ export function ActionQueue({
         setLoading(true);
         try {
             const baseUrl = process.env.NEXT_PUBLIC_API_URL || "";
-            await fetch(`${baseUrl}/api/agent/reject/${workflowId}`, {
+            const res = await fetch(`${baseUrl}/agent/reject/${workflowId}`, {
                 method: "POST",
                 headers: {
                     Authorization: `Bearer ${token}`,
                     "Content-Type": "application/json",
                     ...(orgSlug ? { "x-org-slug": orgSlug } : {}),
                 },
-                body: JSON.stringify({ reason: "" }),
+                body: JSON.stringify({
+                    reason: "Rejected by user via chat UI",
+                }),
             });
-            setRejected(true);
+            if (res.ok) {
+                setRejected(true);
+            } else {
+                let errMsg = `Server returned ${res.status}`;
+                try {
+                    const errBody = await res.json();
+                    if (errBody.detail) {
+                        errMsg =
+                            typeof errBody.detail === "string"
+                                ? errBody.detail
+                                : JSON.stringify(errBody.detail);
+                    }
+                } catch {}
+                console.error("Reject failed:", errMsg);
+            }
         } catch (err) {
             console.error("Reject failed:", err);
         } finally {
