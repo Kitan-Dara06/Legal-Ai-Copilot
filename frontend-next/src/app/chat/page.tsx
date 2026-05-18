@@ -98,6 +98,8 @@ export default function ChatPage() {
     const [goals, setGoals] = useState<GoalMessage[]>([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const pollingRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
+    const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const bottomRef = useRef<HTMLDivElement>(null);
 
     // Sidebar
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -684,6 +686,11 @@ export default function ChatPage() {
 
     const chatMessages = goalsToChatMessages();
 
+    // ─── Auto-scroll when goals / messages change ────────────────────────────
+    useEffect(() => {
+        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [goals, chatMessages, isProcessing]);
+
     return (
         <div className="flex h-screen bg-navy-950 overflow-hidden relative">
             {isSidebarOpen && (
@@ -724,56 +731,64 @@ export default function ChatPage() {
                 />
 
                 <div className="flex-1 mt-16 relative overflow-hidden flex flex-col">
-                    <ChatThread
-                        messages={chatMessages}
-                        isLoading={isProcessing}
-                    />
+                    <div
+                        className="flex-1 overflow-y-auto pb-32"
+                        ref={scrollContainerRef}
+                    >
+                        <ChatThread
+                            messages={chatMessages}
+                            isLoading={isProcessing}
+                        />
 
-                    {/* Special UI components rendered after the chat thread */}
-                    {goals.map((goal) => {
-                        if (
-                            goal.needsIntentConfirmation &&
-                            goal.suggestedIntent
-                        ) {
-                            return (
-                                <AmbiguityGate
-                                    key={`ambiguity-${goal.id}`}
-                                    goalText={goal.goal_text}
-                                    goalId={goal.id}
-                                    onConfirm={(intent) =>
-                                        handleConfirmIntent(goal.id, intent)
-                                    }
-                                />
-                            );
-                        }
-                        if (
-                            (goal.intent === "ACT" || goal.status === "AWAITING_APPROVAL") &&
-                            goal.actions &&
-                            goal.actions.length > 0
-                        ) {
-                            return (
-                                <ActionQueue
-                                    key={`actions-${goal.id}`}
-                                    actions={goal.actions}
-                                    workflowId={goal.id}
-                                    draft={goal.answer}
-                                    token={token || undefined}
-                                    orgSlug={orgSlug || undefined}
-                                />
-                            );
-                        }
-                        if (goal.intent === "REASON") {
-                            return (
-                                <ReasonResult
-                                    key={`reason-${goal.id}`}
-                                    answer={goal.answer}
-                                    findings={goal.findings}
-                                    logs={goal.logs}
-                                />
-                            );
-                        }
-                        return null;
-                    })}
+                        {/* Goal UI components — inside the scrollable area */}
+                        {goals.map((goal) => {
+                            if (
+                                goal.needsIntentConfirmation &&
+                                goal.suggestedIntent
+                            ) {
+                                return (
+                                    <AmbiguityGate
+                                        key={`ambiguity-${goal.id}`}
+                                        goalText={goal.goal_text}
+                                        goalId={goal.id}
+                                        onConfirm={(intent) =>
+                                            handleConfirmIntent(goal.id, intent)
+                                        }
+                                    />
+                                );
+                            }
+                            if (
+                                (goal.intent === "ACT" ||
+                                    goal.status === "AWAITING_APPROVAL") &&
+                                goal.actions &&
+                                goal.actions.length > 0
+                            ) {
+                                return (
+                                    <ActionQueue
+                                        key={`actions-${goal.id}`}
+                                        actions={goal.actions}
+                                        workflowId={goal.id}
+                                        draft={goal.answer}
+                                        token={token || undefined}
+                                        orgSlug={orgSlug || undefined}
+                                    />
+                                );
+                            }
+                            if (goal.intent === "REASON") {
+                                return (
+                                    <ReasonResult
+                                        key={`reason-${goal.id}`}
+                                        answer={goal.answer}
+                                        findings={goal.findings}
+                                        logs={goal.logs}
+                                    />
+                                );
+                            }
+                            return null;
+                        })}
+
+                        <div ref={bottomRef} className="h-4" />
+                    </div>
 
                     <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-navy-950 via-navy-950/80 to-transparent pointer-events-none">
                         <div className="pointer-events-auto">
