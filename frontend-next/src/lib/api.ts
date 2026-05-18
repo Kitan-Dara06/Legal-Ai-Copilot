@@ -523,6 +523,35 @@ export function reissueApproval(
   });
 }
 
+
+// ── Actions & Approval ────────────────────────────────────────────────────────
+
+export function getWorkflowActions(
+  token: string,
+  workflowId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ actions: any[] }>(\`/agent/\${workflowId}/actions\`, { token, orgSlug });
+}
+
+export function confirmPlan(
+  token: string,
+  workspaceId: string,
+  goalId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ status: string }>(
+    \`/workspaces/\${workspaceId}/goals/\${goalId}/confirm-plan\`,
+    {
+      token,
+      orgSlug,
+      method: POST,
+      headers: { Content-Type: application/json },
+      body: JSON.stringify({}),
+    },
+  );
+}
+
 // ── Notifications ────────────────────────────────────────────────────────────
 
 export function listNotifications(token: string, orgSlug?: string) {
