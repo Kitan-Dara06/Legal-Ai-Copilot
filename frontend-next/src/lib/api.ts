@@ -531,7 +531,7 @@ export function getWorkflowActions(
   workflowId: string,
   orgSlug?: string,
 ) {
-  return apiFetch<{ actions: any[] }>(\`/agent/\${workflowId}/actions\`, { token, orgSlug });
+  return apiFetch<{ actions: any[] }>(`/agent/${workflowId}/actions`, { token, orgSlug });
 }
 
 export function confirmPlan(
@@ -541,12 +541,12 @@ export function confirmPlan(
   orgSlug?: string,
 ) {
   return apiFetch<{ status: string }>(
-    \`/workspaces/\${workspaceId}/goals/\${goalId}/confirm-plan\`,
+    `/workspaces/${workspaceId}/goals/${goalId}/confirm-plan`,
     {
       token,
       orgSlug,
-      method: POST,
-      headers: { Content-Type: application/json },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     },
   );
