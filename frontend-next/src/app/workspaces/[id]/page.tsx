@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { getWorkspace, createWorkspaceSession } from "@/lib/api";
 import { uploadDocument } from "@/lib/api";
-import { createGoal, getGoalStatus, listGoals } from "@/lib/api";
+import { createGoal, getGoalStatus, getWorkflowActions, listGoals } from "@/lib/api";
 import { WorkspaceDetailResponse, WorkspaceDocument } from "@/lib/types";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
