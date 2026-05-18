@@ -83,8 +83,9 @@ export default function WorkspaceDetailPage() {
         );
         setWorkflowStatus(res.status);
 
-        if (res.status === "AWAITING_APPROVAL" && res.workflows?.length > 0) {
-          const wfId = res.workflows[0].id;
+        const workflows = (res as any).workflows as any[] | undefined;
+        if (res.status === "AWAITING_APPROVAL" && workflows && workflows.length > 0) {
+          const wfId = workflows[0].id;
           try {
             const actData = await getWorkflowActions(token, wfId, orgSlug || undefined);
             setActResult({ actions: actData.actions, workflow_id: wfId });
