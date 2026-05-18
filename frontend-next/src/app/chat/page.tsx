@@ -670,6 +670,16 @@ export default function ChatPage() {
 
     // ─── Render ──────────────────────────────────────────────────────────────
 
+    const chatMessages = goalsToChatMessages();
+
+    // ─── Auto-scroll when goals / messages change ────────────────────────────
+    useEffect(() => {
+        // Wait a tick for the DOM to update before scrolling
+        setTimeout(() => {
+            bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+        }, 50);
+    }, [goals, chatMessages, isProcessing]);
+
     if (isInitializing || !user) {
         return (
             <div className="min-h-screen bg-navy-950 flex flex-col items-center justify-center">
@@ -683,13 +693,6 @@ export default function ChatPage() {
             </div>
         );
     }
-
-    const chatMessages = goalsToChatMessages();
-
-    // ─── Auto-scroll when goals / messages change ────────────────────────────
-    useEffect(() => {
-        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, [goals, chatMessages, isProcessing]);
 
     return (
         <div className="flex h-screen bg-navy-950 overflow-hidden relative">
