@@ -33,14 +33,14 @@ services:
     env_file:
       - .env.production
     environment:
-      - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-1}
     ports:
       - "8000:8000"
     command: >
       uvicorn main:app
       --host 0.0.0.0
       --port 8000
-      --workers ${UVICORN_WORKERS:-2}
+      --workers ${UVICORN_WORKERS:-1}
       --proxy-headers
       --forwarded-allow-ips=*
     restart: always
@@ -48,7 +48,7 @@ services:
       resources:
         limits:
           memory: 1500M    # Hard cap — API never loads ML models
-          cpus: "1.5"
+          cpus: "0.9"      # 1-vCPU droplet: max is 1.0, leave 0.1 for nginx/OS
     depends_on:
       migrations:
         condition: service_completed_successfully
