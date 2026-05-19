@@ -124,10 +124,11 @@ def init_worker_process(**kwargs):
     """Warm up DB connections when worker process starts."""
     future = asyncio.run_coroutine_threadsafe(_warmup(), _worker_loop)
     try:
-        future.result(timeout=30)
+        future.result(timeout=60)  # 60s — cold Supabase SSL handshake can take 20-40s
         logger.info("Worker warmup complete (DB connections ready).")
     except Exception as e:
-        logger.error("Worker warmup failed (non-fatal): %s", e)
+        # repr(e) shows type even when str(e) is blank (e.g. TimeoutError)
+        logger.error("Worker warmup failed (non-fatal): %s", repr(e))
 
 
 @worker_process_shutdown.connect
