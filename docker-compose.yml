@@ -21,7 +21,7 @@ services:
       dockerfile: Dockerfile.worker   # Worker image has alembic + psycopg2
     env_file:
       - .env.production
-    command: alembic upgrade head
+    command: alembic upgrade heads
     restart: "no"
     profiles: ["api", "all"]
 
@@ -116,8 +116,9 @@ services:
           memory: 3500M   # 4GB droplet: 3.5GB limit, 500MB OS headroom
           cpus: "1.8"
     healthcheck:
-      test: ["CMD", "celery", "-A", "app.worker", "inspect", "ping",
-             "--destination", "worker@$$HOSTNAME", "--timeout", "10"]
+      test:
+        - "CMD-SHELL"
+        - "celery -A app.worker inspect ping --destination worker@$$HOSTNAME --timeout 10"
       interval: 60s
       timeout: 30s
       retries: 3
