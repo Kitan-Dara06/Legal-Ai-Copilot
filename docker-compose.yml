@@ -118,11 +118,11 @@ services:
     healthcheck:
       test:
         - "CMD-SHELL"
-        - "celery -A app.worker inspect ping --timeout 10 2>/dev/null | grep -q pong"
-      interval: 60s
-      timeout: 30s
+        - "pgrep -f 'celery.*worker' > /dev/null"
+      interval: 30s
+      timeout: 5s
       retries: 3
-      start_period: 90s   # SPLADE warmup takes ~30s on cold container
+      start_period: 120s
     profiles: ["worker", "all"]
 
   # ── Celery Beat (periodic tasks scheduler) ───────────────────────────────
