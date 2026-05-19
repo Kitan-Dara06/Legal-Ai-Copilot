@@ -68,7 +68,7 @@ services:
       - "8000:8000"
     # API concurrency (HTTP). Background processing is still handled by Celery workers.
     # Override on the host: UVICORN_WORKERS=2 docker compose up -d --build api
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-4} --proxy-headers --forwarded-allow-ips=*
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-2} --proxy-headers --forwarded-allow-ips=*
     restart: always
     depends_on:
       db:
@@ -94,7 +94,7 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env.production
-    command: celery -A app.worker worker -Q default -n pdf_worker@%h -c 1
+    command: celery -A app.worker worker -Q default -n pdf_worker@%h --pool=threads -c 2
     restart: always
     depends_on:
       db:

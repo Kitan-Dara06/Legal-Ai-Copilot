@@ -1,6 +1,5 @@
 # app/database.py
 
-import asyncio
 import os
 from typing import AsyncGenerator
 
@@ -14,15 +13,13 @@ load_dotenv()
 
 _engine = None
 _async_session_local = None
-_engine_loop_id = None
 
 
 def _reset_engine():
-    """Reset engine globals — called after Celery fork or event loop change."""
-    global _engine, _async_session_local, _engine_loop_id
+    """Reset engine globals — called after Celery fork to force fresh pool creation."""
+    global _engine, _async_session_local
     _engine = None
     _async_session_local = None
-    _engine_loop_id = None
 
 
 # Register fork handler so each Celery child process creates its own async engine
@@ -33,29 +30,18 @@ except AttributeError:
 
 
 def _get_engine():
-    """
-    Lazy engine creation — detects event loop changes and resets the engine
-    if asyncio.run() was called with a new loop since last use.
-    """
-    global _engine, _async_session_local, _engine_loop_id
-    try:
-        current_loop_id = id(asyncio.get_running_loop())
-    except RuntimeError:
-        current_loop_id = None
-    if _engine is not None and _engine_loop_id != current_loop_id:
-        _engine = None
-        _async_session_local = None
-        _engine_loop_id = None
+    """Lazy engine creation with minimal pool — connections managed by persistent loop."""
+    global _engine
     if _engine is None:
         _engine = create_async_engine(
             get_database_url_async(),
             echo=False,
-            pool_size=3,
-            max_overflow=2,
+            pool_size=2,
+            max_overflow=3,
             pool_timeout=10,
             pool_pre_ping=True,
+            pool_recycle=1800,
         )
-        _engine_loop_id = current_loop_id
     return _engine
 
 

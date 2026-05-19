@@ -7,20 +7,13 @@ from contextlib import asynccontextmanager
 from typing import cast
 
 import sentry_sdk
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from sentry_sdk.integrations.fastapi import FastApiIntegration
-from sentry_sdk.integrations.logging import LoggingIntegration
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from starlette.types import ExceptionHandler
-
 from app.config_validation import validate_config
 from app.database import Base
 from app.database import _get_engine as get_db_engine
 from app.dependencies import get_org_id_for_rate_limit
 from app.logging_config import configure_logging
 from app.routers import (
+    action_agent,
     admin,
     approvals,
     audit,
@@ -35,6 +28,13 @@ from app.routers import (
     workspaces,
 )
 from app.services.object_storage import check_storage_ready
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.logging import LoggingIntegration
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from starlette.types import ExceptionHandler
 
 configure_logging()
 
@@ -77,9 +77,8 @@ async def lifespan(app: FastAPI):
 
     if run_migrations:
         try:
-            from alembic.config import Config
-
             from alembic import command
+            from alembic.config import Config
 
             alembic_cfg_path = os.getenv("ALEMBIC_CONFIG", "alembic.ini")
             alembic_cfg = Config(alembic_cfg_path)
@@ -184,10 +183,9 @@ async def lifespan(app: FastAPI):
     try:
         import asyncio
 
-        from sqlalchemy import select, update
-
         from app.database import AsyncSessionLocal as _RecoverySession
         from app.models import WorkflowExecution, WorkflowStatus
+        from sqlalchemy import select, update
 
         async def _recover_stuck_workflows():
             async with _RecoverySession() as recovery_db:
@@ -325,4 +323,5 @@ app.include_router(cron.router)
 app.include_router(notifications.router)
 app.include_router(escalations.router)
 app.include_router(integrations.router)
+app.include_router(action_agent.router)
 app.include_router(admin.router)

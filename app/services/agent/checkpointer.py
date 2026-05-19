@@ -11,7 +11,6 @@ Key decisions:
   - We use the standard postgresql:// DSN (no +asyncpg prefix).
 """
 
-import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -25,22 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 _pool: AsyncConnectionPool | None = None
-_pool_loop_id = None
 # Checkpoint tables are created on first use via _setup_tables().
 _tables_created = False
-
-
-def _reset_checkpointer_pool():
-    """Reset pool after Celery fork or event loop change."""
-    global _pool, _pool_loop_id
-    _pool = None
-    _pool_loop_id = None
-
-
-try:
-    os.register_at_fork(after_in_child=_reset_checkpointer_pool)
-except AttributeError:
-    pass
 
 
 def _get_dsn() -> str:
@@ -53,36 +38,18 @@ def _get_dsn() -> str:
     return url
 
 
-_pool: AsyncConnectionPool | None = None
-# Checkpoint tables are pre-created via `scripts/setup_checkpointer.py`.
-# Set to True to skip runtime DDL (avoids statement_timeout on Supabase).
-_tables_created = True
-
-
 async def _ensure_pool() -> AsyncConnectionPool:
-    """Lazy-init singleton connection pool with event loop detection."""
-    global _pool, _pool_loop_id
-    try:
-        current_loop_id = id(asyncio.get_running_loop())
-    except RuntimeError:
-        current_loop_id = None
-    if _pool is not None and _pool_loop_id != current_loop_id:
-        _pool = None
-        _pool_loop_id = None
-    if _pool is None:
+    """Lazy-init singleton connection pool."""
+    global _pool
+    if _pool is None or (hasattr(_pool, "closed") and _pool.closed):
         _pool = AsyncConnectionPool(
             conninfo=_get_dsn(),
+            min_size=1,
             max_size=5,
             kwargs={"autocommit": True, "prepare_threshold": 0},
             open=False,
         )
-        _pool_loop_id = current_loop_id
-    if _pool is not None:
-        try:
-            if not _pool._opened:
-                await _pool.open()
-        except AttributeError:
-            await _pool.open()
+        await _pool.open()
     return _pool
 
 
@@ -95,7 +62,6 @@ async def _setup_tables(conn) -> None:
     if _tables_created:
         return
     try:
-        # Disable statement timeout for DDL setup only
         await conn.execute("SET statement_timeout = 0")
         checkpointer = AsyncPostgresSaver(conn)
         await checkpointer.setup()
@@ -103,7 +69,7 @@ async def _setup_tables(conn) -> None:
         logger.info("LangGraph checkpoint tables ready.")
     except Exception as e:
         logger.warning("Checkpoint table setup failed (may already exist): %s", e)
-        _tables_created = True  # assume tables exist, proceed
+        _tables_created = True
 
 
 @asynccontextmanager

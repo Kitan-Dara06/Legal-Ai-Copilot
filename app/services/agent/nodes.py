@@ -16,15 +16,10 @@ import logging
 import os
 import time
 import uuid as _uuid
+from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
-
-from langchain_core.messages import AIMessage
-from langchain_groq import ChatGroq
-from pydantic import BaseModel, Field
-from sqlalchemy import select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import AsyncSessionLocal
 from app.models import (
@@ -49,6 +44,11 @@ from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlySta
 from app.services.notifications import notify_approval_needed
 from app.services.object_storage import upload_bytes
 from app.utils import sanitize_goal_text
+from langchain_core.messages import AIMessage
+from langchain_groq import ChatGroq
+from pydantic import BaseModel, Field
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +174,7 @@ def _adapt_state(state: PointerOnlyState) -> PointerOnlyState:
         "action_count": 0,
         "error_context": None,
         "retry_count": 0,
+        "session_file_ids": [],
         "messages": [],
     }
     for key, val in defaults.items():
@@ -359,6 +360,34 @@ async def retrieval_node(state: PointerOnlyState) -> Dict[str, Any]:
     retrieval_aborted = False
     reranked_results = []
 
+    # ── Resolve session file IDs to filename for scoped search ──
+    session_specific_contracts = None
+    session_file_ids = state.get("session_file_ids", [])
+    if session_file_ids and all(isinstance(fid, str) for fid in session_file_ids):
+        try:
+            from app.database import AsyncSessionLocal
+            from app.models import Document
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as lookup_db:
+                doc_res = await lookup_db.execute(
+                    select(Document.filename).where(
+                        Document.id.in_([_uuid.UUID(fid) for fid in session_file_ids])
+                    )
+                )
+                filenames = [row[0] for row in doc_res.all()]
+                if filenames:
+                    session_specific_contracts = filenames
+                    logger.info(
+                        "[%s] Scoping REASON search to %d document(s)",
+                        workflow_id,
+                        len(filenames),
+                    )
+        except Exception as doc_err:
+            logger.warning(
+                "[%s] Could not resolve session docs: %s", workflow_id, doc_err
+            )
+
     try:
         embedder = LegalEmbedder()
         voyage_vec = embedder.get_voyage_query_vector(goal_text)
@@ -383,6 +412,7 @@ async def retrieval_node(state: PointerOnlyState) -> Dict[str, Any]:
             top_k=5,
             org_id=org_id,
             workspace_id=workspace_id,
+            specific_contracts=session_specific_contracts,
         )
 
         # Unpack new dict return format (list fallback for backward compat)
@@ -497,6 +527,39 @@ class AnalyzeResult(BaseModel):
     faithfulness_score: float = Field(
         ...,
         description="0.0 to 1.0 — how strictly the answer is grounded in the sources",
+    )
+
+
+class DraftResult(BaseModel):
+    """
+    Structured output for the ACT path draft generation.
+    Mirrors AnalyzeResult to enforce strict chunk anchoring.
+    """
+
+    draft_text: str = Field(
+        ...,
+        description="The consolidated professional notice addressing all obligations",
+    )
+    source_citations: list[str] = Field(
+        ...,
+        description=(
+            "List of exact source text excerpts cited in the draft, "
+            "each with document name and section reference"
+        ),
+    )
+    grounding_score: float = Field(
+        ...,
+        description=(
+            "0.0 to 1.0 — how strictly the draft is grounded in the provided source texts. "
+            "1.0 = every claim maps to a verbatim source quote"
+        ),
+    )
+    missing_info: list[str] = Field(
+        default_factory=list,
+        description=(
+            "List of information gaps where the source text was insufficient "
+            "to complete a required section of the notice"
+        ),
     )
 
 
@@ -1055,17 +1118,81 @@ async def detect_node(state: PointerOnlyState) -> Dict[str, Any]:
                 )
             )
 
+        # ── Deadline-based actions with proper filtering ──────────────
+        #  1) Raised threshold: only urgency >= 0.7
         deadlines_res = await db.execute(
             select(DeadlineRegistry)
             .where(
                 DeadlineRegistry.workspace_id == workspace_id,
-                DeadlineRegistry.urgency_score >= 0.5,
+                DeadlineRegistry.urgency_score >= 0.7,
             )
             .order_by(DeadlineRegistry.urgency_score.desc())
         )
         deadlines = deadlines_res.scalars().all()
+
+        #  2) Filter out dormant / standard obligations:
+        #     If no resolved deadline OR deadline > 90 days out, skip
+        #     unless urgency >= 0.8.
+        now_utc = datetime.now(timezone.utc)
+        cutoff_date = now_utc + timedelta(days=90)
+        filtered_deadlines: list = []
         for dl in deadlines:
+            score = float(dl.urgency_score)
+            has_resolved = dl.resolved_deadline is not None
+            deadline_soon = has_resolved and dl.resolved_deadline <= cutoff_date
+            if deadline_soon or score >= 0.8:
+                filtered_deadlines.append(dl)
+
+        #  3) Deduplicate near-identical obligation descriptions.
+        #     Two descriptions sharing > 80% of words → keep higher urgency.
+        def _word_set(text: str) -> set:
+            return set(text.lower().split())
+
+        deduped_deadlines: list = []
+        for dl in filtered_deadlines:
+            dl_words = _word_set(dl.obligation_description)
+            is_dup = False
+            for i, kept in enumerate(deduped_deadlines):
+                kept_words = _word_set(kept.obligation_description)
+                union = dl_words | kept_words
+                if not union:
+                    continue
+                overlap = len(dl_words & kept_words) / len(union)
+                if overlap > 0.80:
+                    # Keep whichever has higher urgency (list is pre-sorted
+                    # descending, so `kept` is >= `dl` already).
+                    is_dup = True
+                    break
+            if not is_dup:
+                deduped_deadlines.append(dl)
+
+        #  4) Cap at 10 actions maximum (already sorted by urgency desc).
+        MAX_DEADLINE_ACTIONS = 10
+        capped_deadlines = deduped_deadlines[:MAX_DEADLINE_ACTIONS]
+
+        for dl in capped_deadlines:
             source_ref = dl.source_clause_a
+            # ── Quality gate: skip if source text is missing or invalid ──
+            source_text = (source_ref or {}).get("text", "")
+            source_doc_id = (source_ref or {}).get("document_id", "")
+            if not source_text or not source_doc_id or source_doc_id == "unknown":
+                logger.warning(
+                    "[%s] Skipping deadline %s: missing source text or document_id",
+                    workflow_id,
+                    dl.id,
+                )
+                continue
+
+            # ── Session scoping: skip if document not in user's selection ──
+            session_file_ids = state.get("session_file_ids", [])
+            if session_file_ids and source_doc_id not in session_file_ids:
+                logger.info(
+                    "[%s] Skipping deadline %s: document %s not in session",
+                    workflow_id,
+                    dl.id,
+                    source_doc_id[:8],
+                )
+                continue
             detected.append(
                 dict(
                     workflow_id=wf_uuid,
@@ -1080,6 +1207,16 @@ async def detect_node(state: PointerOnlyState) -> Dict[str, Any]:
                 )
             )
 
+        logger.info(
+            "[%s] detect_node deadline filtering: %d raw -> %d after dormant filter "
+            "-> %d after dedup -> %d after cap",
+            workflow_id,
+            len(deadlines),
+            len(filtered_deadlines),
+            len(deduped_deadlines),
+            len(capped_deadlines),
+        )
+
         if detected:
             stmt = pg_insert(Action).values(detected).on_conflict_do_nothing()
             await db.execute(stmt)
@@ -1092,7 +1229,11 @@ async def detect_node(state: PointerOnlyState) -> Dict[str, Any]:
         await db.commit()
 
     action_count = len(detected)
-    summary = f"Detected {action_count} actions: {len(conflicts)} definitional conflicts, {len(deadlines)} deadline obligations."
+    summary = (
+        f"Detected {action_count} actions: {len(conflicts)} definitional conflicts, "
+        f"{len(capped_deadlines)} deadline obligations "
+        f"(filtered from {len(deadlines)} raw candidates)."
+    )
     logger.info("[%s] detect_node complete: %s", workflow_id, summary)
 
     return {
@@ -1102,22 +1243,129 @@ async def detect_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+def _extract_source_text(source_clause_ref: Optional[Dict]) -> str:
+    """
+    Extract the actual clause text from source_clause_ref JSONB.
+    The structure is: {"document_id": "...", "hierarchy": [...], "text": "..."}
+    Returns the text content or an empty string if unavailable.
+    """
+    if not source_clause_ref or not isinstance(source_clause_ref, dict):
+        return ""
+    return source_clause_ref.get("text", "")
+
+
+def _extract_hierarchy(source_clause_ref: Optional[Dict]) -> str:
+    """
+    Extract the section hierarchy from source_clause_ref for citation purposes.
+    Returns a human-readable section path or empty string.
+    """
+    if not source_clause_ref or not isinstance(source_clause_ref, dict):
+        return ""
+    hierarchy = source_clause_ref.get("hierarchy", [])
+    if isinstance(hierarchy, list) and hierarchy:
+        return " > ".join(str(h) for h in hierarchy)
+    return ""
+
+
+async def _retrieve_additional_context(
+    obligation_description: str,
+    org_id: str,
+    workspace_id: str,
+    document_id: Optional[str] = None,
+    top_k: int = 3,
+) -> str:
+    """
+    Retrieve additional related chunks from the vector store to give the
+    drafter broader contract context beyond the single source clause.
+
+    When document_id is provided, scopes the search to that specific document
+    (by looking up the filename and using it as a filter) to prevent pulling
+    clauses from unrelated contracts in the same workspace.
+    """
+    try:
+        from app.services.ingestion.embedder import LegalEmbedder
+        from app.services.store import search_hybrid
+
+        embedder = LegalEmbedder()
+        query_vec = embedder.get_voyage_query_vector(obligation_description)
+
+        # ── Resolve document filename for scoped search ──
+        specific_contract = None
+        if document_id:
+            try:
+                from app.database import AsyncSessionLocal
+                from app.models import Document
+                from sqlalchemy import select
+
+                async with AsyncSessionLocal() as lookup_db:
+                    doc_res = await lookup_db.execute(
+                        select(Document.filename).where(
+                            Document.id == _uuid.UUID(document_id)
+                        )
+                    )
+                    filename = doc_res.scalar_one_or_none()
+                    if filename:
+                        specific_contract = filename
+                        logger.info(
+                            "Scoping additional context to document '%s' (%s)",
+                            filename,
+                            document_id,
+                        )
+            except Exception as doc_err:
+                logger.warning(
+                    "Could not resolve document_id=%s for scoped search: %s",
+                    document_id,
+                    doc_err,
+                )
+                return ""  # Don't fall through to unscoped search
+
+        search_response = search_hybrid(
+            query_text=obligation_description,
+            query_vector=query_vec,
+            top_k=top_k,
+            org_id=org_id,
+            workspace_id=workspace_id,
+            specific_contract=specific_contract,
+        )
+
+        results = (
+            search_response.get("results", [])
+            if isinstance(search_response, dict)
+            else search_response
+        )
+
+        context_parts = []
+        for r in results:
+            text = r.get("text", "")
+            source = r.get("metadata", {}).get("source", "Unknown")
+            page = r.get("metadata", {}).get("page", "?")
+            result_file_id = r.get("metadata", {}).get("file_id")
+            if text:
+                # If we know the document filename, label it clearly
+                if specific_contract:
+                    source = specific_contract
+                context_parts.append(f"[Source: {source}, Page {page}]\n{text}")
+
+        return "\n\n---\n\n".join(context_parts)
+    except Exception as e:
+        logger.warning("Failed to retrieve additional context: %s", e)
+        return ""
+
+
 async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Uses Groq to generate drafts for detected actions.
+    Grounds each draft on actual source clause text retrieved from the document.
     """
     state = _adapt_state(state)
     workflow_id = state["workflow_id"]
     wf_uuid = _uuid.UUID(workflow_id)
+    org_id = state.get("org_id", "")
+    workspace_id = state.get("workspace_id", "")
+    goal_text = state.get("goal_text", "")  # User's original request
 
     logger.info("[%s] draft_node: generating drafts", workflow_id)
     await _set_wf_status(workflow_id, WorkflowStatus.DRAFTING)
-
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        temperature=0.0,
-        api_key=os.getenv("GROQ_API_KEY", ""),
-    )
 
     async with AsyncSessionLocal() as db:
         res = await db.execute(
@@ -1127,29 +1375,264 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
         )
         actions = res.scalars().all()
 
+        # ── Group actions by action_type for consolidated drafting ──
+        groups: dict[ActionType, list[Action]] = defaultdict(list)
         for action in actions:
+            groups[action.action_type].append(action)
+
+        for action_type, group_actions in groups.items():
+            # ── Collect source material from all actions in the group ──
+            source_entries: list[dict] = []  # {text, section_path, doc_id, desc}
+            has_any_source = False
+            for action in group_actions:
+                source_text = _extract_source_text(action.source_clause_ref)
+                section_path = _extract_hierarchy(action.source_clause_ref)
+                doc_id = (action.source_clause_ref or {}).get("document_id", "unknown")
+                source_entries.append(
+                    {
+                        "text": source_text,
+                        "section_path": section_path,
+                        "doc_id": doc_id,
+                        "description": action.description,
+                    }
+                )
+                if source_text:
+                    has_any_source = True
+
+            # ── Retrieve context using the user's original query (mirrors retrieval_node) ──
+            group_doc_id = source_entries[0].get("doc_id", "") if source_entries else ""
+            additional_context = ""
+            if goal_text and org_id and workspace_id:
+                try:
+                    from app.services.ingestion.embedder import LegalEmbedder
+                    from app.services.store import search_hybrid, search_hybrid_qdrant
+
+                    embedder = LegalEmbedder()
+                    query_vec = embedder.get_voyage_query_vector(goal_text)
+
+                    session_file_ids = state.get("session_file_ids", [])
+
+                    # session_file_ids can be integers (Qdrant file_ids) or strings (document UUIDs).
+                    # Use integer IDs directly; fall back to filename scoping for string/UUID IDs.
+                    use_qdrant_ids = all(
+                        isinstance(fid, int) for fid in session_file_ids
+                    )
+
+                    if use_qdrant_ids:
+                        results = search_hybrid_qdrant(
+                            query_text=goal_text,
+                            query_vector=query_vec,
+                            file_ids=session_file_ids,
+                            org_id=org_id,
+                            top_k=3,
+                        )
+                    else:
+                        # Fall back to filename-scoped search using the action's source document
+                        specific_contract = None
+                        if group_doc_id and group_doc_id != "unknown":
+                            try:
+                                from app.database import AsyncSessionLocal
+                                from app.models import Document
+                                from sqlalchemy import select
+
+                                async with AsyncSessionLocal() as lookup_db:
+                                    doc_res = await lookup_db.execute(
+                                        select(Document.filename).where(
+                                            Document.id == _uuid.UUID(group_doc_id)
+                                        )
+                                    )
+                                    fn = doc_res.scalar_one_or_none()
+                                    if fn:
+                                        specific_contract = fn
+                            except Exception:
+                                logger.warning(
+                                    "[%s] Could not resolve doc %s for search",
+                                    workflow_id,
+                                    group_doc_id,
+                                )
+
+                        search_response = search_hybrid(
+                            query_text=goal_text,
+                            query_vector=query_vec,
+                            top_k=3,
+                            org_id=org_id,
+                            workspace_id=workspace_id,
+                            specific_contract=specific_contract,
+                        )
+                        results = (
+                            search_response.get("results", [])
+                            if isinstance(search_response, dict)
+                            else search_response
+                        )
+
+                    context_parts = []
+                    for r in results:
+                        text = r.get("text", "")
+                        source = r.get("metadata", {}).get("source", "Unknown")
+                        page = r.get("metadata", {}).get("page", "?")
+                        if text:
+                            context_parts.append(
+                                f"[Source: {source}, Page {page}]\n{text}"
+                            )
+
+                    additional_context = "\n\n---\n\n".join(context_parts)
+                except Exception as e:
+                    logger.warning("[%s] Context retrieval failed: %s", workflow_id, e)
+
+            # ── If no source material at all, mark all actions as ungroundable ──
+            if not has_any_source and not additional_context:
+                for action in group_actions:
+                    action.draft_payload = {
+                        "draft_text": (
+                            f"UNABLE TO DRAFT: No source clause text is available for this action. "
+                            f"The obligation '{action.description}' was detected but the original "
+                            f"contract text could not be retrieved. A lawyer must draft this manually."
+                        ),
+                        "grounding_failed": True,
+                    }
+                logger.warning(
+                    "[%s] No source text for %s group (%d actions) — skipping draft",
+                    workflow_id,
+                    action_type.value,
+                    len(group_actions),
+                )
+                continue
+
+            # ── Build consolidated grounded prompt with CoT (mirrors synthesis_node) ──
+            # Determine document name for source labeling
+            group_doc_name = "the source document"
+            if group_doc_id and group_doc_id != "unknown":
+                group_doc_name = f"document {group_doc_id}"
+
+            # Build source material section
+            source_section = ""
+            for idx, entry in enumerate(source_entries, 1):
+                source_section += f"--- Source Clause {idx} ---\n"
+                source_section += f"Description: {entry['description']}\n"
+                if entry["section_path"]:
+                    source_section += f"Section Path: {entry['section_path']}\n"
+                source_section += f"Document: {group_doc_name}\n"
+                if entry["text"]:
+                    source_section += f"Text:\n{entry['text']}\n"
+                else:
+                    source_section += "Text: [not available]\n"
+                source_section += "\n"
+
             prompt = (
-                f"You are a legal AI assistant. Draft content for the following legal action.\n"
-                f"CRITICAL: Every single claim MUST map directly to a specific citation.\n"
-                f"BAD (hallucination): 'Most companies negotiate this term.'\n"
-                f"GOOD (grounded): 'Section 4.2 states a late fee of 1.5% applies. [Source: Service Agreement]'\n"
-                f"If you cannot find support for a claim in the provided references, state that explicitly.\n\n"
-                f"Action Type: {action.action_type.value}\n"
-                f"Description: {action.description}\n"
-                f"Context Reference: {action.source_clause_ref}\n\n"
-                f"Draft a professional and legally appropriate response or notice."
+                f"You are an expert legal AI assistant.\n"
+                f"The user requested: {goal_text}\n\n"
+                f"Based solely on the source clauses below, "
+                f"draft the specific document the user requested.\n\n"
+                f"=== CRITICAL: ALL text below comes from the SAME document ({group_doc_name}) ===\n"
+                f"Do NOT invent or reference terms, sections, dates, or parties from any other document.\n"
+                f"\n"
+                f"Follow these steps:\n"
+                f"STEP 1 — EXTRACT: Read each source clause below and extract the key claims verbatim.\n"
+                f"STEP 2 — VERIFY: For each claim you plan to include in the draft, confirm it maps "
+                f"directly to a specific sentence in the source text. DISCARD any claim that cannot be mapped.\n"
+                f"STEP 3 — IDENTIFY GAPS: Note what information is MISSING from the source text that "
+                f"would be needed for a complete notice (e.g., exact dates, party names, deadline).\n"
+                f"STEP 4 — DRAFT: Synthesize ONLY the verified claims into a professional notice.\n"
+                f"\n"
+                f"--- NEGATIVE EXAMPLES ---\n"
+                f"BAD (not grounded): 'Pursuant to Section 7 of the Agreement...'\n"
+                f"   → The source text does NOT mention Section 7. This is a hallucination.\n"
+                f"GOOD (grounded): 'The section regarding Base Salary states that the Company will pay...'\n"
+                f"   → The source text says exactly this; no section number was invented.\n"
+                f"BAD (hallucination): 'The parties agree that stock options shall vest immediately.'\n"
+                f"   → The source text does not mention stock options or vesting.\n"
+                f"GOOD (honest): 'The provided text does not specify a deadline for this obligation.'\n"
+                f"   → Correctly identifies a gap in the source material.\n"
+                f"\n"
+                f"=== ACTION TYPE: {action_type.value} ===\n"
+                f"Number of obligations: {len(group_actions)}\n\n"
+                f"=== SOURCE CLAUSES ===\n{source_section}"
             )
+
+            if additional_context:
+                prompt += (
+                    f"=== ADDITIONAL CONTEXT (same document) ===\n"
+                    f"{additional_context}\n\n"
+                )
+
+            prompt += (
+                f"=== OUTPUT REQUIREMENTS ===\n"
+                f"Your output MUST be a valid JSON object matching the DraftResult schema:\n"
+                f"- draft_text: The full consolidated notice\n"
+                f"- source_citations: List of verbatim source excerpts you cited (at least one per obligation)\n"
+                f"- grounding_score: 0.0 to 1.0 reflecting how much of the draft is directly grounded\n"
+                f"- missing_info: What information was needed but not available in the source text\n"
+                f"\n"
+                f"If the source text does not contain enough information to draft a meaningful notice, "
+                f"set grounding_score low and explain what is missing in missing_info."
+            )
+
             try:
-                response = await llm.ainvoke(prompt)
-                action.draft_payload = {"draft_text": response.content}
+                # Use structured output (same pattern as synthesis_node/AnalyzeResult)
+                # to enforce citation anchoring and grounding score.
+                llm_structured = ChatGroq(
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.0,
+                    api_key=os.getenv("GROQ_API_KEY", ""),
+                ).with_structured_output(DraftResult)
+
+                result: DraftResult = await llm_structured.ainvoke(prompt)
+                draft_text = result.draft_text
+                source_citations = result.source_citations
+                grounding_score = result.grounding_score
+                missing_info_list = result.missing_info
+
+                # Log grounding quality
+                if grounding_score < 0.5:
+                    logger.warning(
+                        "[%s] Low grounding score %.2f for %s group: %s",
+                        workflow_id,
+                        grounding_score,
+                        action_type.value,
+                        missing_info_list,
+                    )
+
+                # Store the full draft on the first action in the group
+                primary_action = group_actions[0]
+                primary_action.draft_payload = {
+                    "draft_text": draft_text,
+                    "consolidated": True,
+                    "covers_action_count": len(group_actions),
+                    "source_citations": source_citations,
+                    "grounding_score": grounding_score,
+                    "missing_info": missing_info_list,
+                    "had_additional_context": bool(additional_context),
+                }
+
+                # Mark remaining actions as referencing the primary draft
+                # but ALSO include the actual consolidated text so any action
+                # can serve as the notification source independently.
+                for action in group_actions[1:]:
+                    action.draft_payload = {
+                        "draft_text": draft_text,
+                        "consolidated_ref": str(primary_action.id),
+                        "consolidated": True,
+                    }
+
                 logger.info(
-                    "[%s] Drafted content for action %s", workflow_id, action.id
+                    "[%s] Drafted consolidated content for %s group: "
+                    "%d actions covered, grounding_score=%.2f, %d citations, %d chars additional context",
+                    workflow_id,
+                    action_type.value,
+                    len(group_actions),
+                    grounding_score,
+                    len(source_citations),
+                    len(additional_context),
                 )
             except Exception as e:
                 logger.error(
-                    "[%s] Drafting failed for action %s: %s", workflow_id, action.id, e
+                    "[%s] Drafting failed for %s group: %s",
+                    workflow_id,
+                    action_type.value,
+                    e,
                 )
-                action.draft_payload = {"error": str(e)}
+                for action in group_actions:
+                    action.draft_payload = {"error": str(e)}
 
         await db.commit()
 
@@ -1194,29 +1677,104 @@ async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
             if not draft_text:
                 continue
 
-            clause_ref = action.source_clause_ref or {}
+            # Skip QA for consolidated references (QA runs on the primary action only)
+            if (action.draft_payload or {}).get("consolidated_ref"):
+                payload = action.draft_payload or {}
+                payload["qa"] = {
+                    "has_issues": False,
+                    "issues": [],
+                    "summary": "Consolidated draft — QA performed on primary action.",
+                }
+                action.draft_payload = payload
+                continue
 
+            # Skip QA for drafts that already failed grounding
+            if (action.draft_payload or {}).get("grounding_failed"):
+                payload = action.draft_payload or {}
+                payload["qa"] = {
+                    "has_issues": True,
+                    "issues": [
+                        {
+                            "category": "unsupported_claim",
+                            "description": "Draft was not generated due to missing source text.",
+                            "severity": "high",
+                        }
+                    ],
+                    "summary": "Grounding failed — no source clause text available.",
+                }
+                action.draft_payload = payload
+                issue_count += 1
+                continue
+
+            # Extract actual source clause text for QA verification
+            source_text = _extract_source_text(action.source_clause_ref)
+            section_path = _extract_hierarchy(action.source_clause_ref)
+
+            # ── Cross-check structured citations against actual source text ──
+            draft_payload = action.draft_payload or {}
+            source_citations = draft_payload.get("source_citations", [])
+            grounding_score = draft_payload.get("grounding_score", 0.0)
+            citation_issues = []
+
+            if source_citations and source_text:
+                source_lower = source_text.lower()
+                for citation in source_citations:
+                    citation_lower = citation.lower()
+                    # Check if each citation's key terms appear in source text
+                    citation_words = [w for w in citation_lower.split() if len(w) > 4]
+                    match_count = sum(1 for w in citation_words if w in source_lower)
+                    if citation_words and match_count < len(citation_words) * 0.3:
+                        citation_issues.append(
+                            {
+                                "category": "fabricated_reference",
+                                "description": (
+                                    f"Citation not found in source text: "
+                                    f"'{citation[:100]}'"
+                                ),
+                                "severity": "high",
+                            }
+                        )
+
+            # ── Build QA prompt ──
             prompt = (
                 f"You are a legal QA auditor. Your job is to critically review a drafted legal action "
-                f"for any defects before it is submitted for human approval.\n\n"
+                f"by comparing it STRICTLY against the actual source clause text from the contract.\n\n"
                 f"Action Type: {action.action_type.value}\n"
                 f"Description: {action.description}\n"
-                f"Source Clause Reference: {json.dumps(clause_ref, indent=2)}\n\n"
-                f"Draft Text:\n{draft_text}\n\n"
+            )
+
+            if section_path:
+                prompt += f"Section Path: {section_path}\n"
+
+            if source_text:
+                prompt += (
+                    f"\n=== ACTUAL SOURCE CLAUSE TEXT (ground truth) ===\n"
+                    f"{source_text}\n\n"
+                )
+            else:
+                prompt += (
+                    f"\nWARNING: No source clause text is available. "
+                    f"Flag ALL factual claims in the draft as unsupported.\n\n"
+                )
+
+            prompt += (
+                f"=== DRAFT TEXT (under review) ===\n{draft_text}\n\n"
                 f"Analyse the draft for the following categories of issues:\n"
                 f"1. **Contradictions** — Does any claim in the draft directly contradict "
-                f"the referenced source clause?\n"
-                f"2. **Unsupported claims** — Does the draft make factual or legal claims "
-                f"that are not supported by the source clause?\n"
-                f"3. **Internal inconsistencies** — Does the draft contradict itself "
-                f"(e.g. conflicting statements, contradictory obligations)?\n\n"
+                f"the source clause text above? Check section numbers, dates, timeframes, "
+                f"party names, and specific terms.\n"
+                f"2. **Unsupported claims** — Does the draft cite sections, quote language, "
+                f"reference dates, or make factual claims NOT found in the source clause text?\n"
+                f"3. **Fabricated references** — Does the draft reference section numbers, "
+                f"clause identifiers, or quotes that do not appear in the source text?\n"
+                f"4. **Internal inconsistencies** — Does the draft contradict itself?\n\n"
                 f"Return your answer as a JSON object with exactly this structure, and nothing else:\n"
                 f"{{\n"
                 f'  "action_id": "{action.id}",\n'
                 f'  "has_issues": true or false,\n'
                 f'  "issues": [\n'
                 f"    {{\n"
-                f'      "category": "contradiction|unsupported_claim|inconsistency",\n'
+                f'      "category": "contradiction|unsupported_claim|fabricated_reference|inconsistency",\n'
                 f'      "description": "Brief explanation of the issue",\n'
                 f'      "severity": "low|medium|high"\n'
                 f"    }}\n"
@@ -1241,6 +1799,11 @@ async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
                 issues = result.get("issues", [])
                 has_issues = result.get("has_issues", len(issues) > 0)
 
+                # ── Merge citation cross-check issues into QA results ──
+                if citation_issues:
+                    issues.extend(citation_issues)
+                    has_issues = True
+
                 # Store QA results on the draft_payload
                 payload = action.draft_payload or {}
                 payload["qa"] = {
@@ -1258,6 +1821,23 @@ async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
                         len(issues),
                         action.id,
                     )
+
+                    # ── Block high-severity issues: fabricated references ──
+                    high_severity = [i for i in issues if i.get("severity") == "high"]
+                    if high_severity:
+                        logger.error(
+                            "[%s] QA BLOCKED action %s: %d high-severity issue(s): %s",
+                            workflow_id,
+                            action.id,
+                            len(high_severity),
+                            "; ".join(i["description"][:100] for i in high_severity),
+                        )
+                        payload["grounding_failed"] = True
+                        payload["draft_text"] = (
+                            "[DRAFT BLOCKED BY QA] This draft was found to contain fabricated "
+                            "references or unsupported claims. Manual review required."
+                        )
+                        action.draft_payload = payload
                 else:
                     logger.info(
                         "[%s] qa_node: action %s passed QA", workflow_id, action.id
@@ -1310,6 +1890,15 @@ async def plan_node(state: PointerOnlyState) -> Dict[str, Any]:
 
     total = 0
     async with AsyncSessionLocal() as db:
+        # Get goal_id from the workflow
+        wf_res = await db.execute(
+            select(WorkflowExecution.goal_id, WorkflowExecution.id).where(
+                WorkflowExecution.id == wf_uuid
+            )
+        )
+        wf_row = wf_res.first()
+        goal_id = wf_row[0] if wf_row else None
+
         res = await db.execute(
             select(Action)
             .where(
@@ -1388,10 +1977,18 @@ async def plan_node(state: PointerOnlyState) -> Dict[str, Any]:
             else:
                 deadline_map[str(action.id)] = None
 
-        # ── Build notification data list ──
+        # ── Build notification data list (skip QA-blocked actions) ──
         notif_data = []
         for action in actions:
             draft_payload = action.draft_payload or {}
+            # Skip actions that failed QA grounding check
+            if draft_payload.get("grounding_failed"):
+                logger.warning(
+                    "[%s] Skipping notification for QA-blocked action %s",
+                    workflow_id,
+                    action.id,
+                )
+                continue
             draft_text = draft_payload.get("draft_text", "")
             summary = action.description or action.action_type.value
             notif_data.append(
@@ -1405,21 +2002,41 @@ async def plan_node(state: PointerOnlyState) -> Dict[str, Any]:
 
         await db.commit()
 
-    # ── Send approval notifications ──
-    # Fire-and-forget: failures are caught & logged inside notify_approval_needed
-    for item in notif_data:
+    # ── Send approval notifications (once per workflow, not per action) ──
+    action_count = len(notif_data)
+    if action_count > 0:
+        # Look up the goal creator's email for notification
+        approver_email = None
         try:
-            notify_approval_needed(
+            from app.models import Goal, User
+
+            goal_res = await db.execute(
+                select(Goal, User.email)
+                .join(User, Goal.user_id == User.id)
+                .where(Goal.id == goal_id)
+            )
+            goal_row = goal_res.first()
+            if goal_row:
+                approver_email = goal_row[1]
+        except Exception:
+            pass
+
+        summaries = [item["summary"] for item in notif_data[:3]]
+        if action_count > 3:
+            summaries.append(f"... and {action_count - 3} more actions")
+        combined_summary = "; ".join(summaries)
+        try:
+            await notify_approval_needed(
                 workflow_id=workflow_id,
-                action_summary=item["summary"],
-                draft_preview=item["draft_preview"],
-                days_remaining=item["days_remaining"],
+                action_summary=combined_summary,
+                draft_preview=notif_data[0].get("draft_preview", ""),
+                days_remaining=notif_data[0].get("days_remaining"),
+                approver_email=approver_email,
             )
         except Exception as e:
             logger.error(
-                "[%s] Failed to send approval notification for action %s: %s",
+                "[%s] Failed to send approval notification: %s",
                 workflow_id,
-                item["action_id"],
                 e,
             )
 

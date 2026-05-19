@@ -125,6 +125,7 @@ def search_hybrid(
     query_vector: list[float],
     top_k: int = 5,
     specific_contract: Optional[str] = None,
+    specific_contracts: Optional[list[str]] = None,
     org_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
     nomic_vector: Optional[list[float]] = None,
@@ -132,7 +133,16 @@ def search_hybrid(
     """
     Hybrid Search using dual dense (voyage + nomic) + sparse (SPLADE) with RRF.
     Results are then reranked by voyage-rerank-2 for improved relevance.
-    Filtered by org_id (mandatory) + optionally workspace_id + specific_contract.
+    Filtered by org_id (mandatory) + optionally workspace_id + specific_contract(s).
+
+    When ``specific_contracts`` (plural, list) is provided, results are gathered
+    from ALL specified contracts, merged, deduplicated, and reranked as one set.
+    This enables cross-document scoring for the REASON path.
+
+    When ``specific_contract`` (singular, str) is provided, only that contract
+    is searched (backward-compatible with ANALYZE/ACT paths).
+    If both are provided, ``specific_contracts`` takes precedence.
+
     Returns: {"results": [...], "reranker_metrics": {...}}
     """
     qdrant = get_global_qdrant()
@@ -141,92 +151,106 @@ def search_hybrid(
         raise ValueError("org_id is required for tenant isolation.")
     org_id_str = str(org_id)
 
-    must_conditions: List[FieldCondition] = [
-        FieldCondition(key="org_id", match=MatchValue(value=org_id_str))
-    ]
-    if workspace_id:
-        must_conditions.append(
-            FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id))
-        )
-    if specific_contract:
-        must_conditions.append(
-            FieldCondition(key="filename", match=MatchValue(value=specific_contract))
-        )
+    contracts_to_search: list[str] = []
+    if specific_contracts:
+        contracts_to_search = specific_contracts
+    elif specific_contract:
+        contracts_to_search = [specific_contract]
+    # else: empty list means no filename filter (search all workspace docs)
 
-    search_filter = Filter(must=list(must_conditions)) if must_conditions else None
+    raw_results: list[dict] = []
+    seen_ids: set = set()
 
-    sparse_vec = compute_sparse_vector(query_text)
+    for contract_filter in contracts_to_search or [None]:
+        must_conditions: List[FieldCondition] = [
+            FieldCondition(key="org_id", match=MatchValue(value=org_id_str))
+        ]
+        if workspace_id:
+            must_conditions.append(
+                FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id))
+            )
+        if contract_filter:
+            must_conditions.append(
+                FieldCondition(key="filename", match=MatchValue(value=contract_filter))
+            )
 
-    prefetches = [
-        Prefetch(
-            query=query_vector,
-            using="dense_voyage",
-            filter=search_filter,
-            limit=top_k * 3,
-        ),
-        Prefetch(
-            query=sparse_vec,
-            using="sparse_legal",
-            filter=search_filter,
-            limit=top_k * 10,  # BM25/SPLADE boost
-        ),
-    ]
-    if nomic_vector:
-        prefetches.append(
+        search_filter = Filter(must=list(must_conditions)) if must_conditions else None
+
+        sparse_vec = compute_sparse_vector(query_text)
+
+        prefetches = [
             Prefetch(
-                query=nomic_vector,
-                using="dense_nomic",
+                query=query_vector,
+                using="dense_voyage",
                 filter=search_filter,
                 limit=top_k * 3,
+            ),
+            Prefetch(
+                query=sparse_vec,
+                using="sparse_legal",
+                filter=search_filter,
+                limit=top_k * 10,
+            ),
+        ]
+        if nomic_vector:
+            prefetches.append(
+                Prefetch(
+                    query=nomic_vector,
+                    using="dense_nomic",
+                    filter=search_filter,
+                    limit=top_k * 3,
+                )
             )
-        )
 
-    for attempt in range(3):
-        try:
-            qdrant_results = qdrant.query_points(
-                collection_name="lex_unified_chunks",
-                prefetch=prefetches,
-                query=FusionQuery(fusion=Fusion.RRF),
-                limit=top_k * 3,
-                with_payload=True,
-            ).points
-            break
-        except Exception as qe:
-            if attempt < 2:
-                import time
+        for attempt in range(3):
+            try:
+                qdrant_results = qdrant.query_points(
+                    collection_name="lex_unified_chunks",
+                    prefetch=prefetches,
+                    query=FusionQuery(fusion=Fusion.RRF),
+                    limit=top_k * 3,
+                    with_payload=True,
+                ).points
+                break
+            except Exception as qe:
+                if attempt < 2:
+                    import time
 
-                time.sleep(2**attempt)
+                    time.sleep(2**attempt)
+                    continue
+                logger.warning("Qdrant query failed after 3 retries: %s", str(qe)[:100])
+                qdrant_results = []
+                break
+
+        for hit in qdrant_results:
+            if hit.id in seen_ids:
                 continue
-            logger.warning("Qdrant query failed after 3 retries: %s", str(qe)[:100])
-            qdrant_results = []
-            break
+            seen_ids.add(hit.id)
+            p = hit.payload or {}
+            display_text = p.get("raw_text") or p.get("rich_text", "")
+            formatted_text = (
+                f"[Source: {p.get('filename', 'Unknown')}, "
+                f"Page: {p.get('page_number', '?')}]\n"
+                f"Content: {display_text}"
+            )
+            raw_results.append(
+                {
+                    "id": hit.id,
+                    "text": formatted_text,
+                    "score": hit.score,
+                    "metadata": {
+                        "source": p.get("filename", ""),
+                        "page": p.get("page_number", 0),
+                        "parent_id": p.get("parent_id", ""),
+                        "section_context": p.get("raw_text", ""),
+                        "file_id": p.get("file_id"),
+                        "org_id": p.get("org_id"),
+                        "clause_reference": p.get("clause_reference", ""),
+                    },
+                }
+            )
 
-    hits = qdrant_results
-
-    # ── Format raw results ──────────────────────────────────────────────────
-    raw_results = []
-    for hit in hits:
-        p = hit.payload or {}
-        display_text = p.get("raw_text") or p.get("rich_text", "")
-        formatted_text = f"[Source: {p.get('filename', 'Unknown')}, Page: {p.get('page_number', '?')}]\nContent: {display_text}"
-
-        raw_results.append(
-            {
-                "id": hit.id,
-                "text": formatted_text,
-                "score": hit.score,
-                "metadata": {
-                    "source": p.get("filename", ""),
-                    "page": p.get("page_number", 0),
-                    "parent_id": p.get("parent_id", ""),
-                    "section_context": p.get("raw_text", ""),
-                    "file_id": p.get("file_id"),
-                    "org_id": p.get("org_id"),
-                    "clause_reference": p.get("clause_reference", ""),
-                },
-            }
-        )
-
+    # ── Deduplicate by parent ──
     deduplicated = _deduplicate_by_parent(raw_results, max_context_chars=12000)
 
     # ── Voyage Reranker v2 ──────────────────────────────────────────────────

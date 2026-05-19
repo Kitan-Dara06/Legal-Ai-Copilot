@@ -18,6 +18,7 @@ import os
 import uuid
 from typing import Dict, List, Optional
 
+from celery import Task
 from dotenv import load_dotenv
 
 from app.celery_app import celery_app
@@ -43,6 +44,24 @@ password = (os.getenv("UPSTASH_PASSWORD") or "").strip()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro").strip()
+
+
+class AsyncTask(Task):
+    """
+    Base Celery task that submits async work to the persistent event loop.
+
+    Use self.run_async(coro) instead of asyncio.run(coro) to avoid
+    creating/destroying event loops per task.
+    """
+
+    abstract = True
+
+    def run_async(self, coro):
+        from app.worker import get_worker_loop
+
+        loop = get_worker_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result()
 
 
 def tasks_smoke_check(*, include_gemini: bool = False) -> dict:
@@ -113,6 +132,19 @@ from psycopg2 import pool
 
 _redis_conn = None
 _pg_pool = None
+
+
+def _reset_pg_pool():
+    """Reset sync pg pool and redis conn after fork (invalidates inherited connections)."""
+    global _pg_pool, _redis_conn
+    _pg_pool = None
+    _redis_conn = None
+
+
+try:
+    os.register_at_fork(after_in_child=_reset_pg_pool)
+except AttributeError:
+    pass
 
 
 def get_redis_conn():
@@ -1031,12 +1063,13 @@ def process_scanned_pdf(
 @celery_app.task(
     name="app.tasks.process_workflow",
     bind=True,
+    base=AsyncTask,
     max_retries=3,
     default_retry_delay=30,
     queue="default",
     acks_late=True,
 )
-def process_workflow(self, workflow_id: str):
+def process_workflow(self, workflow_id: str, session_file_ids: list | None = None):
     """
     Celery task that runs the LangGraph for a REASON or ACT workflow.
     Dispatched automatically when a goal is classified as REASON or ACT.
@@ -1114,12 +1147,11 @@ def process_workflow(self, workflow_id: str):
         status=WS.CLASSIFYING.value,
         findings_summary="",
         action_count=0,
+        session_file_ids=session_file_ids or [],
         messages=[],
         error_context=None,
         retry_count=0,
     )
-
-    import asyncio
 
     async def _run_graph():
         from app.services.agent.checkpointer import get_checkpointer
@@ -1133,7 +1165,7 @@ def process_workflow(self, workflow_id: str):
             await app.ainvoke(initial_state, config=config)
 
     try:
-        asyncio.run(_run_graph())
+        self.run_async(_run_graph())
         log.info("Workflow %s processed successfully", workflow_id)
     except Exception as e:
         log.error("Workflow %s processing failed: %s", workflow_id, e, exc_info=True)

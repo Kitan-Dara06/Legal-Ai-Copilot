@@ -5,15 +5,17 @@
 # (via send_task) and the worker process can import it without pulling in
 # task modules or signal handlers at import time.
 
+import asyncio
 import logging
 import os
+import threading
 
 import sentry_sdk
 
 logger = logging.getLogger(__name__)
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import worker_process_init
+from celery.signals import worker_process_init, worker_process_shutdown
 from dotenv import load_dotenv
 from sentry_sdk.integrations.celery import CeleryIntegration
 
@@ -38,19 +40,19 @@ if _sentry_dsn:
 # ── Additional worker-only configuration ──────────────────────────────────
 
 celery_app.conf.update(
-    # Broker robustness (CloudAMQP / RabbitMQ).
     broker_connection_retry_on_startup=True,
     broker_connection_timeout=30,
-    broker_heartbeat=30,
+    broker_heartbeat=10,
+    broker_heartbeat_checkrate=2,
     broker_transport_options={
         "connect_timeout": 30,
         "socket_timeout": 30,
         "failover_strategy": "shuffle",
+        "heartbeat": 10,
     },
-    # Timezone
+    worker_cancel_long_running_tasks_on_connection_loss=True,
     timezone="UTC",
     enable_utc=True,
-    # Queues
     task_queues={
         "default": {"exchange": "default", "routing_key": "default"},
         "ocr": {"exchange": "ocr", "routing_key": "ocr"},
@@ -72,7 +74,6 @@ celery_app.conf.update(
         "app.tasks.resolve_defined_term_conflicts": {"queue": "default"},
         "app.tasks.resolve_deadline_conflicts": {"queue": "deadline"},
     },
-    # Beat Schedule (Deadline Scanner every 15 minutes)
     beat_schedule={
         "deadline-scanner-every-15-min": {
             "task": "app.tasks.deadline_scanner",
@@ -80,10 +81,92 @@ celery_app.conf.update(
             "options": {"queue": "deadline"},
         },
     },
-    # Retry
     task_acks_late=True,
     task_reject_on_worker_lost=True,
 )
+
+# ── Persistent event loop (initialized at import time) ────────────────────
+
+_worker_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+_worker_loop_thread: threading.Thread | None = None
+
+
+def _start_loop():
+    """Start the persistent event loop in a background thread."""
+    global _worker_loop_thread
+
+    def run_loop():
+        asyncio.set_event_loop(_worker_loop)
+        _worker_loop.run_forever()
+
+    _worker_loop_thread = threading.Thread(
+        target=run_loop,
+        daemon=True,
+        name="celery-async-loop",
+    )
+    _worker_loop_thread.start()
+    logger.info("Persistent async loop started: %s", id(_worker_loop))
+
+
+_start_loop()
+
+
+def get_worker_loop() -> asyncio.AbstractEventLoop:
+    if not _worker_loop.is_running():
+        raise RuntimeError("Worker loop is not running")
+    return _worker_loop
+
+
+# ── Warmup and teardown (run on the persistent loop) ──────────────────────
+
+
+@worker_process_init.connect
+def init_worker_process(**kwargs):
+    """Warm up DB connections when worker process starts."""
+    future = asyncio.run_coroutine_threadsafe(_warmup(), _worker_loop)
+    try:
+        future.result(timeout=30)
+        logger.info("Worker warmup complete (DB connections ready).")
+    except Exception as e:
+        logger.error("Worker warmup failed (non-fatal): %s", e)
+
+
+@worker_process_shutdown.connect
+def shutdown_worker_process(**kwargs):
+    """Tear down connections when worker shuts down."""
+    future = asyncio.run_coroutine_threadsafe(_teardown(), _worker_loop)
+    try:
+        future.result(timeout=10)
+    except Exception:
+        pass
+
+
+async def _warmup():
+    """Initialize DB engine and checkpointer pool on the persistent loop."""
+    import sqlalchemy as sa
+
+    from app.database import _get_engine
+    from app.services.agent.checkpointer import _ensure_pool
+
+    engine = _get_engine()
+    async with engine.connect() as conn:
+        await conn.execute(sa.text("SELECT 1"))
+
+    await _ensure_pool()
+
+
+async def _teardown():
+    """Close connections gracefully."""
+    from app.database import _engine
+    from app.services.agent.checkpointer import _pool
+
+    if _pool is not None:
+        await _pool.close()
+    if _engine is not None:
+        await _engine.dispose()
+
+
+# ── Hot-start (existing) ──────────────────────────────────────────────────
 
 
 @worker_process_init.connect

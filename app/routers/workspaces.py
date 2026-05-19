@@ -769,6 +769,7 @@ async def get_document_status(
 async def create_workspace_scoped_session(
     request: Request,
     workspace_id: uuid.UUID,
+    req: CreateSessionRequest,
     org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
@@ -776,10 +777,11 @@ async def create_workspace_scoped_session(
     """
     POST /workspaces/{workspace_id}/session
 
-    Creates a Redis-backed session scoped to this workspace.
-    Replaces ``POST /session`` from the legacy session.py module.
-
+    Creates a Redis-backed session scoped to a user-selected subset of documents.
     The session stores the org context and is automatically TTL-expired.
+
+    Unlike the Postgres-backed ``POST /sessions`` endpoint, this is lightweight
+    and designed for the chat UI's document toggle workflow.
     """
     org_uuid = uuid.UUID(org_id)
 
@@ -794,27 +796,32 @@ async def create_workspace_scoped_session(
     if not ws_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Workspace not found.")
 
-    # Fetch READY document IDs in this workspace to populate the session
+    # Verify the requested documents exist and belong to this org
     doc_result = await db.execute(
         select(Document.id).where(
+            Document.id.in_(req.document_ids),
             Document.workspace_id == workspace_id,
             Document.org_id == org_uuid,
-            Document.status == DocumentStatus.READY,
         )
     )
-    ready_ids = list(row[0] for row in doc_result.all())
+    found_ids = {row[0] for row in doc_result.all()}
+    missing_ids = [str(did) for did in req.document_ids if did not in found_ids]
+    if missing_ids:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Documents not found: {', '.join(missing_ids)}",
+        )
 
     # Delegate to the shared Redis session helper
-    # Convert UUIDs to strings for Redis storage
     session_id = await redis_create_session(
-        [str(did) for did in ready_ids], org_id, redis
+        [str(did) for did in req.document_ids], org_id, redis
     )
 
     return {
         "session_id": session_id,
         "workspace_id": str(workspace_id),
-        "document_count": len(ready_ids),
-        "ttl_hours": 24,
+        "document_count": len(req.document_ids),
+        "ttl_hours": 48,
     }
 
 

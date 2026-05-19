@@ -27,9 +27,9 @@ host = os.getenv("UPSTASH_HOST")
 port = os.getenv("UPSTASH_PORT", "6379")
 password = os.getenv("UPSTASH_PASSWORD")
 
-# Sliding idle timeout: session expires 24h after the LAST time it was used.
+# Sliding idle timeout: session expires 48h after the LAST time it was used.
 # Every read (get_session) and write (add_file_to_session) resets this clock.
-SESSION_TTL_SECONDS = 60 * 60 * 24
+SESSION_TTL_SECONDS = 60 * 60 * 48
 PROGRESS_TTL_SECONDS = 60 * 10
 
 
@@ -91,8 +91,11 @@ async def create_session(
 async def get_session(session_id: str, redis: aioredis.Redis) -> Optional[dict]:
     """
     Fetches the session data from Redis.
-    Returns a dict of { file_id (int): status (str) }
+    Returns a dict of { file_id (str): status (str) }
     or None if the session doesn't exist / expired.
+
+    Keys are stored as strings (could be UUID strings or integer strings).
+    Callers should parse to the type they need.
     """
     session_key = f"session:{session_id}"
     data = await redis.hgetall(session_key)
@@ -102,7 +105,9 @@ async def get_session(session_id: str, redis: aioredis.Redis) -> Optional[dict]:
     await redis.expire(session_key, SESSION_TTL_SECONDS)
 
     org_id = data.pop("__org_id__", None)
-    file_statuses = {int(k): v for k, v in data.items()}
+
+    # Keys remain as strings (UUIDs from workspace sessions, or int-strings from legacy)
+    file_statuses = {k: v for k, v in data.items()}
 
     return {"org_id": org_id, "files": file_statuses}
 

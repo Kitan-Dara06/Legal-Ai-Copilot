@@ -424,6 +424,25 @@ export default function ChatPage() {
     const handleSendMessage = async (content: string) => {
         if (!token || !user?.org_slug || !workspaceId || isProcessing) return;
 
+        // ── Require document selection before asking questions ──
+        if (files.length === 0 || selectedDocumentIds.length === 0) {
+            const errorId = `error-${Date.now()}`;
+            setGoals((prev) => [
+                ...prev,
+                {
+                    id: errorId,
+                    goal_text: content,
+                    status: "FAILED",
+                    answer:
+                        files.length === 0
+                            ? "Please upload a document to the workspace first."
+                            : "Please select at least one document from the sidebar before asking questions.",
+                    created_at: new Date().toISOString(),
+                } as GoalMessage,
+            ]);
+            return;
+        }
+
         setIsProcessing(true);
 
         // Add user message placeholder — will be updated by polling

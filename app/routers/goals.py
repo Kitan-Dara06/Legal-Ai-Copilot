@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from slowapi import Limiter
@@ -22,9 +23,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.database import get_db
-from app.dependencies import get_org_id_unified
+from app.dependencies import get_org_id_unified, get_redis
 from app.models import (
     Action,
+    Document,
     Finding,
     Goal,
     GoalStatus,
@@ -34,6 +36,7 @@ from app.models import (
     WorkflowExecution,
     WorkflowStatus,
 )
+from app.redis_client import get_session
 from app.services.agent.nodes import IntentClassification
 from app.services.legal_primitives import search_tool
 from app.utils import generate_final_answer, sanitize_goal_text
@@ -65,6 +68,13 @@ class CreateGoalRequest(BaseModel):
     mode: str = Field(
         default="hybrid",
         description="Search strategy: hybrid, concept, or multiquery.",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Redis session ID scoping which documents to search. "
+            "Required for ACT and REASON intents."
+        ),
     )
 
 
@@ -311,6 +321,7 @@ async def create_goal(
     req: CreateGoalRequest = Body(...),
     org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ):
     """
     Create a new goal and immediately begin processing.
@@ -356,15 +367,52 @@ async def create_goal(
     goal.status = GoalStatus.PROCESSING
     await db.commit()
 
+    # ── Validate session — required for ALL intents ──
+    if not req.session_id:
+        goal.status = GoalStatus.FAILED
+        await db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Please select at least one document before asking questions. "
+                "Use the sidebar to select documents from your workspace."
+            ),
+        )
+
+    session_data = await get_session(req.session_id, redis)
+    if not session_data:
+        raise HTTPException(
+            status_code=404,
+            detail="Session expired or not found. Please re-select documents.",
+        )
+    session_file_ids = list(session_data["files"].keys())
+    logger.info(
+        "Goal %s using session %s with %d document(s)",
+        goal_id,
+        req.session_id[:8],
+        len(session_file_ids),
+    )
+
     # --- Route based on intent ---
     if classification.primary_intent == "ANALYZE":
         # Synchronous ANALYZE path: search + generate answer
         try:
+            # Resolve session UUIDs to filenames for Qdrant filename filter
+            session_filenames = []
+            if session_file_ids:
+                doc_result = await db.execute(
+                    select(Document.filename).where(
+                        Document.id.in_([uuid.UUID(fid) for fid in session_file_ids])
+                    )
+                )
+                session_filenames = [row[0] for row in doc_result.all()]
+
             all_chunks = await search_tool(
                 query=safe_text,
                 mode=req.mode,
                 top_k=5,
                 org_id=org_id,
+                specific_contracts=session_filenames if session_filenames else None,
             )
             chunk_texts = (
                 [c.get("text", "") for c in all_chunks]
@@ -433,7 +481,7 @@ async def create_goal(
         try:
             celery_app.send_task(
                 "app.tasks.process_workflow",
-                args=[str(workflow_id)],
+                args=[str(workflow_id), session_file_ids],
                 queue="default",
             )
             logger.info("send_task succeeded for %s", workflow_id)
@@ -550,10 +598,19 @@ async def get_goal(
             }
         )
 
+    # Use workflow status as authoritative when a workflow exists
+    effective_status = (
+        workflow.status.value
+        if workflow and workflow.status
+        else goal.status.value
+        if goal.status
+        else "UNKNOWN"
+    )
+
     return GoalDetailResponse(
         id=str(goal.id),
         goal_text=goal.goal_text,
-        status=goal.status.value if goal.status else "UNKNOWN",
+        status=effective_status,
         intent=goal.intent.value if goal.intent else None,
         mode=goal.mode,
         answer=goal.answer,

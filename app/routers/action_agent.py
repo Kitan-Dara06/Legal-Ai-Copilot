@@ -68,7 +68,9 @@ class ConfirmIntentRequest(BaseModel):
 
 
 class ApproveRequest(BaseModel):
-    token: str
+    token: str | None = (
+        None  # Optional: HMAC approval token. If not provided, JWT auth is used.
+    )
 
 
 class RejectRequest(BaseModel):
@@ -273,21 +275,41 @@ async def approve_workflow(
             status_code=409, detail=f"Cannot approve in status: {wf.status.value}"
         )
 
-    # Verify HMAC token
-    token_hash = hashlib.sha256(req.token.encode()).hexdigest()
-    approval_res = await db.execute(
-        select(ApprovalRequest).where(
-            ApprovalRequest.workflow_id == workflow_id,
-            ApprovalRequest.token_hash == token_hash,
-            ApprovalRequest.status == ApprovalStatus.PENDING,
-            ApprovalRequest.expires_at > datetime.now(timezone.utc),
+    # If an HMAC token is provided, verify it. Otherwise, trust JWT auth (chat UI flow).
+    if req.token:
+        token_hash = hashlib.sha256(req.token.encode()).hexdigest()
+        approval_res = await db.execute(
+            select(ApprovalRequest).where(
+                ApprovalRequest.workflow_id == workflow_id,
+                ApprovalRequest.token_hash == token_hash,
+                ApprovalRequest.status == ApprovalStatus.PENDING,
+                ApprovalRequest.expires_at > datetime.now(timezone.utc),
+            )
         )
-    )
-    approval = approval_res.scalar_one_or_none()
-    if not approval:
-        raise HTTPException(
-            status_code=403, detail="Invalid, expired, or already used approval token."
+        approval = approval_res.scalar_one_or_none()
+        if not approval:
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid, expired, or already used approval token.",
+            )
+    else:
+        # No token provided — find the first pending approval for this workflow
+        approval_res = await db.execute(
+            select(ApprovalRequest)
+            .where(
+                ApprovalRequest.workflow_id == workflow_id,
+                ApprovalRequest.status == ApprovalStatus.PENDING,
+                ApprovalRequest.expires_at > datetime.now(timezone.utc),
+            )
+            .order_by(ApprovalRequest.created_at)
+            .limit(1)
         )
+        approval = approval_res.scalar_one_or_none()
+        if not approval:
+            raise HTTPException(
+                status_code=403,
+                detail="No pending approval request found for this workflow.",
+            )
 
     # Mark token as USED
     approval.status = ApprovalStatus.USED
