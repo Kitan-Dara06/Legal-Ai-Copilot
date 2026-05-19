@@ -240,7 +240,8 @@ export async function uploadDocument(
     }
 
     xhr.onload = () => {
-      if (xhr.status === 202) {
+      // Backend returns 200 (not 202) for successful upload
+      if (xhr.status === 200 || xhr.status === 202) {
         resolve(JSON.parse(xhr.responseText));
       } else {
         reject(new Error(`Upload failed: HTTP ${xhr.status}`));
@@ -497,6 +498,7 @@ export function rejectWorkflowToken(
   token: string,
   workflowId: string,
   approvalToken: string,
+  reason: string,
   orgSlug?: string,
 ) {
   return apiFetch<{ workflow_id: string; status: string }>(
@@ -506,7 +508,7 @@ export function rejectWorkflowToken(
       orgSlug,
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: approvalToken }),
+      body: JSON.stringify({ token: approvalToken, reason }),
     },
   );
 }

@@ -34,7 +34,7 @@ if _sentry_dsn:
         integrations=[CeleryIntegration()],
         traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
         profiles_sample_rate=float(os.getenv("SENTRY_PROFILES_SAMPLE_RATE", "1.0")),
-        send_default_pii=True,
+        send_default_pii=False,
     )
 
 # ── Additional worker-only configuration ──────────────────────────────────
@@ -59,7 +59,6 @@ celery_app.conf.update(
         "deadline": {
             "exchange": "deadline",
             "routing_key": "deadline",
-            "queue_arguments": {"x- durable": True},
         },
     },
     task_default_queue="default",

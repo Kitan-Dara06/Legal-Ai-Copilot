@@ -25,14 +25,14 @@ from datetime import datetime, timedelta, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_org_id_unified
+from app.dependencies import get_admin_auth_context, get_org_id_unified, AuthContext
 from app.models import (
     Action,
     ApprovalRequest,
@@ -67,7 +67,11 @@ class RejectTokenRequest(BaseModel):
     """Body for POST /approvals/workflows/{workflow_id}/reject."""
 
     token: str
-    reason: str | None = None
+    reason: str = Field(
+        ...,
+        min_length=20,
+        description="Rejection reason (minimum 20 characters, per SRS FR-GATE-02)",
+    )
 
 
 class ReissueTokenRequest(BaseModel):
@@ -323,9 +327,11 @@ async def approve_via_token(
             detail="Invalid approval token.",
         )
 
-    # Mark token consumed
+    # Mark token consumed — record actor (who clicked approve) for pre-execution invariant
+    actor_user_id = getattr(request.state, "user_id", None)
     approval.status = ApprovalStatus.USED
     approval.decision_timestamp = now
+    approval.actor = actor_user_id  # FR-EXEC-01: actor IS NOT NULL required before execution
     await db.commit()
 
     # Resume LangGraph workflow
@@ -416,9 +422,11 @@ async def reject_via_token(
             detail="Invalid approval token.",
         )
 
-    # Mark token as REJECTED
+    # Mark token as REJECTED — record actor for audit trail
+    actor_user_id = getattr(request.state, "user_id", None)
     approval.status = ApprovalStatus.REJECTED
     approval.decision_timestamp = now
+    approval.actor = actor_user_id
     approval.rejection_reason = req.reason
     await db.commit()
 
@@ -475,7 +483,7 @@ async def reissue_token(
     request: Request,
     approval_id: uuid.UUID,
     req: ReissueTokenRequest = ReissueTokenRequest(),
-    org_id: str = Depends(get_org_id_unified),
+    ctx: AuthContext = Depends(get_admin_auth_context),  # C4: admin-only
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -485,8 +493,9 @@ async def reissue_token(
     Resets the expiry window and marks the request back to PENDING.
 
     Only usable when the current status is EXPIRED or PENDING.
-    This is an admin-level operation.
+    Requires ADMIN role or higher.
     """
+    org_id = str(ctx.org_id)
     approval = await _get_approval_for_org(approval_id, org_id, db)
 
     if approval.status not in (ApprovalStatus.PENDING, ApprovalStatus.EXPIRED):

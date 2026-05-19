@@ -38,8 +38,15 @@ export default function EscalationsPage() {
   } | null>(null);
 
   useEffect(() => {
-    setToken(localStorage.getItem("sb-access-token"));
-    setOrgSlug(localStorage.getItem("sb-org-slug"));
+    import("@/lib/supabase/client").then(({ createClient }) => {
+      const supabase = createClient();
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session) {
+          setToken(session.access_token);
+          setOrgSlug(localStorage.getItem("legalrag_active_org"));
+        }
+      });
+    });
   }, []);
 
   const fetchEscalations = useCallback(async () => {

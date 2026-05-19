@@ -1,34 +1,129 @@
 name: Lex Platform Maintenance
 
+# GitHub Actions as a free cron scheduler.
+# All schedules are UTC. Minimum resolution is every 5 minutes.
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#   API_BASE_URL  — e.g. https://api.yourdomain.com  (no trailing slash)
+#   CRON_SECRET   — generate with: openssl rand -hex 32
+
 on:
   schedule:
-    # Run every hour to check for stuck document tasks
-    - cron: '0 * * * *'
-  workflow_dispatch: # Allow manual trigger
+    # ── Every 5 minutes ────────────────────────────────────────────────────────
+    - cron: '*/5 * * * *'   # expire-stale-ambiguity + qdrant-heartbeat
+
+    # ── Every 15 minutes ───────────────────────────────────────────────────────
+    - cron: '*/15 * * * *'  # expire-stale-approvals + warn-expiring-approvals
+
+    # ── Every hour ─────────────────────────────────────────────────────────────
+    - cron: '0 * * * *'     # sweep-stuck-tasks
+
+    # ── Daily at 02:00 UTC ────────────────────────────────────────────────────
+    - cron: '0 2 * * *'     # archive-stale-sessions + cleanup-expired-invites
+
+  workflow_dispatch:
+    # Manual trigger from GitHub UI (Actions tab → Run workflow)
+    # Use this to test cron jobs without waiting for the schedule
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+# Each step uses --fail-with-body so curl exits non-zero on HTTP errors,
+# which marks the workflow step as failed (visible in the Actions tab).
 
 jobs:
-  maintenance:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Sweep Stuck Processing Tasks
-        run: |
-          curl -X POST "${{ secrets.API_BASE_URL }}/cron/sweep-stuck-tasks" \
-          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
-          -H "Content-Type: application/json"
 
-      - name: Qdrant Heartbeat
-        run: |
-          curl -X POST "${{ secrets.API_BASE_URL }}/cron/qdrant-heartbeat" \
-          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
-          -H "Content-Type: application/json"
-
-  daily_cleanup:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Every 5 minutes
+  # ────────────────────────────────────────────────────────────────────────────
+  five_minute:
+    name: 5-Minute Jobs
     runs-on: ubuntu-latest
-    # Only run once a day at midnight
-    if: github.event.schedule == '0 0 * * *' || github.event_name == 'workflow_dispatch'
+    # Only run on the */5 schedule (or manual trigger)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '*/5 * * * *'
     steps:
+      - name: Expire Stale Ambiguity Gates (FR-AMB-01 TTL — 10 min)
+        run: |
+          curl --fail-with-body -X POST \
+            "${{ secrets.API_BASE_URL }}/cron/expire-stale-ambiguity" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"
+
+      - name: Qdrant Heartbeat (keep serverless instance warm)
+        run: |
+          curl --fail-with-body -X POST \
+            "${{ secrets.API_BASE_URL }}/cron/qdrant-heartbeat" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Every 15 minutes
+  # ────────────────────────────────────────────────────────────────────────────
+  fifteen_minute:
+    name: 15-Minute Jobs
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '*/15 * * * *'
+    steps:
+      - name: Expire Stale Approvals (TTL enforcement)
+        run: |
+          curl --fail-with-body -X POST \
+            "${{ secrets.API_BASE_URL }}/cron/expire-stale-approvals" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"
+
+      - name: Warn Expiring Approvals (24h warning — FR-NOTIF-01)
+        run: |
+          curl --fail-with-body -X POST \
+            "${{ secrets.API_BASE_URL }}/cron/warn-expiring-approvals" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Every hour
+  # ────────────────────────────────────────────────────────────────────────────
+  hourly:
+    name: Hourly Jobs
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '0 * * * *'
+    steps:
+      - name: Sweep Stuck Document Processing Tasks
+        run: |
+          curl --fail-with-body -X POST \
+            "${{ secrets.API_BASE_URL }}/cron/sweep-stuck-tasks" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Daily at 02:00 UTC
+  # ────────────────────────────────────────────────────────────────────────────
+  daily:
+    name: Daily Cleanup
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '0 2 * * *'
+    steps:
+      - name: Archive Stale Sessions (90-day TTL)
+        run: |
+          curl --fail-with-body -X POST \
+            "${{ secrets.API_BASE_URL }}/cron/archive-stale-sessions" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"
+
       - name: Cleanup Expired Invites
         run: |
-          curl -X POST "${{ secrets.API_BASE_URL }}/cron/cleanup-expired-invites" \
-          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
-          -H "Content-Type: application/json"
+          curl --fail-with-body -X POST \
+            "${{ secrets.API_BASE_URL }}/cron/cleanup-expired-invites" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"
+
+      - name: Recover Stuck Workflows
+        run: |
+          curl --fail-with-body -X POST \
+            "${{ secrets.API_BASE_URL }}/cron/recover-stuck-workflows" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"

@@ -1,0 +1,46 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile.api
+#
+# Lightweight API image — FastAPI + Uvicorn only.
+# No ML libraries, no model weights, no spaCy, no fastembed, no torch.
+#
+# Target: API droplet (2GB RAM)
+# Expected image size: ~500MB
+# Expected RSS per worker: ~150MB (2 workers = ~300MB steady state)
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM python:3.12-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# System deps: only what's needed for psycopg2 + httpx
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    libpq-dev \
+    gcc \
+    python3-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+# ── Install Python deps (base only — no ML) ───────────────────────────────────
+COPY requirements.base.txt .
+RUN pip install --no-cache-dir -r requirements.base.txt
+
+# ── Copy application code ─────────────────────────────────────────────────────
+COPY . /app
+
+EXPOSE 8000
+
+# 2 workers: sufficient for 2GB droplet with no ML load
+# Override via UVICORN_WORKERS env var in docker-compose
+CMD ["uvicorn", "main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "2", \
+     "--proxy-headers", \
+     "--forwarded-allow-ips=*"]

@@ -680,6 +680,13 @@ class IntentLog(Base):
     lawyer_override: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+    # FR-AMB-01: research signal — did the lawyer change the intent or confirm it?
+    # True  = lawyer actively selected a different intent from the classifier's guess
+    # False = lawyer confirmed, or no ambiguity gate was triggered
+    lawyer_changed_intent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False,
+        comment="True when the lawyer overrode the classifier's primary intent at the ambiguity gate",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

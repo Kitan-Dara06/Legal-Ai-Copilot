@@ -8,7 +8,12 @@ export default function AdminPage() {
   const [token, setToken] = useState<string | null>(null);
 
   useEffect(() => {
-    setToken(localStorage.getItem("sb-access-token"));
+    import("@/lib/supabase/client").then(({ createClient }) => {
+      const supabase = createClient();
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session) setToken(session.access_token);
+      });
+    });
   }, []);
 
   return (

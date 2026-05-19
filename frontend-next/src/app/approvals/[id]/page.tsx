@@ -23,6 +23,8 @@ export default function ApprovalDetailPage() {
   const [orgSlug, setOrgSlug] = useState<string | undefined>();
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [showRejectInput, setShowRejectInput] = useState(false);
 
   useEffect(() => {
     const supabase = createClient();
@@ -74,6 +76,10 @@ export default function ApprovalDetailPage() {
 
   const handleReject = async () => {
     if (!approval || !token) return;
+    if (rejectReason.trim().length < 20) {
+      setMessage("Rejection reason must be at least 20 characters.");
+      return;
+    }
     const approveToken = tokenParam || approval.token_hash || "";
     setActionLoading("reject");
     try {
@@ -81,10 +87,12 @@ export default function ApprovalDetailPage() {
         token,
         approval.workflow_id,
         approveToken,
+        rejectReason.trim(),
         orgSlug,
       );
       setMessage("Action rejected.");
       setApproval((prev) => (prev ? { ...prev, status: "REJECTED" } : prev));
+      setShowRejectInput(false);
     } catch (err: any) {
       setMessage(`Rejection failed: ${err.message}`);
     } finally {
@@ -163,21 +171,48 @@ export default function ApprovalDetailPage() {
         )}
 
         {approval.status === "PENDING" && (
-          <div className="flex gap-4">
-            <button
-              onClick={handleApprove}
-              disabled={actionLoading !== null}
-              className="flex-1 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-700 text-white font-semibold rounded-lg transition-colors"
-            >
-              {actionLoading === "approve" ? "Processing..." : "✅ Approve"}
-            </button>
-            <button
-              onClick={handleReject}
-              disabled={actionLoading !== null}
-              className="flex-1 px-6 py-3 bg-red-600 hover:bg-red-700 disabled:bg-slate-700 text-white font-semibold rounded-lg transition-colors"
-            >
-              {actionLoading === "reject" ? "Processing..." : "❌ Reject"}
-            </button>
+          <div className="space-y-4">
+            <div className="flex gap-4">
+              <button
+                onClick={handleApprove}
+                disabled={actionLoading !== null}
+                className="flex-1 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-700 text-white font-semibold rounded-lg transition-colors"
+              >
+                {actionLoading === "approve" ? "Processing..." : "✅ Approve"}
+              </button>
+              <button
+                onClick={() => setShowRejectInput((v) => !v)}
+                disabled={actionLoading !== null}
+                className="flex-1 px-6 py-3 bg-red-600 hover:bg-red-700 disabled:bg-slate-700 text-white font-semibold rounded-lg transition-colors"
+              >
+                ❌ Reject
+              </button>
+            </div>
+            {showRejectInput && (
+              <div className="space-y-2">
+                <textarea
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                  placeholder="Reason for rejection (minimum 20 characters)…"
+                  rows={3}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-red-500 resize-none"
+                />
+                <div className="flex items-center justify-between">
+                  <span className={`text-xs ${
+                    rejectReason.trim().length >= 20 ? "text-slate-500" : "text-red-400"
+                  }`}>
+                    {rejectReason.trim().length}/20 min characters
+                  </span>
+                  <button
+                    onClick={handleReject}
+                    disabled={actionLoading !== null || rejectReason.trim().length < 20}
+                    className="px-4 py-2 bg-red-700 hover:bg-red-800 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-semibold rounded-lg transition-colors"
+                  >
+                    {actionLoading === "reject" ? "Rejecting..." : "Confirm Rejection"}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

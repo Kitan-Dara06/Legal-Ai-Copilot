@@ -57,7 +57,7 @@ if _sentry_dsn:
         ],
         traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
         profiles_sample_rate=float(os.getenv("SENTRY_PROFILES_SAMPLE_RATE", "1.0")),
-        send_default_pii=True,
+        send_default_pii=False,
     )
 
 limiter = Limiter(key_func=get_org_id_for_rate_limit)

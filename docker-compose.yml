@@ -1,82 +1,55 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml
+#
+# Production compose with profile-based split for API/Worker droplets.
+#
+# All external services (DB, Redis, RabbitMQ, Qdrant) are cloud-hosted.
+# This compose only runs: api, worker, beat, nginx, certbot.
+#
+# USAGE:
+#   API droplet:    docker compose --profile api up -d
+#   Worker droplet: docker compose --profile worker up -d
+#   Local dev:      docker compose --profile all up -d  (+ override file)
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
-  db:
-    image: postgres:15-alpine
-    restart: always
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-legal_rag}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - internal
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  qdrant:
-    image: qdrant/qdrant:v1.7.0
-    restart: always
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    networks:
-      - internal
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    restart: always
-    networks:
-      - internal
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
+  # ── Database migrations (run once before api starts) ──────────────────────
   migrations:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.worker   # Worker image has alembic + psycopg2
     env_file:
       - .env.production
     command: alembic upgrade head
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - internal
+    restart: "no"
+    profiles: ["api", "all"]
 
+  # ── API (FastAPI / Uvicorn) ───────────────────────────────────────────────
   api:
     build:
       context: .
-      dockerfile: Dockerfile
-    environment:
-      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost}
+      dockerfile: Dockerfile.api
     env_file:
       - .env.production
+    environment:
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
     ports:
       - "8000:8000"
-    # API concurrency (HTTP). Background processing is still handled by Celery workers.
-    # Override on the host: UVICORN_WORKERS=2 docker compose up -d --build api
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-2} --proxy-headers --forwarded-allow-ips=*
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers ${UVICORN_WORKERS:-2}
+      --proxy-headers
+      --forwarded-allow-ips=*
     restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1500M    # Hard cap — API never loads ML models
+          cpus: "1.5"
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
       migrations:
         condition: service_completed_successfully
     healthcheck:
@@ -84,65 +57,10 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 180s
-    networks:
-      - internal
+      start_period: 60s
+    profiles: ["api", "all"]
 
-  worker_pdf:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - .env.production
-    command: celery -A app.worker worker -Q default -n pdf_worker@%h --pool=threads -c 2
-    restart: always
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    networks:
-      - internal
-
-  worker_ocr:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - .env.production
-    command: celery -A app.worker worker -Q ocr -n ocr_worker@%h -c 1
-    restart: always
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    networks:
-      - internal
-
-  rabbitmq:
-    image: rabbitmq:3-management-alpine
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
-    restart: always
-    networks:
-      - internal
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
+  # ── Nginx (reverse proxy + SSL termination) ───────────────────────────────
   nginx:
     image: nginx:alpine
     volumes:
@@ -156,24 +74,79 @@ services:
       api:
         condition: service_healthy
     restart: always
-    networks:
-      - internal
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    profiles: ["api", "all"]
 
+  # ── Certbot (SSL certificate renewal) ────────────────────────────────────
   certbot:
     image: certbot/certbot
     volumes:
       - letsencrypt_certs:/etc/letsencrypt
       - ./certbot_challenge:/var/www/certbot
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
-    networks:
-      - internal
+    entrypoint: >
+      /bin/sh -c 'trap exit TERM;
+      while :; do certbot renew; sleep 12h & wait $${!}; done;'
+    profiles: ["api", "all"]
 
-networks:
-  internal:
-    driver: bridge
+  # ── Celery Worker ─────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file:
+      - .env.production
+    environment:
+      - CELERY_HOT_START=${CELERY_HOT_START:-true}
+      - CELERY_HOT_START_INCLUDE_GEMINI=${CELERY_HOT_START_INCLUDE_GEMINI:-false}
+      - FASTEMBED_CACHE_DIR=/app/.fastembed_cache
+    command: >
+      celery -A app.worker worker
+      -Q default,ocr,deadline
+      -n worker@%h
+      --concurrency ${CELERY_CONCURRENCY:-2}
+      --pool=prefork
+      --loglevel=info
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 3500M   # 4GB droplet: 3.5GB limit, 500MB OS headroom
+          cpus: "1.8"
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.worker", "inspect", "ping",
+             "--destination", "worker@$$HOSTNAME", "--timeout", "10"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 90s   # SPLADE warmup takes ~30s on cold container
+    profiles: ["worker", "all"]
+
+  # ── Celery Beat (periodic tasks scheduler) ───────────────────────────────
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file:
+      - .env.production
+    environment:
+      - FASTEMBED_CACHE_DIR=/app/.fastembed_cache
+    command: >
+      celery -A app.worker beat
+      --scheduler celery.beat:PersistentScheduler
+      --loglevel=info
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 256M    # Beat is lightweight — no ML models
+          cpus: "0.25"
+    depends_on:
+      worker:
+        condition: service_healthy
+    profiles: ["worker", "all"]
 
 volumes:
-  rabbitmq_data:
-  postgres_data:
-  qdrant_data:
   letsencrypt_certs:

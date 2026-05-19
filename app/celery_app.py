@@ -25,12 +25,19 @@ logger = logging.getLogger(__name__)
 
 # ── Broker (RabbitMQ) ──────────────────────────────────────────────────────
 def _build_rabbitmq_url() -> str:
-    """Build primary RabbitMQ broker URL from env vars."""
+    """Build primary RabbitMQ broker URL from env vars. Raises at startup if credentials are absent."""
     rq_host = os.getenv("RABBITMQ_HOST", "localhost")
     rq_port = os.getenv("RABBITMQ_PORT", "5672")
-    rq_user = os.getenv("RABBITMQ_USER", "guest")
-    rq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
+    rq_user = os.getenv("RABBITMQ_USER")
+    rq_password = os.getenv("RABBITMQ_PASSWORD")
     rq_vhost = os.getenv("RABBITMQ_VHOST", "/")
+
+    if not rq_user or not rq_password:
+        raise RuntimeError(
+            "RABBITMQ_USER and RABBITMQ_PASSWORD must be set. "
+            "Refusing to start with default 'guest' credentials."
+        )
+
     return f"amqp://{rq_user}:{quote_plus(rq_password)}@{rq_host}:{rq_port}/{quote_plus(rq_vhost)}"
 
 
@@ -87,6 +94,13 @@ if broker_failover:
     }
 
 celery_app.conf.update(**base_config)
+
+# Global task time limits — prevent hung tasks from starving the worker pool
+# OCR tasks override this with higher limits (set on the task decorator).
+celery_app.conf.update(
+    task_soft_time_limit=600,   # 10 min: raises SoftTimeLimitExceeded (graceful)
+    task_time_limit=720,        # 12 min: SIGKILL (hard stop)
+)
 
 # Explicit SSL configuration for rediss result backend
 if REDIS_URL.startswith("rediss://"):

@@ -1,0 +1,62 @@
+# ── Shared base ───────────────────────────────────────────────────────────────
+# Web framework + API clients + async infra — no ML/GPU libraries.
+# Used by both api and worker images.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Core web framework
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
+slowapi
+
+# LLM / AI API clients (all cloud — no local model weights)
+groq
+voyageai
+cohere
+openai>=1.0.0
+pydantic-ai
+
+# Agentic infra
+langgraph>=1.0.0
+langgraph-checkpoint-postgres>=3.0.0
+langchain-core>=1.2.0
+langchain-groq>=1.1.0
+
+# Database
+sqlalchemy[asyncio]
+asyncpg
+psycopg2-binary==2.9.9
+psycopg[binary]>=3.1.0
+alembic
+
+# Queue / cache
+celery[redis]
+redis
+
+# Object storage
+boto3
+
+# Auth / security
+python-jose[cryptography]
+supabase
+passlib[bcrypt]
+bcrypt==4.0.1
+email-validator>=2.0
+
+# Observability
+sentry-sdk[fastapi,celery]
+python-json-logger
+
+# Utilities
+pydantic>=2.0.0
+tenacity>=8.0.0
+python-dotenv
+qdrant-client>=1.16,<1.17
+falkordb>=1.0.0
+icalendar
+python-dateutil
+rank_bm25
+numpy
+tiktoken
+tabulate

@@ -298,6 +298,7 @@ async def approve_workflow(
             select(ApprovalRequest)
             .where(
                 ApprovalRequest.workflow_id == workflow_id,
+                ApprovalRequest.org_id == uuid.UUID(org_id),  # H9: tenant isolation
                 ApprovalRequest.status == ApprovalStatus.PENDING,
                 ApprovalRequest.expires_at > datetime.now(timezone.utc),
             )

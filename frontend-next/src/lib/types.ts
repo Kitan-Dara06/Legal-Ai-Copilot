@@ -124,7 +124,10 @@ export type WorkflowStatus =
   | "AWAITING_APPROVAL"
   | "EXECUTING"
   | "REVISING"
+  | "RECOVERING"
   | "COMPLETED"
+  | "ESCALATED"
+  | "CANCELLED"
   | "FAILED";
 
 export interface LexAction {

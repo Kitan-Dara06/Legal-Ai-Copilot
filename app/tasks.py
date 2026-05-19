@@ -168,7 +168,10 @@ def get_pg_pool():
     global _pg_pool
     if _pg_pool is None:
         db_url = get_database_url_sync()
-        _pg_pool = pool.SimpleConnectionPool(1, 10, db_url)
+        # ThreadedConnectionPool is thread-safe (SimpleConnectionPool is NOT).
+        # max=12: allows concurrency=4 workers + deadline scanner + beat + 5 headroom.
+        # Supabase free tier allows 25 total connections; async API pool uses ~5.
+        _pg_pool = pool.ThreadedConnectionPool(1, 12, db_url)
     return _pg_pool
 
 
@@ -626,24 +629,21 @@ def calculate_urgency(days_remaining: int) -> float:
     Pure function: calculate an urgency score from days remaining until
     a deadline.
 
-    Returns a float in [0.0, 1.0] where higher values mean more urgent.
-
-    Rules
-    -----
-    * ``days_remaining <= 0``  → 1.0 (overdue / already past)
-    * ``days_remaining == 1``  → 0.95
-    * ``days_remaining <= 3``  → 0.85
-    * ``days_remaining <= 7``  → 0.70
-    * ``days_remaining <= 14`` → 0.50
-    * ``days_remaining <= 30`` → 0.30
-    * otherwise                → 0.10
+    SRS FR-DEAD-02 exact thresholds:
+      days_remaining <= 0  → OVERDUE (score returned as 1.0, caller also marks OVERDUE)
+      days_remaining <= 1  → exactly 0.95
+      1 < days_remaining <= 3  → exactly 0.85 (or max of current and 0.85 at update time)
+      days_remaining <= 7  → 0.70
+      days_remaining <= 14 → 0.50
+      days_remaining <= 30 → 0.30
+      otherwise            → 0.10
     """
     if days_remaining <= 0:
-        return 1.0
-    if days_remaining == 1:
-        return 0.95
+        return 1.0          # Caller also sets status=OVERDUE
+    if days_remaining <= 1:
+        return 0.95         # SRS: exactly 0.95 for <=1 day
     if days_remaining <= 3:
-        return 0.85
+        return 0.85         # SRS: exactly 0.85 for 1 < days <= 3
     if days_remaining <= 7:
         return 0.70
     if days_remaining <= 14:
@@ -705,12 +705,20 @@ def deadline_scanner(self):
 
             urgency_updates.append((new_score, reg_id))
 
-        # ── Batch update: urgency_score for all scanned records ──
-        with conn.cursor() as cur:
-            for new_score, reg_id in urgency_updates:
-                cur.execute(
-                    "UPDATE deadline_registry SET urgency_score = %s WHERE id = %s",
-                    (new_score, reg_id),
+        # ── Batch update: urgency_score (single round-trip, not N+1) ──
+        if urgency_updates:
+            from psycopg2 import extras as pg_extras
+
+            with conn.cursor() as cur:
+                pg_extras.execute_values(
+                    cur,
+                    """
+                    UPDATE deadline_registry AS d
+                    SET urgency_score = v.score
+                    FROM (VALUES %s) AS v(score, id)
+                    WHERE d.id::text = v.id
+                    """,
+                    [(score, str(rid)) for score, rid in urgency_updates],
                 )
 
             # ── Mark overdue deadlines ──
@@ -765,9 +773,9 @@ def deadline_scanner(self):
             notified_count,
         )
 
-        # ── Trigger admin notifications for overdue (outside transaction) ──
+        # ── Trigger admin notifications for overdue (fresh conn, outside transaction) ──
         if overdue_ids:
-            _notify_admins_overdue(overdue_ids, conn, pg_pool)
+            _notify_admins_overdue(overdue_ids, pg_pool)
 
     except Exception as e:
         conn.rollback()
@@ -817,15 +825,16 @@ def _notify_approver_urgency(
 
 def _notify_admins_overdue(
     overdue_ids: list,
-    conn,
     pg_pool,
 ):
     """
     Fire-and-forget admin notifications for overdue deadlines.
+    Uses its own connection from the pool (does not reuse the scanner's returned conn).
     Each notification uses independent 3-retry backoff.
     """
+    notify_conn = pg_pool.getconn()
     try:
-        with conn.cursor() as cur:
+        with notify_conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT id, obligation_description, resolved_deadline, workspace_id
@@ -836,18 +845,7 @@ def _notify_admins_overdue(
             )
             overdue_rows = cur.fetchall()
     except Exception:
-        conn = pg_pool.getconn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, obligation_description, resolved_deadline, workspace_id
-                FROM deadline_registry
-                WHERE id = ANY(%s)
-                """,
-                (overdue_ids,),
-            )
-            overdue_rows = cur.fetchall()
-        pg_pool.putconn(conn)
+        pg_pool.putconn(notify_conn)
         return
 
     delays = [30, 60, 120]
@@ -866,7 +864,6 @@ def _notify_admins_overdue(
             except Exception as e:
                 if attempt < len(delays) - 1:
                     import time
-
                     time.sleep(delay)
                 else:
                     logger.error(
@@ -874,6 +871,7 @@ def _notify_admins_overdue(
                         dl_id,
                         e,
                     )
+    pg_pool.putconn(notify_conn)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -933,11 +931,14 @@ def _process_document_core(
         update_progress_sync(document_id_str, 40)
 
         # 3. Parallel Intelligence Pipelines
-        stages_complete = asyncio.run(
+        from app.worker import get_worker_loop
+
+        stages_complete = asyncio.run_coroutine_threadsafe(
             run_intelligence_pipeline_async(
                 document_id, workspace_id, org_id, filename, chunks
-            )
-        )
+            ),
+            get_worker_loop(),
+        ).result()
 
         update_progress_sync(document_id_str, 90)
 

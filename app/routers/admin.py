@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_org_id_unified
+from app.dependencies import get_admin_auth_context, AuthContext
 from app.models import UserOrgMembership, UserRole
 
 logger = logging.getLogger(__name__)
@@ -27,19 +27,29 @@ class UpdateRoleRequest(BaseModel):
 async def update_member_role(
     user_id: uuid.UUID,
     req: UpdateRoleRequest,
-    org_id: str = Depends(get_org_id_unified),
+    ctx: AuthContext = Depends(get_admin_auth_context),  # C3: requires ADMIN role
     db: AsyncSession = Depends(get_db),
 ):
     """Change a member's role in the org.
 
-    Only ADMIN can change roles. Valid roles: ADMIN, PARTNER, ASSOCIATE, MEMBER.
+    Only ADMIN (or higher) can change roles. Valid roles: ADMIN, PARTNER, ASSOCIATE, MEMBER.
     """
+    org_id = str(ctx.org_id)
+    caller_role = ctx.role
+
+    # Prevent privilege escalation: cannot grant a role higher than your own
     try:
         new_role = UserRole(req.role.upper())
     except ValueError:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid role: {req.role}. Must be one of: ADMIN, PARTNER, ASSOCIATE, MEMBER",
+        )
+
+    if not caller_role.meets_threshold(new_role):
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot grant a role higher than your own.",
         )
 
     org_uuid = uuid.UUID(org_id) if isinstance(org_id, str) else org_id

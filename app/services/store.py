@@ -6,8 +6,6 @@ from typing import Dict, List, Optional
 import cohere
 import httpx
 from dotenv import load_dotenv
-
-logger = logging.getLogger(__name__)
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     FieldCondition,
@@ -17,15 +15,35 @@ from qdrant_client.models import (
     MatchAny,
     MatchValue,
     Prefetch,
+    SparseVector,
 )
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Global Qdrant Client (replaces ChromaDB)
+# Global Qdrant Client
 # ─────────────────────────────────────────────────────────────────────────────
 _qdrant_client = None
 _cohere_client = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SPLADE Sparse Encoder — loaded eagerly at module import.
+# Worker container: fastembed is installed → prithivida/Splade_PP_en_v1 loaded.
+# API container:    fastembed is NOT installed → falls back to TF-hash.
+# ─────────────────────────────────────────────────────────────────────────────
+_splade_model = None
+try:
+    from fastembed import SparseTextEmbedding
+    logger.info("Loading SPLADE model (prithivida/Splade_PP_en_v1)...")
+    _splade_model = SparseTextEmbedding("prithivida/Splade_PP_en_v1")
+    logger.info("SPLADE model ready.")
+except ImportError:
+    logger.warning(
+        "fastembed not installed — SPLADE unavailable. "
+        "Falling back to TF-hash sparse vectors (API-only mode)."
+    )
 
 
 def get_global_qdrant() -> QdrantClient:
@@ -52,17 +70,24 @@ def get_cohere_client() -> cohere.ClientV2 | None:
     return _cohere_client
 
 
-from app.utils.vector_utils import compute_sparse_vector as _compute_sparse_dict
+from app.utils.vector_utils import compute_sparse_vector as _tf_hash_sparse_dict
 
 
-def compute_sparse_vector(text: str):
+def compute_sparse_vector(text: str) -> SparseVector:
     """
-    Creates a Term Frequency sparse vector for Qdrant (which applies IDF at index time).
-    Uses the shared vector_utils dictionary builder to ensure index/query consistency.
-    """
-    from qdrant_client.models import SparseVector
+    Generates a sparse vector for Qdrant hybrid search.
 
-    d = _compute_sparse_dict(text)
+    Worker mode:  prithivida/Splade_PP_en_v1 via fastembed (ONNX) — matches index.
+    API-only mode: TF-hash fallback (fastembed not installed) — lower quality.
+    """
+    if _splade_model is not None:
+        result = list(_splade_model.embed([text]))[0]
+        return SparseVector(
+            indices=result.indices.tolist(),
+            values=result.values.tolist(),
+        )
+    # Fallback: TF hash (API container / fastembed unavailable)
+    d = _tf_hash_sparse_dict(text)
     return SparseVector(indices=d["indices"], values=d["values"])
 
 
@@ -318,13 +343,12 @@ def search_hybrid(
     return {"results": final_output, "reranker_metrics": reranker_metrics}
 
 
-def get_all_contract_names(org_id: str):
+def get_all_contract_names(org_id: str) -> list[str]:
     """
     Returns all stored contract filenames for a given org.
+    Paginates via the Qdrant scroll cursor to avoid the hardcoded 10k cap.
     org_id is required for proper tenant isolation.
     """
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
-
     qdrant = get_global_qdrant()
 
     if not org_id:
@@ -334,20 +358,26 @@ def get_all_contract_names(org_id: str):
         must=[FieldCondition(key="org_id", match=MatchValue(value=org_id))]
     )
 
-    records, _ = qdrant.scroll(
-        collection_name="lex_unified_chunks",
-        limit=10000,
-        with_payload=["filename"],
-        with_vectors=False,
-        scroll_filter=search_filter,
-    )
-    return list(
-        set(
-            r.payload.get("filename")
-            for r in records
-            if r.payload and "filename" in r.payload
+    filenames: set[str] = set()
+    offset = None
+
+    while True:
+        records, next_offset = qdrant.scroll(
+            collection_name="lex_unified_chunks",
+            limit=1000,
+            offset=offset,
+            with_payload=["filename"],
+            with_vectors=False,
+            scroll_filter=search_filter,
         )
-    )
+        for r in records:
+            if r.payload and "filename" in r.payload:
+                filenames.add(r.payload["filename"])
+        if next_offset is None:
+            break
+        offset = next_offset
+
+    return list(filenames)
 
 
 def extract_sources_from_chunks(chunks: list[str]):
@@ -427,13 +457,15 @@ def search_hybrid_qdrant(
             logger.warning("Qdrant query failed after 3 retries: %s", str(qe)[:100])
             break
 
-    # ── Format into structural payload (mimicking the Chroma Output) ──────────
+    # ── Format into structural payload ───────────────────────────────────────
     raw_results = []
-    for hit in hits:
+    for hit in qdrant_results:  # fix: was 'hits' (NameError)
         p = hit.payload or {}
         display_text = p.get("raw_text") or p.get("rich_text", "")
-        formatted_text = f"[Source: {p.get('filename', 'Unknown')}, Page: {p.get('page_number', '?')}]\nContent: {display_text}"
-
+        formatted_text = (
+            f"[Source: {p.get('filename', 'Unknown')}, "
+            f"Page: {p.get('page_number', '?')}]\nContent: {display_text}"
+        )
         raw_results.append(
             {
                 "id": hit.id,

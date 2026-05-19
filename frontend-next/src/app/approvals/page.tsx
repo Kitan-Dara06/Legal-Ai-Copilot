@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/Button";
 import {
   listApprovals,
   approveWorkflowToken,
-  rejectWorkflowToken,
 } from "@/lib/api";
 import type { ApprovalRequest } from "@/lib/types";
 
@@ -38,8 +37,17 @@ export default function ApprovalsPage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   useEffect(() => {
-    setToken(localStorage.getItem("sb-access-token"));
-    setOrgSlug(localStorage.getItem("sb-org-slug"));
+    // Use Supabase client to get session — do NOT read localStorage directly
+    // because the Supabase SSR key name is not 'sb-access-token'
+    import("@/lib/supabase/client").then(({ createClient }) => {
+      const supabase = createClient();
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session) {
+          setToken(session.access_token);
+          setOrgSlug(localStorage.getItem("legalrag_active_org"));
+        }
+      });
+    });
   }, []);
 
   const fetchApprovals = useCallback(async () => {
@@ -68,7 +76,6 @@ export default function ApprovalsPage() {
         approval.token_hash,
         orgSlug || undefined,
       );
-      // Remove from list after approval
       setApprovals((prev) => prev.filter((a) => a.id !== approval.id));
     } catch (err) {
       console.error("Approval failed:", err);
@@ -77,26 +84,15 @@ export default function ApprovalsPage() {
     }
   };
 
-  const handleReject = async (approval: ApprovalRequest) => {
-    if (!token || !approval.token_hash) return;
-    setActionLoading(approval.id);
-    try {
-      await rejectWorkflowToken(
-        token,
-        approval.workflow_id,
-        approval.token_hash,
-        orgSlug || undefined,
-      );
-      // Remove from list after rejection
-      setApprovals((prev) => prev.filter((a) => a.id !== approval.id));
-    } catch (err) {
-      console.error("Rejection failed:", err);
-    } finally {
-      setActionLoading(null);
-    }
+  // Reject from list page navigates to detail page where reason can be entered
+  const handleRejectNavigate = (approval: ApprovalRequest) => {
+    router.push(`/approvals/${approval.id}?token=${approval.token_hash || ""}`);
   };
 
-  const pendingApprovals = approvals.filter((a) => a.status === "PENDING");
+  // Sort pending approvals by urgency descending (SRS: highest urgency first)
+  const pendingApprovals = approvals
+    .filter((a) => a.status === "PENDING")
+    .sort((a, b) => b.urgency_score - a.urgency_score);
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
@@ -142,10 +138,10 @@ export default function ApprovalsPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => handleReject(approval)}
+                    onClick={() => handleRejectNavigate(approval)}
                     disabled={actionLoading === approval.id}
                   >
-                    {actionLoading === approval.id ? "..." : "Reject"}
+                    Reject
                   </Button>
                   <Button
                     size="sm"

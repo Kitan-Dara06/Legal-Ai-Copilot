@@ -1574,6 +1574,7 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
                     model="llama-3.3-70b-versatile",
                     temperature=0.0,
                     api_key=os.getenv("GROQ_API_KEY", ""),
+                    max_tokens=4096,  # Enough for any legal notice; prevents silent truncation
                 ).with_structured_output(DraftResult)
 
                 result: DraftResult = await llm_structured.ainvoke(prompt)

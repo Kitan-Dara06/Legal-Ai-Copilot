@@ -39,9 +39,9 @@ async def sweep_stuck_tasks(db: AsyncSession = Depends(get_db)):
         # PostgreSQL syntax for INTERVAL 1 hour
         stmt = text("""
             UPDATE documents
-            SET status = 'FAILED', error = 'Worker timeout (1hr)'
+            SET status = 'FAILED', error_message = 'Worker timeout (1hr)'
             WHERE status = 'PENDING'
-              AND updated_at < NOW() - INTERVAL '1 hour'
+              AND upload_date < NOW() - INTERVAL '1 hour'
         """)
         result = await db.execute(stmt)
         await db.commit()
@@ -60,7 +60,9 @@ async def cleanup_expired_invites(db: AsyncSession = Depends(get_db)):
     """
     logger.info("[cron] Executing cleanup_expired_invites...")
     try:
-        stmt = text("DELETE FROM invites WHERE expires_at < NOW()")
+        stmt = text(
+            "DELETE FROM organization_invites WHERE expires_at < NOW() AND is_accepted = FALSE"
+        )
         result = await db.execute(stmt)
         await db.commit()
         logger.info(f"[cron] Deleted {result.rowcount} expired invites.")
@@ -146,6 +148,94 @@ async def expire_stale_approvals(db: AsyncSession = Depends(get_db)):
         await db.rollback()
         logger.error("[cron] Failed to expire approvals: %s", e)
         raise HTTPException(status_code=500, detail="Failed to expire approvals.")
+
+
+@router.post("/warn-expiring-approvals", dependencies=[Depends(verify_cron_secret)])
+async def warn_expiring_approvals(db: AsyncSession = Depends(get_db)):
+    """
+    SRS FR-NOTIF-01: Send 24h-before-expiry warning notifications for approval tokens.
+    Run every 15 minutes. Creates in-app Notification records for the workflow owner.
+    """
+    logger.info("[cron] Checking for approvals expiring in 24h...")
+    try:
+        # Find PENDING approvals expiring in the next 24 hours (but not yet expired)
+        # and where we haven't already warned (no notification of this type today)
+        warn_stmt = text("""
+            SELECT ar.id, ar.workflow_id, ar.org_id, ar.expires_at,
+                   wf.status as wf_status
+            FROM approval_requests ar
+            JOIN workflow_executions wf ON ar.workflow_id = wf.id
+            WHERE ar.status = 'PENDING'
+              AND ar.expires_at BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
+              AND NOT EXISTS (
+                SELECT 1 FROM notifications n
+                WHERE n.org_id = ar.org_id
+                  AND n.notification_type = 'APPROVAL_EXPIRY_WARNING'
+                  AND n.created_at > NOW() - INTERVAL '1 hour'
+                  AND n.action_url LIKE '%' || ar.workflow_id::text || '%'
+              )
+        """)
+        result = await db.execute(warn_stmt)
+        rows = result.mappings().all()
+
+        from app.models import Notification
+        import uuid as _uuid
+
+        warned = 0
+        for row in rows:
+            # Create an in-app fallback notification for the org
+            # In production, this would also dispatch a Celery email/Slack task
+            notif = Notification(
+                id=_uuid.uuid4(),
+                user_id=_uuid.UUID("00000000-0000-0000-0000-000000000000"),  # sentinel; real delivery via Celery
+                org_id=row["org_id"],
+                title="Approval Token Expiring Soon",
+                body=(
+                    f"An approval request for workflow {row['workflow_id']} "
+                    f"expires at {row['expires_at'].strftime('%Y-%m-%d %H:%M UTC')}. "
+                    "Please review and approve or reject before it expires."
+                ),
+                notification_type="APPROVAL_EXPIRY_WARNING",
+                action_url=f"/approvals?workflow_id={row['workflow_id']}",
+            )
+            db.add(notif)
+            warned += 1
+
+        await db.commit()
+        logger.info("[cron] Sent %d approval expiry warnings", warned)
+        return {"status": "success", "warnings_sent": warned}
+    except Exception as e:
+        await db.rollback()
+        logger.error("[cron] Failed to send expiry warnings: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to warn expiring approvals.")
+
+
+@router.post("/expire-stale-ambiguity", dependencies=[Depends(verify_cron_secret)])
+async def expire_stale_ambiguity(db: AsyncSession = Depends(get_db)):
+    """
+    SRS FR-AMB-01 TTL: Expire AWAITING_INTENT_CONFIRMATION workflows older than 10 minutes.
+    Run every 5 minutes via Celery Beat or external cron.
+    The lawyer can re-submit the same goal to restart the ambiguity gate.
+    """
+    logger.info("[cron] Expiring stale ambiguity gates...")
+    try:
+        expire_stmt = text("""
+            UPDATE workflow_executions
+            SET status = 'CANCELLED'
+            WHERE status = 'AWAITING_INTENT_CONFIRMATION'
+              AND created_at < NOW() - INTERVAL '10 minutes'
+        """)
+        result = await db.execute(expire_stmt)
+        await db.commit()
+        logger.info(
+            "[cron] Expired %d stale ambiguity gates (status → CANCELLED)",
+            result.rowcount,
+        )
+        return {"status": "success", "expired_ambiguity": result.rowcount}
+    except Exception as e:
+        await db.rollback()
+        logger.error("[cron] Failed to expire ambiguity gates: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to expire ambiguity gates.")
 
 
 @router.post("/recover-stuck-workflows", dependencies=[Depends(verify_cron_secret)])

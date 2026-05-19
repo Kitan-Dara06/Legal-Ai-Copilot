@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile.worker
+#
+# Full worker image — base + ML ingestion libraries.
+# Includes: fastembed (SPLADE/ONNX), spaCy, pymupdf, sentence-transformers.
+#
+# SPLADE model (prithivida/Splade_PP_en_v1) is pre-downloaded at build time
+# so workers start immediately without a cold-download penalty.
+#
+# Target: Worker droplet (4GB RAM)
+# Expected image size: ~3.5GB (fastembed ONNX + spaCy + sentence-transformers)
+# Expected RSS with --concurrency=2: ~2.5GB steady state (SPLADE loaded pre-fork via COW)
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM python:3.12-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# System deps: libpq for psycopg2, libgomp for ONNX Runtime (fastembed),
+#              poppler-utils for pdfplumber, libmagic for file validation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    libpq-dev \
+    gcc \
+    python3-dev \
+    libgomp1 \
+    poppler-utils \
+  && rm -rf /var/lib/apt/lists/*
+
+# ── Install Python deps (base + ML) ──────────────────────────────────────────
+COPY requirements.base.txt requirements.worker.txt ./
+RUN pip install --no-cache-dir -r requirements.worker.txt
+
+# ── Download spaCy model ──────────────────────────────────────────────────────
+RUN python -m spacy download en_core_web_sm
+
+# ── Pre-download SPLADE model (avoids cold-start in production) ───────────────
+# fastembed caches models in ~/.cache/fastembed by default
+ENV FASTEMBED_CACHE_DIR=/app/.fastembed_cache
+RUN python -c "\
+from fastembed import SparseTextEmbedding; \
+print('Downloading SPLADE model...'); \
+SparseTextEmbedding('prithivida/Splade_PP_en_v1'); \
+print('SPLADE model cached.')"
+
+# ── Copy application code ─────────────────────────────────────────────────────
+COPY . /app
+
+# --concurrency=2: conservative for 4GB droplet with ONNX + sentence-transformers
+# Scale to 4 by setting CELERY_CONCURRENCY=4 on an 8GB worker droplet
+CMD ["celery", "-A", "app.worker", "worker", \
+     "-Q", "default,ocr,deadline", \
+     "-n", "worker@%h", \
+     "--concurrency", "2", \
+     "--pool=prefork", \
+     "--loglevel=info"]

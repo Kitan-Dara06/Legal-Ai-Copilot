@@ -1,0 +1,25 @@
+# Worker requirements — base + ML/ingestion libraries.
+# These are installed in the worker image only.
+# The API image uses requirements.base.txt directly.
+
+-r requirements.base.txt
+
+# ── Sparse Embedding (SPLADE) ─────────────────────────────────────────────────
+# prithivida/Splade_PP_en_v1 via ONNX Runtime (no torch dependency)
+fastembed
+
+# ── PDF / Document Parsing ────────────────────────────────────────────────────
+pymupdf
+pypdf
+pdfplumber
+python-docx
+
+# ── OCR (Gemini Vision) — scanned PDF processing ────────────────────────────
+google-genai
+
+# ── NLP (spaCy for chunker) ───────────────────────────────────────────────────
+spacy>=3.7
+
+# ── Nomic backup embedder (lazy-loaded — only if Voyage fails) ────────────────
+# Pulls torch as a transitive dependency; NOT loaded at startup in normal operation.
+sentence-transformers

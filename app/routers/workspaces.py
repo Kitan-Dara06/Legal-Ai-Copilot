@@ -302,7 +302,7 @@ async def upload_document(
     if not ws_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Workspace not found.")
 
-    # Validate file type
+    # Validate file extension
     filename = (file.filename or "document.pdf").strip()
     if not filename.lower().endswith((".pdf", ".docx")):
         raise HTTPException(
@@ -314,6 +314,23 @@ async def upload_document(
     raw_bytes = await file.read()
     if len(raw_bytes) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(status_code=400, detail="File exceeds 100MB limit.")
+
+    # H2: Magic-byte validation — reject files that lie about their extension
+    PDF_MAGIC = b"%PDF"
+    DOCX_MAGIC = b"PK\x03\x04"  # ZIP-based (OOXML)
+    is_pdf_ext = filename.lower().endswith(".pdf")
+    is_docx_ext = filename.lower().endswith(".docx")
+
+    if is_pdf_ext and not raw_bytes.startswith(PDF_MAGIC):
+        raise HTTPException(
+            status_code=400,
+            detail="File content does not match PDF format (invalid magic bytes).",
+        )
+    if is_docx_ext and not raw_bytes.startswith(DOCX_MAGIC):
+        raise HTTPException(
+            status_code=400,
+            detail="File content does not match DOCX format (invalid magic bytes).",
+        )
 
     file_hash = hashlib.sha256(raw_bytes).hexdigest()
 
@@ -350,8 +367,10 @@ async def upload_document(
         )
         return {
             "status": "duplicate",
+            "filename": filename,
             "document_id": str(linked_doc.id),
             "source_document_id": str(existing_doc.id),
+            "queue": None,  # No queue — already indexed
             "message": "Linked to existing document (no re-ingestion needed).",
         }
 
@@ -434,10 +453,13 @@ async def upload_document(
         workspace_id,
     )
 
+    queue_name = "ocr" if is_scanned else "default"
     return {
         "status": "accepted",
+        "filename": filename,
         "document_id": str(document_id),
         "file_hash": file_hash,
+        "queue": queue_name,
     }
 
 

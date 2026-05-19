@@ -118,8 +118,11 @@ export function FileUpload({
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: { "application/pdf": [".pdf"] },
-    maxSize: 200 * 1024 * 1024, // 200MB
+    accept: {
+      "application/pdf": [".pdf"],
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+    },
+    maxSize: 100 * 1024 * 1024, // 100MB (matches backend MAX_FILE_SIZE)
   });
 
   return (
@@ -136,7 +139,7 @@ export function FileUpload({
         />
         <p className="text-sm text-slate-300 font-medium">Add new document</p>
         <p className="text-xs text-slate-500 mt-1">
-          Limit 200MB per file • PDF
+          Limit 100MB per file • PDF or DOCX
         </p>
       </div>
 

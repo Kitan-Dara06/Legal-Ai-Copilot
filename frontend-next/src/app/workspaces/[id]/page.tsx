@@ -51,10 +51,15 @@ export default function WorkspaceDetailPage() {
   const [actResult, setActResult] = useState<any>(null);
 
   useEffect(() => {
-    const stored = localStorage.getItem("sb-access-token");
-    const org = localStorage.getItem("sb-org-slug");
-    if (stored) setToken(stored);
-    if (org) setOrgSlug(org);
+    import("@/lib/supabase/client").then(({ createClient }) => {
+      const supabase = createClient();
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session) {
+          setToken(session.access_token);
+          setOrgSlug(localStorage.getItem("legalrag_active_org"));
+        }
+      });
+    });
   }, []);
 
   const loadWorkspace = useCallback(() => {
@@ -70,7 +75,6 @@ export default function WorkspaceDetailPage() {
     loadWorkspace();
   }, [loadWorkspace]);
 
-  // Poll goal status
   useEffect(() => {
     if (!goalId || !token) return;
     const interval = setInterval(async () => {
@@ -81,14 +85,12 @@ export default function WorkspaceDetailPage() {
           goalId,
           orgSlug || undefined,
         );
-        console.log("[Lex] Goal status response:", JSON.stringify(res));
         setWorkflowStatus(res.status);
 
         const workflows = (res as any).workflows as any[] | undefined;
         if (res.status === "AWAITING_APPROVAL" && workflows && workflows.length > 0) {
           const wfId = workflows[0].id;
           try {
-            console.log("[Lex] Fetching actions for workflow:", wfId);
             const actData = await getWorkflowActions(token, wfId, orgSlug || undefined);
             setActResult({ actions: actData.actions, workflow_id: wfId });
           } catch (e) {
@@ -96,7 +98,9 @@ export default function WorkspaceDetailPage() {
           }
         }
 
-        if (res.status === "COMPLETED" || res.status === "FAILED") {
+        // Stop polling on any terminal status
+        const terminalStatuses = ["COMPLETED", "FAILED", "CANCELLED", "ESCALATED"];
+        if (terminalStatuses.includes(res.status)) {
           clearInterval(interval);
           setProcessing(false);
           loadWorkspace();
@@ -107,7 +111,7 @@ export default function WorkspaceDetailPage() {
       }
     }, 2000);
     return () => clearInterval(interval);
-  }, [goalId, token, workspaceId, orgSlug, loadWorkspace, getWorkflowActions]);
+  }, [goalId, token, workspaceId, orgSlug, loadWorkspace]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
