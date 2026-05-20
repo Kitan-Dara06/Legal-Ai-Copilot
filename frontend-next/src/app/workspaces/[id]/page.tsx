@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { getWorkspace, createWorkspaceSession } from "@/lib/api";
+import { createClient } from "@/lib/supabase/client";
 import { uploadDocument } from "@/lib/api";
 import { createGoal, getGoalStatus, getWorkflowActions, listGoals } from "@/lib/api";
 import { WorkspaceDetailResponse, WorkspaceDocument } from "@/lib/types";
@@ -51,14 +52,12 @@ export default function WorkspaceDetailPage() {
   const [actResult, setActResult] = useState<any>(null);
 
   useEffect(() => {
-    import("@/lib/supabase/client").then(({ createClient }) => {
-      const supabase = createClient();
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        if (session) {
-          setToken(session.access_token);
-          setOrgSlug(localStorage.getItem("legalrag_active_org"));
-        }
-      });
+    const supabase = createClient();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) {
+        setToken(session.access_token);
+        setOrgSlug(localStorage.getItem("legalrag_active_org"));
+      }
     });
   }, []);
 

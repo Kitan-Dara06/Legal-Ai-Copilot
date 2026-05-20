@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { listEscalations, resolveEscalation } from "@/lib/api";
+import { createClient } from "@/lib/supabase/client";
 import { CheckCircle, AlertCircle, Loader2 } from "lucide-react";
 
 type Escalation = {
@@ -38,14 +39,12 @@ export default function EscalationsPage() {
   } | null>(null);
 
   useEffect(() => {
-    import("@/lib/supabase/client").then(({ createClient }) => {
-      const supabase = createClient();
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        if (session) {
-          setToken(session.access_token);
-          setOrgSlug(localStorage.getItem("legalrag_active_org"));
-        }
-      });
+    const supabase = createClient();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) {
+        setToken(session.access_token);
+        setOrgSlug(localStorage.getItem("legalrag_active_org"));
+      }
     });
   }, []);
 

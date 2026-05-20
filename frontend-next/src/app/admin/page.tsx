@@ -3,16 +3,15 @@
 import { useEffect, useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { createClient } from "@/lib/supabase/client";
 
 export default function AdminPage() {
   const [token, setToken] = useState<string | null>(null);
 
   useEffect(() => {
-    import("@/lib/supabase/client").then(({ createClient }) => {
-      const supabase = createClient();
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        if (session) setToken(session.access_token);
-      });
+    const supabase = createClient();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) setToken(session.access_token);
     });
   }, []);
 

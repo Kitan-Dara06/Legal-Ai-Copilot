@@ -9,6 +9,7 @@ import {
   listApprovals,
   approveWorkflowToken,
 } from "@/lib/api";
+import { createClient } from "@/lib/supabase/client";
 import type { ApprovalRequest } from "@/lib/types";
 
 const URGENCY_COLORS: Record<string, string> = {
@@ -37,16 +38,12 @@ export default function ApprovalsPage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   useEffect(() => {
-    // Use Supabase client to get session — do NOT read localStorage directly
-    // because the Supabase SSR key name is not 'sb-access-token'
-    import("@/lib/supabase/client").then(({ createClient }) => {
-      const supabase = createClient();
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        if (session) {
-          setToken(session.access_token);
-          setOrgSlug(localStorage.getItem("legalrag_active_org"));
-        }
-      });
+    const supabase = createClient();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) {
+        setToken(session.access_token);
+        setOrgSlug(localStorage.getItem("legalrag_active_org"));
+      }
     });
   }, []);
 
