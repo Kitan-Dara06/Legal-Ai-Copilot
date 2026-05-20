@@ -133,15 +133,15 @@ services:
     environment:
       - FASTEMBED_CACHE_DIR=/app/.fastembed_cache
     command: >
-      celery -A app.worker beat
+      celery -A app.beat beat
       --scheduler celery.beat:PersistentScheduler
       --loglevel=info
     restart: always
     deploy:
       resources:
         limits:
-          memory: 256M    # Beat is lightweight — no ML models
-          cpus: "0.25"
+          memory: 128M    # app.beat is minimal — no ML libs, no task imports
+          cpus: "0.2"
     depends_on:
       worker:
         condition: service_started
