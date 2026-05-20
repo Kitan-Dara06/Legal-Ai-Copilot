@@ -434,6 +434,7 @@ async def get_workflow_actions(
                 "description": a.description,
                 "status": a.status.value,
                 "urgency": float(a.urgency_score) if a.urgency_score else 0.0,
+                "draft_payload": a.draft_payload or {},  # includes draft_text, citations, grounding_score
             }
             for a in actions
         ]
