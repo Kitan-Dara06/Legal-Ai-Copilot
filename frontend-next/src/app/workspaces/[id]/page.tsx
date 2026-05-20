@@ -53,7 +53,8 @@ export default function WorkspaceDetailPage() {
 
   useEffect(() => {
     const supabase = createClient();
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then((result) => {
+      const session = result.data.session;
       if (session) {
         setToken(session.access_token);
         setOrgSlug(localStorage.getItem("legalrag_active_org"));
