@@ -9,11 +9,11 @@ export default function AdminPage() {
   const [token, setToken] = useState<string | null>(null);
 
   useEffect(() => {
-    const supabase = createClient();
-    supabase.auth.getSession().then((result) => {
-      const session = result.data.session;
-      if (session) setToken(session.access_token);
-    });
+    void (async () => {
+      const supabase = createClient();
+      const { data } = await supabase.auth.getSession();
+      if (data.session) setToken(data.session.access_token);
+    })();
   }, []);
 
   return (
