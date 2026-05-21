@@ -9,10 +9,14 @@ Each tool declares:
 
 import logging
 import os
+import time
 from enum import Enum
 from typing import Any, Callable, Optional
 
 from app.models import ActionType, IdempotencyClass
+from app.services.audit.logger import AuditLogger
+from app.services.audit.schemas import DebugCategory, DebugTrace, AuditCategory, AuditEvent, LogLevel
+from app.services.audit.events import emit
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +95,18 @@ TOOL_REGISTRY: dict[ActionType, ToolMetadata] = {
 
 def get_tool_metadata(action_type: ActionType) -> Optional[ToolMetadata]:
     """Look up a tool's metadata by ActionType."""
-    return TOOL_REGISTRY.get(action_type)
+    meta = TOOL_REGISTRY.get(action_type)
+    try:
+        AuditLogger.log(
+            DebugTrace(
+                category=DebugCategory.TOOL,
+                message=f"Tool metadata lookup: {action_type.value}",
+                details={"action_type": action_type.value, "found": meta is not None},
+            )
+        )
+    except Exception:
+        pass
+    return meta
 
 
 # ── External API Connectors ───────────────────────────────────────────────────
@@ -108,34 +123,91 @@ async def dispatch_send_notice(task: Any) -> str:
     smtp_user = os.getenv("SMTP_USER", "")
     smtp_pass = os.getenv("SMTP_PASS", "")
 
-    if not smtp_host or not smtp_user:
-        logger.warning("[tool] SMTP not configured — logging notice instead of sending")
-        logger.info(
-            "[tool] WOULD SEND: To=%s Subject=%s Body=%s",
-            recipient,
-            subject,
-            draft[:200],
-        )
-        return f"NOTICE_LOGGED (SMTP not configured): {subject} to {recipient}"
+        start = time.monotonic()
+        if not smtp_host or not smtp_user:
+            logger.warning("[tool] SMTP not configured — logging notice instead of sending")
+            logger.info(
+                "[tool] WOULD SEND: To=%s Subject=%s Body=%s",
+                recipient,
+                subject,
+                draft[:200],
+            )
+            try:
+                AuditLogger.log(
+                    AuditEvent(
+                        category=AuditCategory.NOTIFICATION,
+                        action="email_dispatch",
+                        status="skipped",
+                        detail=f"SMTP not configured — notice to {recipient}",
+                        metadata={
+                            "recipient": recipient,
+                            "subject_length": len(subject),
+                            "duration_ms": (time.monotonic() - start) * 1000,
+                            "success": False,
+                        },
+                    )
+                )
+            except Exception:
+                pass
+            return f"NOTICE_LOGGED (SMTP not configured): {subject} to {recipient}"
 
-    import smtplib
-    from email.mime.text import MIMEText
+        import smtplib
+        from email.mime.text import MIMEText
 
-    msg = MIMEText(draft, "plain")
-    msg["Subject"] = subject
-    msg["From"] = smtp_user
-    msg["To"] = recipient
+        msg = MIMEText(draft, "plain")
+        msg["Subject"] = subject
+        msg["From"] = smtp_user
+        msg["To"] = recipient
 
-    with smtplib.SMTP(smtp_host, smtp_port) as server:
-        server.starttls()
-        server.login(smtp_user, smtp_pass)
-        server.send_message(msg)
-
-    return f"NOTICE_SENT: {subject} to {recipient}"
+        try:
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                server.starttls()
+                server.login(smtp_user, smtp_pass)
+                server.send_message(msg)
+            duration = (time.monotonic() - start) * 1000
+            try:
+                AuditLogger.log(
+                    AuditEvent(
+                        category=AuditCategory.NOTIFICATION,
+                        action="email_dispatch",
+                        status="success",
+                        detail=f"Notice sent to {recipient}",
+                        metadata={
+                            "recipient": recipient,
+                            "subject_length": len(subject),
+                            "duration_ms": duration,
+                            "success": True,
+                        },
+                    )
+                )
+            except Exception:
+                pass
+            return f"NOTICE_SENT: {subject} to {recipient}"
+        except Exception:
+            duration = (time.monotonic() - start) * 1000
+            try:
+                AuditLogger.log(
+                    AuditEvent(
+                        category=AuditCategory.NOTIFICATION,
+                        action="email_dispatch",
+                        status="failure",
+                        detail=f"Failed to send notice to {recipient}",
+                        metadata={
+                            "recipient": recipient,
+                            "subject_length": len(subject),
+                            "duration_ms": duration,
+                            "success": False,
+                        },
+                    )
+                )
+            except Exception:
+                pass
+            raise
 
 
 async def dispatch_update_case_tracker(task: Any) -> str:
     """Update case tracker via Clio API (IDEMPOTENT with compensation)."""
+    start = time.monotonic()
     draft = (task.draft_payload or {}).get("draft_text", "")
     case_id = (task.draft_payload or {}).get("case_id", "")
     description = task.description
@@ -144,25 +216,75 @@ async def dispatch_update_case_tracker(task: Any) -> str:
 
     if not clio_api_key:
         logger.warning("[tool] Clio API not configured — logging instead")
+        try:
+            AuditLogger.log(
+                AuditEvent(
+                    category=AuditCategory.API_CALL,
+                    action="clio_update",
+                    status="skipped",
+                    detail="Clio API not configured",
+                    metadata={
+                        "duration_ms": (time.monotonic() - start) * 1000,
+                        "success": False,
+                    },
+                )
+            )
+        except Exception:
+            pass
         return f"CASE_LOGGED (Clio not configured): {description[:100]}"
 
     import httpx
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"https://app.clio.com/api/v4/activities.json",
-            headers={"Authorization": f"Bearer {clio_api_key}"},
-            json={
-                "activity": {
-                    "description": description,
-                    "notes": draft[:5000],
-                }
-            },
-            timeout=30.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"https://app.clio.com/api/v4/activities.json",
+                headers={"Authorization": f"Bearer {clio_api_key}"},
+                json={
+                    "activity": {
+                        "description": description,
+                        "notes": draft[:5000],
+                    }
+                },
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        duration = (time.monotonic() - start) * 1000
+        try:
+            AuditLogger.log(
+                AuditEvent(
+                    category=AuditCategory.API_CALL,
+                    action="clio_update",
+                    status="success",
+                    detail=f"Case tracker updated",
+                    metadata={
+                        "duration_ms": duration,
+                        "success": True,
+                    },
+                )
+            )
+        except Exception:
+            pass
         return f"CASE_UPDATED: activity {data.get('activity', {}).get('id', 'unknown')}"
+    except Exception:
+        duration = (time.monotonic() - start) * 1000
+        try:
+            AuditLogger.log(
+                AuditEvent(
+                    category=AuditCategory.API_CALL,
+                    action="clio_update",
+                    status="failure",
+                    detail="Clio API call failed",
+                    metadata={
+                        "duration_ms": duration,
+                        "success": False,
+                    },
+                )
+            )
+        except Exception:
+            pass
+        raise
 
 
 async def dispatch_set_reminder(task: Any) -> str:

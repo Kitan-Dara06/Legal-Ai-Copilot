@@ -39,7 +39,7 @@ def _get_dsn() -> str:
 
 
 async def _ensure_pool() -> AsyncConnectionPool:
-    """Lazy-init singleton connection pool."""
+    """Lazy-init singleton connection pool. Logs creation to MongoDB audit."""
     global _pool
     if _pool is None or (hasattr(_pool, "closed") and _pool.closed):
         _pool = AsyncConnectionPool(
@@ -50,13 +50,30 @@ async def _ensure_pool() -> AsyncConnectionPool:
             open=False,
         )
         await _pool.open()
+
+        # MongoDB audit: log pool creation
+        try:
+            from app.services.audit.logger import AuditLogger
+            from app.services.audit.schemas import DebugCategory, DebugTrace, LogLevel
+
+            AuditLogger.debug(
+                DebugTrace(
+                    level=LogLevel.INFO,
+                    category=DebugCategory.DB_QUERY,
+                    message="Checkpointer pool created",
+                    metadata={"min_size": 1, "max_size": 5},
+                )
+            )
+        except Exception:
+            pass
+
     return _pool
 
 
 async def _setup_tables(conn) -> None:
     """
     Run LangGraph checkpoint table migrations with statement_timeout disabled.
-    Supabase sets a default statement_timeout that kills DDL; we reset it first.
+    Logs success/failure to MongoDB audit.
     """
     global _tables_created
     if _tables_created:
@@ -67,6 +84,23 @@ async def _setup_tables(conn) -> None:
         await checkpointer.setup()
         _tables_created = True
         logger.info("LangGraph checkpoint tables ready.")
+
+        # MongoDB audit: log table setup
+        try:
+            from app.services.audit.logger import AuditLogger
+            from app.services.audit.schemas import AuditCategory, AuditEvent, LogLevel
+
+            AuditLogger.audit(
+                AuditEvent(
+                    level=LogLevel.INFO,
+                    category=AuditCategory.DB_QUERY,
+                    action="checkpointer.tables_ready",
+                    message="LangGraph checkpoint tables created/verified",
+                )
+            )
+        except Exception:
+            pass
+
     except Exception as e:
         logger.warning("Checkpoint table setup failed (may already exist): %s", e)
         _tables_created = True
@@ -77,6 +111,8 @@ async def get_checkpointer():
     """
     Yields a configured AsyncPostgresSaver ready for graph.compile().
 
+    Logs pool init, table setup, and connection lifecycle to MongoDB audit.
+
     Usage:
         async with get_checkpointer() as checkpointer:
             app = graph.compile(checkpointer=checkpointer, ...)
@@ -84,4 +120,20 @@ async def get_checkpointer():
     pool = await _ensure_pool()
     async with pool.connection() as conn:
         await _setup_tables(conn)
+
+        # MongoDB audit: log connection acquisition
+        try:
+            from app.services.audit.logger import AuditLogger
+            from app.services.audit.schemas import DebugCategory, DebugTrace
+
+            AuditLogger.debug(
+                DebugTrace(
+                    category=DebugCategory.DB_QUERY,
+                    message="Checkpointer connection acquired",
+                    metadata={"pool_min": 1, "pool_max": 5},
+                )
+            )
+        except Exception:
+            pass
+
         yield AsyncPostgresSaver(conn)

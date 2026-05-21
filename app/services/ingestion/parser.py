@@ -13,9 +13,12 @@ Both parsers return a list of dicts:
 
 The font calibration baseline is derived from real document statistics for PDF.
 DOCX uses Heading style names to infer is_bold/font_size equivalents.
+
+All parse operations are logged to MongoDB audit.
 """
 
 import re
+import time
 from collections import Counter
 from typing import Dict, List
 
@@ -58,7 +61,8 @@ class LegalDocumentParser:
         return most_common_size
 
     def parse_pdf(self, filepath: str) -> List[Dict]:
-        """Extract blocks from a PDF with font calibration."""
+        """Extract blocks from a PDF with font calibration. Logged to MongoDB audit."""
+        _t0 = time.time()
         doc = fitz.open(filepath)
         self.body_font_size = self._calibrate_font_baseline(doc)
 
@@ -83,18 +87,36 @@ class LegalDocumentParser:
                                 "text": text,
                                 "is_bold": bool(span["flags"] & 2),
                                 "font_size": span["size"],
-                                "page_number": page_num + 1,  # 1-indexed
+                                "page_number": page_num + 1,
                             }
                         )
 
         doc.close()
+        _elapsed = (time.time() - _t0) * 1000
+        try:
+            from app.services.audit.logger import AuditLogger
+            from app.services.audit.schemas import DebugCategory, DebugTrace
+
+            AuditLogger.debug(
+                DebugTrace(
+                    category=DebugCategory.NODE_EXIT,
+                    message=f"parse_pdf: {len(extracted_blocks)} blocks ({_elapsed:.0f}ms)",
+                    duration_ms=_elapsed,
+                    metadata={
+                        "filepath": filepath[-60:],
+                        "blocks": len(extracted_blocks),
+                        "pages": len(doc) if hasattr(doc, "__len__") else 0,
+                    },
+                )
+            )
+        except Exception:
+            pass
         return extracted_blocks
 
     # ------------------------------------------------------------------
     # DOCX
     # ------------------------------------------------------------------
 
-    # Heading style names → approximate font_size equivalents for the chunker
     _DOCX_HEADING_FONT_MAP: Dict[str, float] = {
         "heading 1": 16.0,
         "heading 2": 14.0,
@@ -105,20 +127,18 @@ class LegalDocumentParser:
     def parse_docx(self, filepath: str) -> List[Dict]:
         """
         Extract blocks from a DOCX using python-docx.
+        Logged to MongoDB audit.
 
         Paragraph style names are mapped to is_bold and font_size
         equivalents so the ClauseChunker receives the same dict shape
         it gets from parse_pdf().
-
-        page_number is approximated: paragraph index divided by an
-        assumed ~30 paragraphs-per-page, plus 1 (1-indexed).
         """
-        from docx import Document  # local import — avoids hard dep when using PDF only
+        from docx import Document
 
+        _t0 = time.time()
         doc = Document(filepath)
         extracted_blocks = []
 
-        # Use the modal run font size as body_font_size baseline (same logic as PDF)
         run_sizes = []
         for para in doc.paragraphs:
             style_name = (para.style.name or "").lower()
@@ -133,7 +153,7 @@ class LegalDocumentParser:
         else:
             self.body_font_size = 12.0
 
-        paragraphs_per_page = 30  # conservative proxy for page estimation
+        paragraphs_per_page = 30
 
         for idx, para in enumerate(doc.paragraphs):
             text = para.text.strip()
@@ -143,18 +163,13 @@ class LegalDocumentParser:
             style_name = (para.style.name or "Normal").lower()
             page_number = (idx // paragraphs_per_page) + 1
 
-            # Determine is_bold and font_size from style name
             if style_name in self._DOCX_HEADING_FONT_MAP:
                 is_bold = True
                 font_size = self._DOCX_HEADING_FONT_MAP[style_name]
             else:
-                # Fall back to run-level inspection
                 is_bold = any(run.bold for run in para.runs if run.bold is not None)
-                # Use the largest run size, or the body baseline
                 sizes = [
-                    run.font.size.pt
-                    for run in para.runs
-                    if run.font.size is not None
+                    run.font.size.pt for run in para.runs if run.font.size is not None
                 ]
                 font_size = max(sizes) if sizes else self.body_font_size
 
@@ -167,35 +182,51 @@ class LegalDocumentParser:
                 }
             )
 
+        _elapsed = (time.time() - _t0) * 1000
+        try:
+            from app.services.audit.logger import AuditLogger
+            from app.services.audit.schemas import DebugCategory, DebugTrace
+
+            AuditLogger.debug(
+                DebugTrace(
+                    category=DebugCategory.NODE_EXIT,
+                    message=f"parse_docx: {len(extracted_blocks)} blocks ({_elapsed:.0f}ms)",
+                    duration_ms=_elapsed,
+                    metadata={
+                        "filepath": filepath[-60:],
+                        "blocks": len(extracted_blocks),
+                    },
+                )
+            )
+        except Exception:
+            pass
         return extracted_blocks
 
     # ------------------------------------------------------------------
     # Markdown (For OCR output)
     # ------------------------------------------------------------------
-    
+
     def parse_markdown(self, pages_data: List[Dict]) -> List[Dict]:
         """
         Converts Markdown output from Gemini OCR into standard blocks.
-        Expects pages_data: [{"page": 1, "text": "## Article 1\n..."}]
+        Logged to MongoDB audit.
         """
+        _t0 = time.time()
         extracted_blocks = []
         for page in pages_data:
             page_num = page.get("page", 1)
             text = page.get("text", "")
-            
-            lines = text.split('\n')
+
+            lines = text.split("\n")
             for line in lines:
                 line = line.strip()
                 if not line:
                     continue
-                
-                # Check for markdown headers
-                if line.startswith('#'):
-                    # Count number of hashes
-                    level = len(line) - len(line.lstrip('#'))
-                    clean_text = line.lstrip('#').strip()
-                    
-                    # Map header level to font size
+
+                if line.startswith("#"):
+                    level = len(line) - len(line.lstrip("#"))
+                    clean_text = line.lstrip("#").strip()
+
                     if level == 1:
                         font_size = 18.0
                     elif level == 2:
@@ -204,43 +235,41 @@ class LegalDocumentParser:
                         font_size = 14.0
                     else:
                         font_size = 13.0
-                        
-                    extracted_blocks.append({
-                        "text": clean_text,
-                        "is_bold": True,
-                        "font_size": font_size,
-                        "page_number": page_num
-                    })
+
+                    extracted_blocks.append(
+                        {
+                            "text": clean_text,
+                            "is_bold": True,
+                            "font_size": font_size,
+                            "page_number": page_num,
+                        }
+                    )
                 else:
-                    # Regular text
-                    extracted_blocks.append({
-                        "text": line,
-                        "is_bold": False,
-                        "font_size": self.body_font_size,
-                        "page_number": page_num
-                    })
-                    
+                    extracted_blocks.append(
+                        {
+                            "text": line,
+                            "is_bold": False,
+                            "font_size": 12.0,
+                            "page_number": page_num,
+                        }
+                    )
+
+        _elapsed = (time.time() - _t0) * 1000
+        try:
+            from app.services.audit.logger import AuditLogger
+            from app.services.audit.schemas import DebugCategory, DebugTrace
+
+            AuditLogger.debug(
+                DebugTrace(
+                    category=DebugCategory.NODE_EXIT,
+                    message=f"parse_markdown: {len(extracted_blocks)} blocks ({_elapsed:.0f}ms)",
+                    duration_ms=_elapsed,
+                    metadata={
+                        "blocks": len(extracted_blocks),
+                        "pages": len(pages_data),
+                    },
+                )
+            )
+        except Exception:
+            pass
         return extracted_blocks
-
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python parser.py <path_to_pdf_or_docx>")
-        sys.exit(1)
-
-    target = sys.argv[1]
-    parser = LegalDocumentParser()
-
-    if target.lower().endswith(".pdf"):
-        blocks = parser.parse_pdf(target)
-    elif target.lower().endswith(".docx"):
-        blocks = parser.parse_docx(target)
-    else:
-        print("Unsupported file type")
-        sys.exit(1)
-
-    print(f"Extracted {len(blocks)} text blocks. Body font baseline: {parser.body_font_size}pt")
-    for b in blocks[:5]:
-        print(f"  [p{b['page_number']} | bold={b['is_bold']} | {b['font_size']}pt] {b['text'][:80]}")

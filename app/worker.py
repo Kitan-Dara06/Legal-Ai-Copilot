@@ -116,12 +116,21 @@ def get_worker_loop() -> asyncio.AbstractEventLoop:
     return _worker_loop
 
 
+async def _init_audit_for_worker():
+    """Initialize MongoDB + start audit consumer on the worker's event loop."""
+    from app.services.audit.client import init_audit_db
+    from app.services.audit.logger import start_consumer, stop_consumer
+
+    await init_audit_db()
+    start_consumer()
+
+
 # ── Warmup and teardown (run on the persistent loop) ──────────────────────
 
 
 @worker_process_init.connect
 def init_worker_process(**kwargs):
-    """Warm up DB connections when worker process starts."""
+    """Warm up DB connections and audit logger when worker process starts."""
     future = asyncio.run_coroutine_threadsafe(_warmup(), _worker_loop)
     try:
         future.result(timeout=60)  # 60s — cold Supabase SSL handshake can take 20-40s
@@ -142,7 +151,7 @@ def shutdown_worker_process(**kwargs):
 
 
 async def _warmup():
-    """Initialize DB engine and checkpointer pool on the persistent loop."""
+    """Initialize DB engine, checkpointer pool, and audit logger."""
     import sqlalchemy as sa
 
     from app.database import _get_engine
@@ -153,12 +162,18 @@ async def _warmup():
         await conn.execute(sa.text("SELECT 1"))
 
     await _ensure_pool()
+    await _init_audit_for_worker()
 
 
 async def _teardown():
     """Close connections gracefully."""
     from app.database import _engine
     from app.services.agent.checkpointer import _pool
+    from app.services.audit.client import close_audit_db
+    from app.services.audit.logger import stop_consumer
+
+    await stop_consumer()
+    await close_audit_db()
 
     if _pool is not None:
         await _pool.close()

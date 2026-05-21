@@ -170,6 +170,7 @@ def search_hybrid(
 
     Returns: {"results": [...], "reranker_metrics": {...}}
     """
+    _st = time.time()
     qdrant = get_global_qdrant()
 
     if not org_id:
@@ -340,6 +341,23 @@ def search_hybrid(
             }
         )
 
+    _elapsed = (time.time() - _st) * 1000
+    try:
+        from app.services.audit.logger import AuditLogger
+        from app.services.audit.schemas import DebugCategory, DebugTrace
+        AuditLogger.debug(DebugTrace(
+            category=DebugCategory.SEARCH,
+            message=f"search_hybrid: {len(final_output)} results ({_elapsed:.0f}ms)",
+            duration_ms=_elapsed,
+            metadata={
+                "top_k": top_k,
+                "results": len(final_output),
+                "reranked": voyage_rerank_available,
+                "contracts": len(contracts_to_search) if contracts_to_search else 0,
+            },
+        ))
+    except Exception:
+        pass
     return {"results": final_output, "reranker_metrics": reranker_metrics}
 
 

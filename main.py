@@ -215,9 +215,26 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # ── MongoDB Audit Logging ────────────────────────────────────────────────
+    try:
+        from app.services.audit.client import init_audit_db
+        from app.services.audit.logger import start_consumer
+
+        await init_audit_db()
+        start_consumer()
+        print("✅ MongoDB audit logging initialised.")
+    except Exception as e:
+        print(f"⚠️  MongoDB audit init failed (non-fatal): {e}")
+
     yield  # App runs here
 
     # ── Lifespan Shutdown ────────────────────────────────────────────────────
+    from app.services.audit.client import close_audit_db
+    from app.services.audit.logger import stop_consumer
+
+    await stop_consumer()
+    await close_audit_db()
+
     redis = getattr(app.state, "redis", None)
     if redis is not None:
         try:

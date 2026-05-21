@@ -175,6 +175,25 @@ def get_pg_pool():
     return _pg_pool
 
 
+def _get_valid_conn(pg_pool) -> tuple:
+    """
+    Get a connection from the pool and validate it is still alive.
+    If stale (closed server-side), discard and retry once.
+    """
+    conn = pg_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        return conn, pg_pool
+    except Exception:
+        # Connection is stale — discard and get a fresh one
+        pg_pool.putconn(conn, close=True)
+        conn = pg_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        return conn, pg_pool
+
+
 def update_progress_sync(document_id: str, percent: int):
     """Updates the processing progress in Redis."""
     r = get_redis_conn()
@@ -639,11 +658,11 @@ def calculate_urgency(days_remaining: int) -> float:
       otherwise            → 0.10
     """
     if days_remaining <= 0:
-        return 1.0          # Caller also sets status=OVERDUE
+        return 1.0  # Caller also sets status=OVERDUE
     if days_remaining <= 1:
-        return 0.95         # SRS: exactly 0.95 for <=1 day
+        return 0.95  # SRS: exactly 0.95 for <=1 day
     if days_remaining <= 3:
-        return 0.85         # SRS: exactly 0.85 for 1 < days <= 3
+        return 0.85  # SRS: exactly 0.85 for 1 < days <= 3
     if days_remaining <= 7:
         return 0.70
     if days_remaining <= 14:
@@ -675,7 +694,7 @@ def deadline_scanner(self):
 
     logger.info("[deadline_scanner] Starting scan...")
     pg_pool = get_pg_pool()
-    conn = pg_pool.getconn()
+    conn, _ = _get_valid_conn(pg_pool)
     try:
         with conn.cursor() as cur:
             # ── Fetch all ACTIVE deadlines with a resolved date ──
@@ -864,6 +883,7 @@ def _notify_admins_overdue(
             except Exception as e:
                 if attempt < len(delays) - 1:
                     import time
+
                     time.sleep(delay)
                 else:
                     logger.error(
@@ -1069,6 +1089,8 @@ def process_scanned_pdf(
     default_retry_delay=30,
     queue="default",
     acks_late=True,
+    soft_time_limit=900,  # 15 min — LangGraph agent can take long
+    time_limit=1200,  # 20 min hard cap
 )
 def process_workflow(self, workflow_id: str, session_file_ids: list | None = None):
     """
@@ -1082,14 +1104,39 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
     import logging
     import uuid
 
+    import sentry_sdk
+
+    # Enrich the Sentry transaction (created automatically by CeleryIntegration)
+    # so the Performance waterfall shows workflow context on every span
+    sentry_sdk.set_tag("workflow_id", workflow_id)
+
+    # MongoDB audit: log workflow task started
+    try:
+        from app.services.audit.events import emit
+        from app.services.audit.schemas import CorrelationContext
+
+        correlation = CorrelationContext(
+            workflow_id=workflow_id,
+            task_id=self.request.id if hasattr(self, 'request') else None,
+        )
+        emit.workflow_started(
+            workflow_id=workflow_id,
+            intent='',
+            correlation=correlation,
+        )
+    except Exception:
+        pass
+
     log = logging.getLogger(__name__)
     wf_uuid = uuid.UUID(workflow_id)
 
+    log.info("[%s] process_workflow: starting", workflow_id)
+
     # ── Step 1: Sync DB reads ──────────────────────────────────────────────
-    from app.tasks import get_pg_pool
+    from app.tasks import _get_valid_conn, get_pg_pool
 
     pg_pool = get_pg_pool()
-    conn = pg_pool.getconn()
+    conn, _ = _get_valid_conn(pg_pool)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1114,6 +1161,11 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
                 return
 
             goal_text = goal_row[0]
+
+            # Enrich Sentry with intent + org after DB read
+            sentry_sdk.set_tag("intent", intent_val)
+            sentry_sdk.set_tag("org_id", str(org_id_str))
+            sentry_sdk.set_tag("goal_id", str(goal_id))
 
             cur.execute(
                 "UPDATE workflow_executions SET status = 'CLASSIFYING' WHERE id = %s",
@@ -1167,9 +1219,31 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
 
     try:
         self.run_async(_run_graph())
-        log.info("Workflow %s processed successfully", workflow_id)
+        log.info("[%s] process_workflow: completed successfully", workflow_id)
+        # MongoDB audit: log workflow completed
+        try:
+            from app.services.audit.events import emit
+            from app.services.audit.schemas import CorrelationContext
+            emit.workflow_completed(
+                workflow_id=workflow_id,
+                duration_ms=0,
+                correlation=CorrelationContext(workflow_id=workflow_id),
+            )
+        except Exception:
+            pass
     except Exception as e:
-        log.error("Workflow %s processing failed: %s", workflow_id, e, exc_info=True)
+        log.error("[%s] process_workflow: FAILED — %s", workflow_id, e, exc_info=True)
+        # MongoDB audit: log workflow failed
+        try:
+            from app.services.audit.events import emit
+            from app.services.audit.schemas import CorrelationContext
+            emit.workflow_failed(
+                workflow_id=workflow_id,
+                error=str(e),
+                correlation=CorrelationContext(workflow_id=workflow_id),
+            )
+        except Exception:
+            pass
         try:
             self.retry(exc=e)
         except Exception as retry_err:

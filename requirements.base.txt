@@ -60,3 +60,6 @@ rank_bm25
 numpy
 tiktoken
 tabulate
+
+# Audit logging (async MongoDB)
+motor>=3.7

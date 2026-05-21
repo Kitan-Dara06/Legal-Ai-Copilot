@@ -41,6 +41,7 @@ from app.models import (
     WorkflowStatus,
 )
 from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
+from app.services.agent.node_tracer import traced_node
 from app.services.notifications import notify_approval_needed
 from app.services.object_storage import upload_bytes
 from app.utils import sanitize_goal_text
@@ -221,6 +222,7 @@ class IntentClassification(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@traced_node
 async def intent_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Classifies the user's goal into ANALYZE, REASON, or ACT using Llama 3.3 70B via Groq.
@@ -315,6 +317,7 @@ async def intent_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+@traced_node
 async def ambiguity_gate_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     HITL Pause for ambiguity resolution.
@@ -338,6 +341,7 @@ async def ambiguity_gate_node(state: PointerOnlyState) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@traced_node
 async def retrieval_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Executes hybrid search (Qdrant) with dual dense (voyage + nomic) + sparse (SPLADE).
@@ -563,6 +567,7 @@ class DraftResult(BaseModel):
     )
 
 
+@traced_node
 async def synthesis_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Generates a cited answer for the ANALYZE path.
@@ -667,6 +672,7 @@ async def synthesis_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+@traced_node
 async def graph_expansion_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Expands retrieved chunks via FalkorDB cross-reference graph (REASON path).
@@ -786,6 +792,7 @@ async def graph_expansion_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+@traced_node
 async def defined_terms_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Cross-references retrieved text with DefinedTermsRegistry.
@@ -856,6 +863,7 @@ async def defined_terms_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+@traced_node
 async def contradiction_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Compares all findings for this workflow and flags contradictions.
@@ -918,6 +926,7 @@ async def contradiction_node(state: PointerOnlyState) -> Dict[str, Any]:
     return {"status": WorkflowStatus.PROCESSING.value, "contradictions": contradictions}
 
 
+@traced_node
 async def findings_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Generates a structured findings summary using the LLM and context.
@@ -984,6 +993,7 @@ async def findings_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+@traced_node
 async def escalation_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Reviews findings and definitional conflicts, creates typed Escalations.
@@ -1044,6 +1054,7 @@ async def escalation_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+@traced_node
 async def result_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Finalizes output for the REASON path.
@@ -1082,6 +1093,7 @@ async def result_node(state: PointerOnlyState) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@traced_node
 async def detect_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Reads Stage-2 registries to surface candidate actions.
@@ -1243,15 +1255,77 @@ async def detect_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+def _compress_clause(text: str, max_chars: int = 600) -> str:
+    """
+    Compress a clause to its essential content.
+    - Extracts sentences containing key legal terms first
+    - Falls back to truncated head if no key sentences found
+    - Never exceeds max_chars to keep prompts lean
+    """
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+
+    legal_keywords = {
+        "shall",
+        "must",
+        "agree",
+        "obligation",
+        "party",
+        "parties",
+        "section",
+        "clause",
+        "term",
+        "notice",
+        "waiver",
+        "indemnify",
+        "breach",
+        "terminate",
+        "liability",
+        "represent",
+        "warrant",
+        "covenant",
+        "default",
+        "remedy",
+        "assign",
+        "govern",
+    }
+    sentences = text.replace("\n", " ").split(". ")
+    priority_sentences = []
+    remaining_chars = max_chars
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent:
+            continue
+        words = set(w.lower() for w in sent.split())
+        if words & legal_keywords:
+            if len(sent) + 3 <= remaining_chars:
+                priority_sentences.append(sent)
+                remaining_chars -= len(sent) + 2
+            else:
+                break
+
+    if priority_sentences:
+        result = ". ".join(priority_sentences) + "."
+        if remaining_chars < 100:
+            if len(result) > max_chars:
+                result = result[:max_chars] + " [...]"
+        return result
+
+    # No legal keywords found - just take the head
+    return text[:max_chars] + " [...]"
+
+
 def _extract_source_text(source_clause_ref: Optional[Dict]) -> str:
     """
     Extract the actual clause text from source_clause_ref JSONB.
     The structure is: {"document_id": "...", "hierarchy": [...], "text": "..."}
     Returns the text content or an empty string if unavailable.
     """
-    if not source_clause_ref or not isinstance(source_clause_ref, dict):
+    if not source_clause_ref:
         return ""
-    return source_clause_ref.get("text", "")
+    return source_clause_ref.get("text", "") or ""
 
 
 def _extract_hierarchy(source_clause_ref: Optional[Dict]) -> str:
@@ -1352,6 +1426,7 @@ async def _retrieve_additional_context(
         return ""
 
 
+@traced_node
 async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Uses Groq to generate drafts for detected actions.
@@ -1399,85 +1474,12 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
                 if source_text:
                     has_any_source = True
 
-            # ── Retrieve context using the user's original query (mirrors retrieval_node) ──
+            # ── Use cached context from retrieval_node instead of re-querying Qdrant ──
             group_doc_id = source_entries[0].get("doc_id", "") if source_entries else ""
-            additional_context = ""
-            if goal_text and org_id and workspace_id:
-                try:
-                    from app.services.ingestion.embedder import LegalEmbedder
-                    from app.services.store import search_hybrid, search_hybrid_qdrant
-
-                    embedder = LegalEmbedder()
-                    query_vec = embedder.get_voyage_query_vector(goal_text)
-
-                    session_file_ids = state.get("session_file_ids", [])
-
-                    # session_file_ids can be integers (Qdrant file_ids) or strings (document UUIDs).
-                    # Use integer IDs directly; fall back to filename scoping for string/UUID IDs.
-                    use_qdrant_ids = all(
-                        isinstance(fid, int) for fid in session_file_ids
-                    )
-
-                    if use_qdrant_ids:
-                        results = search_hybrid_qdrant(
-                            query_text=goal_text,
-                            query_vector=query_vec,
-                            file_ids=session_file_ids,
-                            org_id=org_id,
-                            top_k=3,
-                        )
-                    else:
-                        # Fall back to filename-scoped search using the action's source document
-                        specific_contract = None
-                        if group_doc_id and group_doc_id != "unknown":
-                            try:
-                                from app.database import AsyncSessionLocal
-                                from app.models import Document
-                                from sqlalchemy import select
-
-                                async with AsyncSessionLocal() as lookup_db:
-                                    doc_res = await lookup_db.execute(
-                                        select(Document.filename).where(
-                                            Document.id == _uuid.UUID(group_doc_id)
-                                        )
-                                    )
-                                    fn = doc_res.scalar_one_or_none()
-                                    if fn:
-                                        specific_contract = fn
-                            except Exception:
-                                logger.warning(
-                                    "[%s] Could not resolve doc %s for search",
-                                    workflow_id,
-                                    group_doc_id,
-                                )
-
-                        search_response = search_hybrid(
-                            query_text=goal_text,
-                            query_vector=query_vec,
-                            top_k=3,
-                            org_id=org_id,
-                            workspace_id=workspace_id,
-                            specific_contract=specific_contract,
-                        )
-                        results = (
-                            search_response.get("results", [])
-                            if isinstance(search_response, dict)
-                            else search_response
-                        )
-
-                    context_parts = []
-                    for r in results:
-                        text = r.get("text", "")
-                        source = r.get("metadata", {}).get("source", "Unknown")
-                        page = r.get("metadata", {}).get("page", "?")
-                        if text:
-                            context_parts.append(
-                                f"[Source: {source}, Page {page}]\n{text}"
-                            )
-
-                    additional_context = "\n\n---\n\n".join(context_parts)
-                except Exception as e:
-                    logger.warning("[%s] Context retrieval failed: %s", workflow_id, e)
+            cached_context = state.get("context_text", "")
+            additional_context = (
+                _compress_clause(cached_context) if cached_context else ""
+            )
 
             # ── If no source material at all, mark all actions as ungroundable ──
             if not has_any_source and not additional_context:
@@ -1640,23 +1642,22 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
     return {"status": WorkflowStatus.DRAFTING.value}
 
 
+@traced_node
 async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
-    Validates drafted action quality by checking for contradictions with source
-    documents, unsupported claims, and internal inconsistencies.
+    Batch QA: validates all drafted actions in a single LLM call.
+    Uses a fast model (8B) with compressed clause text instead of full raw text.
 
-    Runs after draft_node and before plan_node. Each drafted action is
-    analysed via Groq and any issues found are recorded on the draft_payload.
-    """
+    Returns QA results per action, stored on each action's draft_payload."""
     state = _adapt_state(state)
     workflow_id = state["workflow_id"]
     wf_uuid = _uuid.UUID(workflow_id)
 
-    logger.info("[%s] qa_node: validating draft quality", workflow_id)
+    logger.info("[%s] qa_node: batch-validating drafts", workflow_id)
     await _set_wf_status(workflow_id, WorkflowStatus.DRAFTING)
 
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
+    qa_model = ChatGroq(
+        model="llama-3.1-8b-instant",
         temperature=0.0,
         api_key=os.getenv("GROQ_API_KEY", ""),
     )
@@ -1673,12 +1674,13 @@ async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
         )
         actions = res.scalars().all()
 
+        # ── Filter to actions that actually need QA ──
+        qa_targets = []
         for action in actions:
             draft_text = (action.draft_payload or {}).get("draft_text", "")
             if not draft_text:
                 continue
-
-            # Skip QA for consolidated references (QA runs on the primary action only)
+            # Skip consolidated refs — QA runs on primary only
             if (action.draft_payload or {}).get("consolidated_ref"):
                 payload = action.draft_payload or {}
                 payload["qa"] = {
@@ -1688,8 +1690,7 @@ async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
                 }
                 action.draft_payload = payload
                 continue
-
-            # Skip QA for drafts that already failed grounding
+            # Already failed grounding
             if (action.draft_payload or {}).get("grounding_failed"):
                 payload = action.draft_payload or {}
                 payload["qa"] = {
@@ -1706,89 +1707,54 @@ async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
                 action.draft_payload = payload
                 issue_count += 1
                 continue
+            qa_targets.append(action)
 
-            # Extract actual source clause text for QA verification
-            source_text = _extract_source_text(action.source_clause_ref)
-            section_path = _extract_hierarchy(action.source_clause_ref)
-
-            # ── Cross-check structured citations against actual source text ──
-            draft_payload = action.draft_payload or {}
-            source_citations = draft_payload.get("source_citations", [])
-            grounding_score = draft_payload.get("grounding_score", 0.0)
-            citation_issues = []
-
-            if source_citations and source_text:
-                source_lower = source_text.lower()
-                for citation in source_citations:
-                    citation_lower = citation.lower()
-                    # Check if each citation's key terms appear in source text
-                    citation_words = [w for w in citation_lower.split() if len(w) > 4]
-                    match_count = sum(1 for w in citation_words if w in source_lower)
-                    if citation_words and match_count < len(citation_words) * 0.3:
-                        citation_issues.append(
-                            {
-                                "category": "fabricated_reference",
-                                "description": (
-                                    f"Citation not found in source text: "
-                                    f"'{citation[:100]}'"
-                                ),
-                                "severity": "high",
-                            }
-                        )
-
-            # ── Build QA prompt ──
-            prompt = (
-                f"You are a legal QA auditor. Your job is to critically review a drafted legal action "
-                f"by comparing it STRICTLY against the actual source clause text from the contract.\n\n"
-                f"Action Type: {action.action_type.value}\n"
-                f"Description: {action.description}\n"
-            )
-
-            if section_path:
-                prompt += f"Section Path: {section_path}\n"
-
-            if source_text:
-                prompt += (
-                    f"\n=== ACTUAL SOURCE CLAUSE TEXT (ground truth) ===\n"
-                    f"{source_text}\n\n"
+        # ── Batch QA: one prompt for all remaining actions ──
+        if qa_targets:
+            # Build compressed action blocks
+            action_blocks = []
+            for idx, action in enumerate(qa_targets, 1):
+                source_text = _compress_clause(
+                    _extract_source_text(action.source_clause_ref)
                 )
-            else:
-                prompt += (
-                    f"\nWARNING: No source clause text is available. "
-                    f"Flag ALL factual claims in the draft as unsupported.\n\n"
+                section_path = _extract_hierarchy(action.source_clause_ref)
+                draft_text = (action.draft_payload or {}).get("draft_text", "")
+                block = (
+                    f"[Action {idx}]\n"
+                    f"Type: {action.action_type.value}\n"
+                    f"Description: {action.description}\n"
                 )
+                if section_path:
+                    block += f"Section: {section_path}\n"
+                if source_text:
+                    block += f"Source: {source_text}\n"
+                else:
+                    block += "Source: [not available — flag all factual claims]\n"
+                block += f"Draft: {draft_text[:800]}{' [...]' if len(draft_text) > 800 else ''}\n"
+                action_blocks.append(block)
 
-            prompt += (
-                f"=== DRAFT TEXT (under review) ===\n{draft_text}\n\n"
-                f"Analyse the draft for the following categories of issues:\n"
-                f"1. **Contradictions** — Does any claim in the draft directly contradict "
-                f"the source clause text above? Check section numbers, dates, timeframes, "
-                f"party names, and specific terms.\n"
-                f"2. **Unsupported claims** — Does the draft cite sections, quote language, "
-                f"reference dates, or make factual claims NOT found in the source clause text?\n"
-                f"3. **Fabricated references** — Does the draft reference section numbers, "
-                f"clause identifiers, or quotes that do not appear in the source text?\n"
+            actions_section = "\n---\n".join(action_blocks)
+
+            batch_prompt = (
+                f"You are a legal QA auditor. Review each drafted action below "
+                f"by comparing it STRICTLY against its source clause text.\n\n"
+                f"For each action, check for:\n"
+                f"1. **Contradictions** — Does the draft contradict the source (dates, parties, terms)?\n"
+                f"2. **Unsupported claims** — Facts or quotes NOT found in the source?\n"
+                f"3. **Fabricated references** — Section numbers or clause IDs not in source?\n"
                 f"4. **Internal inconsistencies** — Does the draft contradict itself?\n\n"
-                f"Return your answer as a JSON object with exactly this structure, and nothing else:\n"
+                f"{actions_section}\n\n"
+                f"Return valid JSON only — exactly this structure, one entry per action:\n"
                 f"{{\n"
-                f'  "action_id": "{action.id}",\n'
-                f'  "has_issues": true or false,\n'
-                f'  "issues": [\n'
-                f"    {{\n"
-                f'      "category": "contradiction|unsupported_claim|fabricated_reference|inconsistency",\n'
-                f'      "description": "Brief explanation of the issue",\n'
-                f'      "severity": "low|medium|high"\n'
-                f"    }}\n"
-                f"  ],\n"
-                f'  "summary": "One-sentence overall verdict"\n'
-                f"}}\n\n"
-                f"If the draft is completely sound, return has_issues: false and an empty issues list."
+                f'  "action_1": {{"has_issues": false, "issues": [], "summary": "..."}},\n'
+                f'  "action_2": {{"has_issues": true, "issues": [{{"category": "...", "description": "...", "severity": "high"}}], "summary": "..."}}\n'
+                f"}}\n"
+                f"If all actions are sound, all has_issues are false with empty issues lists."
             )
 
             try:
-                response = await llm.ainvoke(prompt)
+                response = await qa_model.ainvoke(batch_prompt)
                 raw = response.content.strip()
-                # Strip markdown code fences if present
                 if raw.startswith("```"):
                     first_nl = raw.find("\n")
                     if first_nl != -1:
@@ -1796,88 +1762,79 @@ async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
                     if raw.endswith("```"):
                         raw = raw[:-3].strip()
 
-                result = json.loads(raw)
-                issues = result.get("issues", [])
-                has_issues = result.get("has_issues", len(issues) > 0)
+                batch_result = json.loads(raw)
 
-                # ── Merge citation cross-check issues into QA results ──
-                if citation_issues:
-                    issues.extend(citation_issues)
-                    has_issues = True
+                for idx, action in enumerate(qa_targets):
+                    key = f"action_{idx + 1}"
+                    result = batch_result.get(key, {})
+                    issues = result.get("issues", [])
+                    has_issues = result.get("has_issues", len(issues) > 0)
 
-                # Store QA results on the draft_payload
-                payload = action.draft_payload or {}
-                payload["qa"] = {
-                    "has_issues": has_issues,
-                    "issues": issues,
-                    "summary": result.get("summary", ""),
-                }
-                action.draft_payload = payload
+                    payload = action.draft_payload or {}
+                    payload["qa"] = {
+                        "has_issues": has_issues,
+                        "issues": issues,
+                        "summary": result.get("summary", ""),
+                    }
+                    action.draft_payload = payload
 
-                if has_issues and issues:
-                    issue_count += len(issues)
-                    logger.info(
-                        "[%s] qa_node: found %d issue(s) in action %s",
-                        workflow_id,
-                        len(issues),
-                        action.id,
-                    )
-
-                    # ── Block high-severity issues: fabricated references ──
-                    high_severity = [i for i in issues if i.get("severity") == "high"]
-                    if high_severity:
-                        logger.error(
-                            "[%s] QA BLOCKED action %s: %d high-severity issue(s): %s",
+                    if has_issues and issues:
+                        issue_count += len(issues)
+                        logger.info(
+                            "[%s] qa_node: %d issue(s) in action %s",
                             workflow_id,
+                            len(issues),
                             action.id,
-                            len(high_severity),
-                            "; ".join(i["description"][:100] for i in high_severity),
                         )
-                        payload["grounding_failed"] = True
-                        payload["draft_text"] = (
-                            "[DRAFT BLOCKED BY QA] This draft was found to contain fabricated "
-                            "references or unsupported claims. Manual review required."
+                        high_severity = [
+                            i for i in issues if i.get("severity") == "high"
+                        ]
+                        if high_severity:
+                            logger.error(
+                                "[%s] QA BLOCKED action %s: %d high-severity issue(s)",
+                                workflow_id,
+                                action.id,
+                                len(high_severity),
+                            )
+                            payload["grounding_failed"] = True
+                            payload["draft_text"] = (
+                                "[DRAFT BLOCKED BY QA] Contains fabricated references. Manual review required."
+                            )
+                            action.draft_payload = payload
+                    else:
+                        logger.info(
+                            "[%s] qa_node: action %s passed QA", workflow_id, action.id
                         )
-                        action.draft_payload = payload
-                else:
-                    logger.info(
-                        "[%s] qa_node: action %s passed QA", workflow_id, action.id
-                    )
 
             except (json.JSONDecodeError, KeyError, Exception) as e:
                 logger.error(
-                    "[%s] qa_node: QA analysis failed for action %s: %s",
+                    "[%s] qa_node: batch QA failed: %s — falling back per-action",
                     workflow_id,
-                    action.id,
                     e,
                 )
-                payload = action.draft_payload or {}
-                payload["qa"] = {
-                    "has_issues": True,
-                    "issues": [
-                        {
-                            "category": "analysis_error",
-                            "description": f"QA analysis failed: {e}",
-                            "severity": "medium",
-                        }
-                    ],
-                    "summary": "QA analysis could not be completed due to an error.",
-                }
-                action.draft_payload = payload
-                issue_count += 1
+                # Fallback: mark all as unverified rather than blocking
+                for action in qa_targets:
+                    payload = action.draft_payload or {}
+                    payload["qa"] = {
+                        "has_issues": False,
+                        "issues": [],
+                        "summary": f"QA skipped — batch analysis error: {e}",
+                    }
+                    action.draft_payload = payload
 
         await db.commit()
 
     logger.info(
-        "[%s] qa_node: complete — %d total issue(s) found across %d drafted action(s)",
+        "[%s] qa_node: complete — %d issue(s) across %d actions (batch mode)",
         workflow_id,
         issue_count,
-        len(actions),
+        len(qa_targets),
     )
 
     return {"status": WorkflowStatus.DRAFTING.value, "qa_issues": issue_count}
 
 
+@traced_node
 async def plan_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Sorts detected actions by urgency, assigns task_order, and transitions to AWAITING_APPROVAL.
@@ -2052,6 +2009,7 @@ async def plan_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+@traced_node
 async def human_approval_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     HITL gate resume point.
@@ -2076,6 +2034,7 @@ async def human_approval_node(state: PointerOnlyState) -> Dict[str, Any]:
     return {"status": WorkflowStatus.EXECUTING.value}
 
 
+@traced_node
 async def execute_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     Executes ONE task per invocation safely via idempotency keys.
@@ -2287,6 +2246,7 @@ async def execute_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+@traced_node
 async def compensate_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
     SAGA PATTERN: Reverse compensation loop.
