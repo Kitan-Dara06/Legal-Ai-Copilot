@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { getWorkspace, createWorkspaceSession } from "@/lib/api";
 import { createClient } from "@/lib/supabase/client";
 import { uploadDocument } from "@/lib/api";
@@ -24,6 +24,8 @@ const STATUS_PROGRESS: Record<string, number> = {
 
 export default function WorkspaceDetailPage() {
   const params = useParams();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const workspaceId = params.id as string;
 
   const [token, setToken] = useState<string | null>(null);
@@ -61,6 +63,16 @@ export default function WorkspaceDetailPage() {
       }
     })();
   }, []);
+
+  // Restore in-flight goal from URL on page load / refresh
+  useEffect(() => {
+    const urlGoalId = searchParams.get("goalId");
+    if (urlGoalId && !goalId) {
+      setGoalId(urlGoalId);
+      setProcessing(true);
+      setWorkflowStatus("PROCESSING");
+    }
+  }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadWorkspace = useCallback(() => {
     if (!token || !workspaceId) return;
@@ -104,6 +116,8 @@ export default function WorkspaceDetailPage() {
           clearInterval(interval);
           setProcessing(false);
           loadWorkspace();
+          // Clear goalId from URL — workflow is done
+          router.replace(`/workspaces/${workspaceId}`, { scroll: false });
         }
       } catch {
         clearInterval(interval);
@@ -168,6 +182,8 @@ export default function WorkspaceDetailPage() {
 
       if (res.goal_id) {
         setGoalId(res.goal_id);
+        // Persist goalId in URL so page refresh resumes polling
+        router.replace(`/workspaces/${workspaceId}?goalId=${res.goal_id}`, { scroll: false });
       }
 
       if (res.primary_intent && res.intent_confidence !== undefined) {
