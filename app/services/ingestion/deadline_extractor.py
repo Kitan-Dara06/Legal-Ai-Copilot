@@ -222,7 +222,12 @@ def _obligations_conflict(desc_a: str, date_a: str, desc_b: str, date_b: str) ->
 
 class DeadlineExtractor:
     def __init__(self):
-        self.client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+        self.client = AsyncGroq(
+            api_key=os.environ.get("GROQ_API_KEY"),
+            default_headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+        )
         self.model = "llama-3.3-70b-versatile"
 
     async def _extract_execution_date(

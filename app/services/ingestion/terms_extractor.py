@@ -31,7 +31,12 @@ from app.tasks import is_definition_chunk
 
 class DefinedTermExtractor:
     def __init__(self):
-        self.client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+        self.client = AsyncGroq(
+            api_key=os.environ.get("GROQ_API_KEY"),
+            default_headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+        )
         self.model = "llama-3.3-70b-versatile"
 
     async def extract_and_store(
