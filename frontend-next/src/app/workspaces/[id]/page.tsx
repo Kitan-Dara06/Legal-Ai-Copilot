@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { Suspense, useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { getWorkspace, createWorkspaceSession } from "@/lib/api";
 import { createClient } from "@/lib/supabase/client";
 import { uploadDocument } from "@/lib/api";
@@ -15,6 +16,8 @@ import { AnalyzeResult } from "@/components/workspace/AnalyzeResult";
 import { ReasonResult } from "@/components/workspace/ReasonResult";
 import { ActResult } from "@/components/workspace/ActResult";
 
+// ── Status helpers ────────────────────────────────────────────────────────────
+
 const STATUS_PROGRESS: Record<string, number> = {
   PENDING: 0.2,
   PROCESSING: 0.6,
@@ -22,36 +25,64 @@ const STATUS_PROGRESS: Record<string, number> = {
   FAILED: 0.0,
 };
 
-export default function WorkspaceDetailPage() {
+const TERMINAL_STATUSES = ["COMPLETED", "FAILED", "CANCELLED", "ESCALATED"];
+
+// Polling backoff: first 15 polls (30s) at 2s, then settle at 10s
+function getPollingInterval(pollCount: number): number {
+  return pollCount < 15 ? 2000 : 10000;
+}
+
+// ── Main content (uses useSearchParams — must be inside Suspense) ─────────────
+
+function WorkspaceDetailContent() {
   const params = useParams();
   const router = useRouter();
   const searchParams = useSearchParams();
   const workspaceId = params.id as string;
 
+  // Auth
   const [token, setToken] = useState<string | null>(null);
   const [orgSlug, setOrgSlug] = useState<string | null>(null);
-  const [workspace, setWorkspace] = useState<WorkspaceDetailResponse | null>(
-    null,
-  );
+
+  // Workspace
+  const [workspace, setWorkspace] = useState<WorkspaceDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+
+  // Goal input
   const [goalText, setGoalText] = useState("");
   const [goalCharCount, setGoalCharCount] = useState(0);
   const [processing, setProcessing] = useState(false);
+
+  // Workflow tracking — both IDs persisted in URL
   const [workflowId, setWorkflowId] = useState<string | null>(null);
   const [workflowStatus, setWorkflowStatus] = useState<string | null>(null);
   const [goalId, setGoalId] = useState<string | null>(null);
 
-  // Ambiguity gate state
+  // Polling state
+  const pollCountRef = useRef(0);
+  const errorCountRef = useRef(0);
+
+  // Ambiguity gate
   const [showAmbiguity, setShowAmbiguity] = useState(false);
   const [detectedIntent, setDetectedIntent] = useState<string>("");
   const [intentConfidence, setIntentConfidence] = useState(0);
 
-  // Result state
+  // Results
   const [analyzeResult, setAnalyzeResult] = useState<any>(null);
   const [reasonResult, setReasonResult] = useState<any>(null);
   const [actResult, setActResult] = useState<any>(null);
+
+  // Error toast
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 5000);
+  };
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     void (async () => {
@@ -64,15 +95,24 @@ export default function WorkspaceDetailPage() {
     })();
   }, []);
 
-  // Restore in-flight goal from URL on page load / refresh
+  // ── URL restoration on refresh ────────────────────────────────────────────
+  // Both goalId and workflowId are stored in URL so polling + ACT panel survive refresh
+
   useEffect(() => {
     const urlGoalId = searchParams.get("goalId");
+    const urlWorkflowId = searchParams.get("workflowId");
     if (urlGoalId && !goalId) {
       setGoalId(urlGoalId);
       setProcessing(true);
       setWorkflowStatus("PROCESSING");
+      pollCountRef.current = 0;
+    }
+    if (urlWorkflowId && !workflowId) {
+      setWorkflowId(urlWorkflowId);
     }
   }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Workspace loading ─────────────────────────────────────────────────────
 
   const loadWorkspace = useCallback(() => {
     if (!token || !workspaceId) return;
@@ -87,21 +127,24 @@ export default function WorkspaceDetailPage() {
     loadWorkspace();
   }, [loadWorkspace]);
 
+  // ── Polling with backoff + retry ──────────────────────────────────────────
+
   useEffect(() => {
     if (!goalId || !token) return;
-    const interval = setInterval(async () => {
+
+    const tick = async () => {
       try {
-        const res = await getGoalStatus(
-          token,
-          workspaceId,
-          goalId,
-          orgSlug || undefined,
-        );
+        const res = await getGoalStatus(token, workspaceId, goalId, orgSlug || undefined);
+        errorCountRef.current = 0; // reset error streak on success
+        pollCountRef.current += 1;
+
         setWorkflowStatus(res.status);
 
+        // Fetch ACT actions when workflow is awaiting approval
         const workflows = (res as any).workflows as any[] | undefined;
         if (res.status === "AWAITING_APPROVAL" && workflows && workflows.length > 0) {
           const wfId = workflows[0].id;
+          if (wfId !== workflowId) setWorkflowId(wfId);
           try {
             const actData = await getWorkflowActions(token, wfId, orgSlug || undefined);
             setActResult({ actions: actData.actions, workflow_id: wfId });
@@ -110,22 +153,46 @@ export default function WorkspaceDetailPage() {
           }
         }
 
-        // Stop polling on any terminal status
-        const terminalStatuses = ["COMPLETED", "FAILED", "CANCELLED", "ESCALATED"];
-        if (terminalStatuses.includes(res.status)) {
-          clearInterval(interval);
+        // Terminal: stop polling, clear URL
+        if (TERMINAL_STATUSES.includes(res.status)) {
+          clearInterval(intervalRef.current!);
           setProcessing(false);
           loadWorkspace();
-          // Clear goalId from URL — workflow is done
           router.replace(`/workspaces/${workspaceId}`, { scroll: false });
         }
       } catch {
-        clearInterval(interval);
-        setProcessing(false);
+        errorCountRef.current += 1;
+        // Allow up to 3 consecutive network errors before giving up
+        if (errorCountRef.current >= 3) {
+          clearInterval(intervalRef.current!);
+          setProcessing(false);
+          showToast("Lost connection to server. Refresh to resume.");
+        }
       }
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [goalId, token, workspaceId, orgSlug, loadWorkspace]);
+    };
+
+    // Dynamic interval: start fast, slow down after 30s
+    const intervalRef = { current: null as ReturnType<typeof setInterval> | null };
+    const schedule = () => {
+      intervalRef.current = setInterval(tick, getPollingInterval(pollCountRef.current));
+    };
+    schedule();
+
+    // Re-schedule when poll count crosses the backoff threshold
+    const backoffWatcher = setInterval(() => {
+      if (pollCountRef.current === 15) {
+        clearInterval(intervalRef.current!);
+        schedule();
+      }
+    }, 1000);
+
+    return () => {
+      clearInterval(intervalRef.current!);
+      clearInterval(backoffWatcher);
+    };
+  }, [goalId, token, workspaceId, orgSlug, loadWorkspace]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -137,6 +204,7 @@ export default function WorkspaceDetailPage() {
       }
       loadWorkspace();
     } catch (err) {
+      showToast("Upload failed. Please try again.");
       console.error("Upload failed:", err);
     } finally {
       setUploading(false);
@@ -157,6 +225,7 @@ export default function WorkspaceDetailPage() {
       );
       setSessionId(res.session_id);
     } catch (err) {
+      showToast("Session creation failed.");
       console.error("Session creation failed:", err);
     }
   };
@@ -170,6 +239,8 @@ export default function WorkspaceDetailPage() {
     setWorkflowId(null);
     setWorkflowStatus(null);
     setGoalId(null);
+    pollCountRef.current = 0;
+    errorCountRef.current = 0;
 
     try {
       const res = await createGoal(
@@ -180,10 +251,19 @@ export default function WorkspaceDetailPage() {
         orgSlug || undefined,
       );
 
+      // Build URL params — store both IDs for refresh resilience
+      const params = new URLSearchParams();
       if (res.goal_id) {
         setGoalId(res.goal_id);
-        // Persist goalId in URL so page refresh resumes polling
-        router.replace(`/workspaces/${workspaceId}?goalId=${res.goal_id}`, { scroll: false });
+        params.set("goalId", res.goal_id);
+      }
+      if (res.workflow_id) {
+        setWorkflowId(res.workflow_id);
+        setWorkflowStatus(res.status || "PROCESSING");
+        params.set("workflowId", res.workflow_id);
+      }
+      if (params.toString()) {
+        router.replace(`/workspaces/${workspaceId}?${params.toString()}`, { scroll: false });
       }
 
       if (res.primary_intent && res.intent_confidence !== undefined) {
@@ -192,11 +272,6 @@ export default function WorkspaceDetailPage() {
           setIntentConfidence(res.intent_confidence);
           setShowAmbiguity(true);
         }
-      }
-
-      if (res.workflow_id) {
-        setWorkflowId(res.workflow_id);
-        setWorkflowStatus(res.status || "PROCESSING");
       }
 
       if (res.answer) {
@@ -210,6 +285,7 @@ export default function WorkspaceDetailPage() {
 
       setGoalText("");
     } catch (err) {
+      showToast("Failed to submit goal. Please try again.");
       console.error("Goal creation failed:", err);
       setProcessing(false);
     }
@@ -219,6 +295,8 @@ export default function WorkspaceDetailPage() {
     setShowAmbiguity(false);
     setWorkflowStatus("EXECUTING");
   };
+
+  // ── Status helpers ────────────────────────────────────────────────────────
 
   const statusVariant = (
     status: string,
@@ -237,11 +315,17 @@ export default function WorkspaceDetailPage() {
     }
   };
 
+  // ── Loading & error states ────────────────────────────────────────────────
+
   if (loading) {
     return (
       <div className="max-w-6xl mx-auto px-4 py-8">
-        <div className="text-slate-400 text-center py-12">
-          Loading workspace...
+        {/* Skeleton loader */}
+        <div className="animate-pulse space-y-4">
+          <div className="h-8 bg-slate-800 rounded w-1/3" />
+          <div className="h-4 bg-slate-800 rounded w-1/4" />
+          <div className="h-48 bg-slate-800 rounded mt-6" />
+          <div className="h-32 bg-slate-800 rounded" />
         </div>
       </div>
     );
@@ -250,17 +334,24 @@ export default function WorkspaceDetailPage() {
   if (!workspace) {
     return (
       <div className="max-w-6xl mx-auto px-4 py-8">
-        <div className="text-slate-400 text-center py-12">
-          Workspace not found
-        </div>
+        <div className="text-slate-400 text-center py-12">Workspace not found</div>
       </div>
     );
   }
 
   const readyDocs = workspace.documents.filter((d) => d.status === "READY");
 
+  // ── Render ────────────────────────────────────────────────────────────────
+
   return (
     <div className="max-w-6xl mx-auto px-4 py-8">
+      {/* Global toast */}
+      {toastMessage && (
+        <div className="fixed top-4 right-4 z-50 bg-red-900/90 border border-red-500/40 text-red-200 text-sm px-4 py-3 rounded-lg shadow-lg max-w-sm">
+          {toastMessage}
+        </div>
+      )}
+
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-white">{workspace.name}</h1>
@@ -277,17 +368,36 @@ export default function WorkspaceDetailPage() {
         </div>
       </div>
 
+      {/* AWAITING_APPROVAL banner — prominent, actionable */}
+      {workflowStatus === "AWAITING_APPROVAL" && (
+        <div className="mb-6 p-4 bg-amber-900/20 border border-amber-500/40 rounded-lg flex items-center justify-between">
+          <div>
+            <p className="text-amber-300 font-semibold text-sm">
+              ⚖️ Action requires your approval
+            </p>
+            <p className="text-amber-500/80 text-xs mt-0.5">
+              Lex has drafted a notice. Review and approve or reject it to continue.
+            </p>
+          </div>
+          <Link
+            href="/approvals"
+            className="flex-shrink-0 ml-4 px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black text-sm font-semibold rounded-lg transition-colors"
+          >
+            Go to Approvals →
+          </Link>
+        </div>
+      )}
+
       {/* Document Library */}
       <Card className="mb-6 p-4">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold text-white">Document Library</h2>
           <label className="cursor-pointer">
             <span
-              className={`inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors px-4 py-2 ${
-                uploading
+              className={`inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors px-4 py-2 ${uploading
                   ? "bg-slate-700 text-slate-400 cursor-not-allowed"
                   : "bg-accent-blue text-white hover:bg-accent-blue/90"
-              }`}
+                }`}
             >
               {uploading ? "Uploading..." : "Upload PDF"}
             </span>
@@ -327,9 +437,7 @@ export default function WorkspaceDetailPage() {
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <Badge variant={statusVariant(doc.status)}>
-                    {doc.status}
-                  </Badge>
+                  <Badge variant={statusVariant(doc.status)}>{doc.status}</Badge>
                   {doc.status === "FAILED" && doc.error && (
                     <span className="text-red-400 text-xs" title={doc.error}>
                       ⚠
@@ -374,15 +482,14 @@ export default function WorkspaceDetailPage() {
       {/* Goal Input */}
       {sessionId && (
         <Card className="mb-6 p-4">
-          <h2 className="text-lg font-semibold text-white mb-4">
-            What do you need?
-          </h2>
+          <h2 className="text-lg font-semibold text-white mb-4">What do you need?</h2>
           <div className="relative">
             <textarea
               className="w-full bg-slate-800 border border-slate-700 rounded-lg p-4 text-white placeholder-slate-500 resize-none focus:outline-none focus:border-blue-500"
               rows={3}
               placeholder="What do you need?"
               value={goalText}
+              disabled={processing}
               onChange={(e) => {
                 setGoalText(e.target.value);
                 setGoalCharCount(e.target.value.length);
@@ -394,24 +501,27 @@ export default function WorkspaceDetailPage() {
             </div>
           </div>
           <div className="flex justify-end mt-3">
-            <Button
-              onClick={handleSubmitGoal}
-              disabled={!goalText.trim() || processing}
-            >
+            <Button onClick={handleSubmitGoal} disabled={!goalText.trim() || processing}>
               {processing ? "Processing..." : "Submit"}
             </Button>
           </div>
         </Card>
       )}
 
-      {/* Workflow Status */}
+      {/* Workflow Status spinner — hide when awaiting approval (banner covers it) */}
       {workflowStatus &&
         workflowStatus !== "COMPLETED" &&
-        workflowStatus !== "FAILED" && (
+        workflowStatus !== "FAILED" &&
+        workflowStatus !== "AWAITING_APPROVAL" && (
           <Card className="mb-6 p-4">
             <div className="flex items-center gap-3">
               <div className="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full" />
               <span className="text-slate-300 text-sm">{workflowStatus}</span>
+              {pollCountRef.current >= 15 && (
+                <span className="text-slate-500 text-xs">
+                  (checking every 10s — this may take a few minutes)
+                </span>
+              )}
             </div>
           </Card>
         )}
@@ -433,11 +543,29 @@ export default function WorkspaceDetailPage() {
 
       {/* Act Result */}
       {actResult && (
-        <ActResult
-          actions={actResult.actions}
-          workflowId={actResult.workflow_id}
-        />
+        <ActResult actions={actResult.actions} workflowId={actResult.workflow_id} />
       )}
     </div>
+  );
+}
+
+// ── Page export — Suspense required for useSearchParams in Next.js 14 ─────────
+
+export default function WorkspaceDetailPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="max-w-6xl mx-auto px-4 py-8">
+          <div className="animate-pulse space-y-4">
+            <div className="h-8 bg-slate-800 rounded w-1/3" />
+            <div className="h-4 bg-slate-800 rounded w-1/4" />
+            <div className="h-48 bg-slate-800 rounded mt-6" />
+            <div className="h-32 bg-slate-800 rounded" />
+          </div>
+        </div>
+      }
+    >
+      <WorkspaceDetailContent />
+    </Suspense>
   );
 }

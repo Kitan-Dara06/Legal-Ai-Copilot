@@ -143,15 +143,19 @@ def init_worker_process(**kwargs):
         # repr(e) shows type even when str(e) is blank (e.g. TimeoutError)
         logger.error("Worker warmup failed (non-fatal): %s", repr(e))
 
-    # Fire-and-forget MongoDB audit init — NOT inside warmup timeout
-    # Use asyncio.run() instead of run_coroutine_threadsafe because the
-    # event loop thread doesn't survive Celery's os.fork()
+    # MongoDB audit init — scheduled on _worker_loop (same pattern as warmup above)
+    # Previously used asyncio.run() here but that creates an ephemeral loop:
+    # start_consumer() creates a task on it, loop closes, task is cancelled = no logs.
+    audit_future = asyncio.run_coroutine_threadsafe(
+        _init_audit_for_worker(), _worker_loop
+    )
     try:
-        asyncio.run(_init_audit_for_worker())
-        logger.info("MongoDB audit init completed in worker fork.")
+        audit_future.result(timeout=10)
+        logger.info("MongoDB audit consumer running on worker.")
     except Exception as e:
         logger.warning(
-            "MongoDB audit init failed in worker fork: %s: %s", type(e).__name__, e
+            "MongoDB audit init failed in worker (non-fatal): %s: %s",
+            type(e).__name__, e
         )
 
 
