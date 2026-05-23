@@ -18,7 +18,12 @@ from app.services.store import (
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+groq_client = AsyncGroq(
+    api_key=os.getenv("GROQ_API_KEY"),
+    default_headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    },
+)
 
 
 async def search_tool(
