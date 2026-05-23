@@ -118,11 +118,15 @@ def get_worker_loop() -> asyncio.AbstractEventLoop:
 
 async def _init_audit_for_worker():
     """Initialize MongoDB + start audit consumer on the worker's event loop."""
-    from app.services.audit.client import init_audit_db
-    from app.services.audit.logger import start_consumer, stop_consumer
+    try:
+        from app.services.audit.client import init_audit_db
+        from app.services.audit.logger import start_consumer
 
-    await init_audit_db()
-    start_consumer()
+        await init_audit_db()
+        start_consumer()
+        logger.info("MongoDB audit initialized on worker.")
+    except Exception as e:
+        logger.warning("MongoDB audit init failed (non-fatal): %s", e)
 
 
 # ── Warmup and teardown (run on the persistent loop) ──────────────────────
@@ -130,7 +134,7 @@ async def _init_audit_for_worker():
 
 @worker_process_init.connect
 def init_worker_process(**kwargs):
-    """Warm up DB connections and audit logger when worker process starts."""
+    """Warm up DB connections when worker process starts."""
     future = asyncio.run_coroutine_threadsafe(_warmup(), _worker_loop)
     try:
         future.result(timeout=60)  # 60s — cold Supabase SSL handshake can take 20-40s
@@ -138,6 +142,17 @@ def init_worker_process(**kwargs):
     except Exception as e:
         # repr(e) shows type even when str(e) is blank (e.g. TimeoutError)
         logger.error("Worker warmup failed (non-fatal): %s", repr(e))
+
+    # Fire-and-forget MongoDB audit init — NOT inside warmup timeout
+    # Use asyncio.run() instead of run_coroutine_threadsafe because the
+    # event loop thread doesn't survive Celery's os.fork()
+    try:
+        asyncio.run(_init_audit_for_worker())
+        logger.info("MongoDB audit init completed in worker fork.")
+    except Exception as e:
+        logger.warning(
+            "MongoDB audit init failed in worker fork: %s: %s", type(e).__name__, e
+        )
 
 
 @worker_process_shutdown.connect
@@ -151,7 +166,7 @@ def shutdown_worker_process(**kwargs):
 
 
 async def _warmup():
-    """Initialize DB engine, checkpointer pool, and audit logger."""
+    """Initialize DB engine and checkpointer pool."""
     import sqlalchemy as sa
 
     from app.database import _get_engine
@@ -162,7 +177,6 @@ async def _warmup():
         await conn.execute(sa.text("SELECT 1"))
 
     await _ensure_pool()
-    await _init_audit_for_worker()
 
 
 async def _teardown():

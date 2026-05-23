@@ -179,11 +179,13 @@ def _get_valid_conn(pg_pool) -> tuple:
     """
     Get a connection from the pool and validate it is still alive.
     If stale (closed server-side), discard and retry once.
+    Resets transaction state after validation to prevent "cursor already closed".
     """
     conn = pg_pool.getconn()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
+        conn.rollback()  # clear lingering transaction from the ping
         return conn, pg_pool
     except Exception:
         # Connection is stale — discard and get a fresh one
@@ -191,6 +193,7 @@ def _get_valid_conn(pg_pool) -> tuple:
         conn = pg_pool.getconn()
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
+        conn.rollback()
         return conn, pg_pool
 
 
@@ -709,6 +712,9 @@ def deadline_scanner(self):
             )
             rows = cur.fetchall()
 
+        # Clear transaction state from read before starting write operations
+        conn.rollback()
+
         now = datetime.now(timezone.utc)
         overdue_ids: list[str] = []
         urgency_updates: list[tuple[float, str]] = []  # (new_score, id)
@@ -724,63 +730,54 @@ def deadline_scanner(self):
 
             urgency_updates.append((new_score, reg_id))
 
-        # ── Batch update: urgency_score (single round-trip, not N+1) ──
+        # ── Write operations: single cursor block ──
         if urgency_updates:
-            from psycopg2 import extras as pg_extras
-
             with conn.cursor() as cur:
-                pg_extras.execute_values(
-                    cur,
-                    """
-                    UPDATE deadline_registry AS d
-                    SET urgency_score = v.score
-                    FROM (VALUES %s) AS v(score, id)
-                    WHERE d.id::text = v.id
-                    """,
-                    [(score, str(rid)) for score, rid in urgency_updates],
-                )
+                for score, rid in urgency_updates:
+                    cur.execute(
+                        "UPDATE deadline_registry SET urgency_score = %s WHERE id::text = %s",
+                        (score, str(rid)),
+                    )
 
-            # ── Mark overdue deadlines ──
-            if overdue_ids:
+                # ── Mark overdue deadlines ──
+                if overdue_ids:
+                    cur.execute(
+                        """
+                        UPDATE deadline_registry
+                        SET status = 'OVERDUE'
+                        WHERE id = ANY(%s)
+                        """,
+                        (overdue_ids,),
+                    )
+                    logger.warning(
+                        "[deadline_scanner] Marked %d deadlines as OVERDUE",
+                        len(overdue_ids),
+                    )
+
+                # ── Push urgency to linked ACT actions (score >= 0.85) ──
                 cur.execute(
                     """
-                    UPDATE deadline_registry
-                    SET status = 'OVERDUE'
-                    WHERE id = ANY(%s)
-                    """,
-                    (overdue_ids,),
+                    SELECT a.id, a.workflow_id, a.status, d.id as deadline_id,
+                           d.obligation_description, d.urgency_score
+                    FROM actions a
+                    JOIN deadline_registry d ON a.deadline_id = d.id
+                    WHERE d.urgency_score >= 0.85
+                      AND a.status IN ('DETECTED', 'CONFIRMED', 'AWAITING_APPROVAL')
+                    """
                 )
-                logger.warning(
-                    "[deadline_scanner] Marked %d deadlines as OVERDUE",
-                    len(overdue_ids),
-                )
+                linked_actions = cur.fetchall()
 
-            # ── Push urgency to linked ACT actions (score >= 0.85) ──
-            cur.execute(
-                """
-                SELECT a.id, a.workflow_id, a.status, d.id as deadline_id,
-                       d.obligation_description, d.urgency_score
-                FROM actions a
-                JOIN deadline_registry d ON a.deadline_id = d.id
-                WHERE d.urgency_score >= 0.85
-                  AND a.status IN ('DETECTED', 'CONFIRMED', 'AWAITING_APPROVAL')
-                """
-            )
-            linked_actions = cur.fetchall()
+                notified_count = 0
+                for action_row in linked_actions:
+                    action_id, wf_id, action_status, dl_id, desc, urgency = action_row
+                    cur.execute(
+                        "UPDATE actions SET urgency_score = %s, updated_at = NOW() WHERE id = %s",
+                        (urgency, action_id),
+                    )
 
-            notified_count = 0
-            for action_row in linked_actions:
-                action_id, wf_id, action_status, dl_id, desc, urgency = action_row
-                # Push urgency score to the action
-                cur.execute(
-                    "UPDATE actions SET urgency_score = %s, updated_at = NOW() WHERE id = %s",
-                    (urgency, action_id),
-                )
-
-                # Re-notify approver if awaiting approval and urgency >= 0.85
-                if action_status == "AWAITING_APPROVAL" and urgency >= 0.85:
-                    _notify_approver_urgency(dl_id, desc, urgency)
-                    notified_count += 1
+                    if action_status == "AWAITING_APPROVAL" and urgency >= 0.85:
+                        _notify_approver_urgency(dl_id, desc, urgency)
+                        notified_count += 1
 
         conn.commit()
 
@@ -1089,8 +1086,8 @@ def process_scanned_pdf(
     default_retry_delay=30,
     queue="default",
     acks_late=True,
-    soft_time_limit=900,  # 15 min — LangGraph agent can take long
-    time_limit=1200,  # 20 min hard cap
+    soft_time_limit=1200,  # 20 min (was 900) — LangGraph agent can take long
+    time_limit=1500,  # 25 min (was 1200) hard cap
 )
 def process_workflow(self, workflow_id: str, session_file_ids: list | None = None):
     """
@@ -1117,11 +1114,11 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
 
         correlation = CorrelationContext(
             workflow_id=workflow_id,
-            task_id=self.request.id if hasattr(self, 'request') else None,
+            task_id=self.request.id if hasattr(self, "request") else None,
         )
         emit.workflow_started(
             workflow_id=workflow_id,
-            intent='',
+            intent="",
             correlation=correlation,
         )
     except Exception:
@@ -1224,6 +1221,7 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
         try:
             from app.services.audit.events import emit
             from app.services.audit.schemas import CorrelationContext
+
             emit.workflow_completed(
                 workflow_id=workflow_id,
                 duration_ms=0,
@@ -1237,6 +1235,7 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
         try:
             from app.services.audit.events import emit
             from app.services.audit.schemas import CorrelationContext
+
             emit.workflow_failed(
                 workflow_id=workflow_id,
                 error=str(e),

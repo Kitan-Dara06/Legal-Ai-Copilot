@@ -66,7 +66,6 @@ def traced_node(func):
 
                 elapsed = time.monotonic() - t0
                 span.set_tag("duration_ms", int(elapsed * 1000))
-                # Attach intent tag if the node has set it
                 intent = state.get("primary_intent", "")
                 if intent:
                     span.set_tag("intent", intent)
@@ -77,6 +76,17 @@ def traced_node(func):
                     node_name,
                     elapsed,
                 )
+
+                # Log node success to MongoDB (BEFORE return!)
+                try:
+                    AuditLogger.node_exit(
+                        node_name,
+                        duration_ms=elapsed * 1000,
+                        correlation=correlation,
+                    )
+                except Exception:
+                    pass
+
                 return result
 
             except Exception as e:
@@ -105,15 +115,5 @@ def traced_node(func):
                     pass
 
                 raise
-
-        # Log node success to MongoDB
-        try:
-            AuditLogger.node_exit(
-                node_name,
-                duration_ms=(time.monotonic() - t0) * 1000,
-                correlation=correlation,
-            )
-        except Exception:
-            pass
 
     return wrapper
