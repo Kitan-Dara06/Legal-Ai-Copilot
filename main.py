@@ -207,13 +207,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("[startup] Workflow recovery check failed: %s", e)
 
-    # OpenTelemetry instrumentation (safe no-op if not configured)
-    try:
-        from app.telemetry import setup_telemetry
 
-        setup_telemetry(app)
-    except Exception:
-        pass
 
     # ── MongoDB Audit Logging ────────────────────────────────────────────────
     try:

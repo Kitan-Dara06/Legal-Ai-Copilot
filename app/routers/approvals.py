@@ -33,6 +33,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_admin_auth_context, get_org_id_unified, AuthContext
+from app.services.audit.events import emit
+from app.services.audit.schemas import CorrelationContext
 from app.models import (
     Action,
     ApprovalRequest,
@@ -345,6 +347,16 @@ async def approve_via_token(
 
     new_status = final_state.get("status", WorkflowStatus.EXECUTING.value)
 
+    emit.workflow_completed(
+        workflow_id=str(workflow_id),
+        duration_ms=0,
+        intent="approval.approved",
+        correlation=CorrelationContext(
+            workflow_id=str(workflow_id),
+            user_id=str(actor_user_id) if actor_user_id else None,
+            org_id=str(org_id),
+        ),
+    )
     return {
         "workflow_id": str(workflow_id),
         "approval_id": str(approval.id),
@@ -446,6 +458,15 @@ async def reject_via_token(
             .values(status=WorkflowStatus.ESCALATED)
         )
         await db.commit()
+        emit.workflow_failed(
+            workflow_id=str(workflow_id),
+            error="approval.escalated — max revisions reached",
+            correlation=CorrelationContext(
+                workflow_id=str(workflow_id),
+                user_id=str(actor_user_id) if actor_user_id else None,
+                org_id=str(org_id),
+            ),
+        )
         return {
             "workflow_id": str(workflow_id),
             "approval_id": str(approval.id),
@@ -466,6 +487,15 @@ async def reject_via_token(
     )
     await db.commit()
 
+    emit.workflow_failed(
+        workflow_id=str(workflow_id),
+        error=f"approval.rejected — {req.reason[:120]}",
+        correlation=CorrelationContext(
+            workflow_id=str(workflow_id),
+            user_id=str(actor_user_id) if actor_user_id else None,
+            org_id=str(org_id),
+        ),
+    )
     return {
         "workflow_id": str(workflow_id),
         "approval_id": str(approval.id),
