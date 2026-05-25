@@ -41,17 +41,18 @@ def traced_node(func):
         logger.info("[%s] %s: enter", workflow_id, node_name)
 
         # Build correlation context for MongoDB audit
+        correlation = None
         try:
             from app.services.audit.logger import AuditLogger
             from app.services.audit.schemas import CorrelationContext
 
             correlation = CorrelationContext(
                 workflow_id=workflow_id,
-                trace_id=workflow_id,  # reuse workflow_id as trace_id for LangGraph
+                trace_id=workflow_id,
             )
             AuditLogger.node_enter(node_name, correlation=correlation)
-        except Exception:
-            pass  # audit failure is non-fatal
+        except Exception as e:
+            logger.debug("[%s] audit node_enter skipped: %s", workflow_id, e)
 
         with sentry_sdk.start_span(
             op="langgraph_node",
@@ -78,14 +79,15 @@ def traced_node(func):
                 )
 
                 # Log node success to MongoDB (BEFORE return!)
-                try:
-                    AuditLogger.node_exit(
-                        node_name,
-                        duration_ms=elapsed * 1000,
-                        correlation=correlation,
-                    )
-                except Exception:
-                    pass
+                if correlation:
+                    try:
+                        AuditLogger.node_exit(
+                            node_name,
+                            duration_ms=elapsed * 1000,
+                            correlation=correlation,
+                        )
+                    except Exception as e:
+                        logger.debug("[%s] audit node_exit skipped: %s", workflow_id, e)
 
                 return result
 
@@ -104,15 +106,18 @@ def traced_node(func):
                 )
 
                 # Log node failure to MongoDB
-                try:
-                    AuditLogger.node_exit(
-                        node_name,
-                        duration_ms=elapsed * 1000,
-                        correlation=correlation,
-                        error=str(e),
-                    )
-                except Exception:
-                    pass
+                if correlation:
+                    try:
+                        AuditLogger.node_exit(
+                            node_name,
+                            duration_ms=elapsed * 1000,
+                            correlation=correlation,
+                            error=str(e),
+                        )
+                    except Exception as ex:
+                        logger.debug(
+                            "[%s] audit node_exit (fail) skipped: %s", workflow_id, ex
+                        )
 
                 raise
 

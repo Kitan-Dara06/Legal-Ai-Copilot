@@ -731,6 +731,7 @@ def deadline_scanner(self):
             urgency_updates.append((new_score, reg_id))
 
         # ── Write operations: single cursor block ──
+        notified_count = 0
         if urgency_updates:
             with conn.cursor() as cur:
                 for score, rid in urgency_updates:
@@ -745,7 +746,7 @@ def deadline_scanner(self):
                         """
                         UPDATE deadline_registry
                         SET status = 'OVERDUE'
-                        WHERE id = ANY(%s)
+                        WHERE id::text = ANY(%s)
                         """,
                         (overdue_ids,),
                     )
@@ -1086,8 +1087,8 @@ def process_scanned_pdf(
     default_retry_delay=30,
     queue="default",
     acks_late=True,
-    soft_time_limit=1200,  # 20 min (was 900) — LangGraph agent can take long
-    time_limit=1500,  # 25 min (was 1200) hard cap
+    soft_time_limit=1800,  # 30 min (was 1200) — LangGraph agent can take long
+    time_limit=2100,  # 35 min (was 1500) hard cap
 )
 def process_workflow(self, workflow_id: str, session_file_ids: list | None = None):
     """

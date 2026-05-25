@@ -117,14 +117,12 @@ def get_worker_loop() -> asyncio.AbstractEventLoop:
 
 
 async def _init_audit_for_worker():
-    """Initialize MongoDB + start audit consumer on the worker's event loop."""
+    """Start the MongoDB audit consumer on a dedicated daemon thread."""
     try:
-        from app.services.audit.client import init_audit_db
         from app.services.audit.logger import start_consumer
 
-        await init_audit_db()
         start_consumer()
-        logger.info("MongoDB audit initialized on worker.")
+        logger.info("MongoDB audit consumer thread started.")
     except Exception as e:
         logger.warning("MongoDB audit init failed (non-fatal): %s", e)
 
@@ -143,20 +141,16 @@ def init_worker_process(**kwargs):
         # repr(e) shows type even when str(e) is blank (e.g. TimeoutError)
         logger.error("Worker warmup failed (non-fatal): %s", repr(e))
 
-    # MongoDB audit init — scheduled on _worker_loop (same pattern as warmup above)
-    # Previously used asyncio.run() here but that creates an ephemeral loop:
-    # start_consumer() creates a task on it, loop closes, task is cancelled = no logs.
-    audit_future = asyncio.run_coroutine_threadsafe(
-        _init_audit_for_worker(), _worker_loop
-    )
+    # MongoDB audit init — start_consumer() fires its own daemon thread
+    # with a dedicated event loop. This works synchronously (no asyncio needed
+    # because the _worker_loop thread doesn't survive os.fork()).
     try:
-        audit_future.result(timeout=10)
-        logger.info("MongoDB audit consumer running on worker.")
-    except Exception as e:
-        logger.warning(
-            "MongoDB audit init failed in worker (non-fatal): %s: %s",
-            type(e).__name__, e
-        )
+        from app.services.audit.logger import start_consumer
+
+        start_consumer()
+        logger.info("MongoDB audit consumer started.")
+    except Exception:
+        pass  # non-fatal
 
 
 @worker_process_shutdown.connect
@@ -187,11 +181,6 @@ async def _teardown():
     """Close connections gracefully."""
     from app.database import _engine
     from app.services.agent.checkpointer import _pool
-    from app.services.audit.client import close_audit_db
-    from app.services.audit.logger import stop_consumer
-
-    await stop_consumer()
-    await close_audit_db()
 
     if _pool is not None:
         await _pool.close()
