@@ -135,7 +135,7 @@ def init_worker_process(**kwargs):
     """Warm up DB connections when worker process starts."""
     future = asyncio.run_coroutine_threadsafe(_warmup(), _worker_loop)
     try:
-        future.result(timeout=60)  # 60s — cold Supabase SSL handshake can take 20-40s
+        future.result(timeout=120)  # 120s — cold Supabase SSL + checkpointer DDL can take 60-90s
         logger.info("Worker warmup complete (DB connections ready).")
     except Exception as e:
         # repr(e) shows type even when str(e) is blank (e.g. TimeoutError)
@@ -164,17 +164,29 @@ def shutdown_worker_process(**kwargs):
 
 
 async def _warmup():
-    """Initialize DB engine and checkpointer pool."""
+    """Initialize DB engine and pre-warm the checkpointer pool + tables.
+
+    Runs the full checkpointer setup (pool open + DDL migrations) so that
+    the first task finds _tables_created=True and skips straight to ainvoke
+    instead of blocking for minutes on a cold PostgreSQL connection.
+    """
     import sqlalchemy as sa
 
     from app.database import _get_engine
-    from app.services.agent.checkpointer import _ensure_pool
+    from app.services.agent.checkpointer import _ensure_pool, _setup_tables
 
+    # 1. Pre-warm the SQLAlchemy engine (FastAPI / general DB)
     engine = _get_engine()
     async with engine.connect() as conn:
         await conn.execute(sa.text("SELECT 1"))
+    logger.info("SQLAlchemy engine warmed.")
 
-    await _ensure_pool()
+    # 2. Pre-warm the checkpointer pool AND run table migrations
+    #    so _tables_created=True before the first task arrives.
+    pool = await _ensure_pool()
+    async with pool.connection(timeout=30) as conn:
+        await _setup_tables(conn)
+    logger.info("Checkpointer pool + tables ready.")
 
 
 async def _teardown():

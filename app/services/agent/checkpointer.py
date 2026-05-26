@@ -46,10 +46,16 @@ async def _ensure_pool() -> AsyncConnectionPool:
             conninfo=_get_dsn(),
             min_size=1,
             max_size=5,
-            kwargs={"autocommit": True, "prepare_threshold": 0},
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "connect_timeout": 10,  # each individual TCP connection attempt: 10s max
+            },
             open=False,
+            timeout=15,  # max wait to acquire a connection once pool is open
         )
-        await _pool.open()
+        await _pool.open(wait=True, timeout=30)  # 30s hard cap on pool initialization
+        logger.info("Checkpointer pool opened.")
 
         # MongoDB audit: log pool creation
         try:
@@ -118,7 +124,7 @@ async def get_checkpointer():
             app = graph.compile(checkpointer=checkpointer, ...)
     """
     pool = await _ensure_pool()
-    async with pool.connection() as conn:
+    async with pool.connection(timeout=30) as conn:  # 30s cap — fails fast if pool broken
         await _setup_tables(conn)
 
         # MongoDB audit: log connection acquisition
