@@ -1222,6 +1222,29 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
             final_state = await app.ainvoke(initial_state, config=config)
             return final_state
 
+    async def _run_graph_with_cancel_guard():
+        """
+        Wraps _run_graph() in asyncio.wait_for so the coroutine is CANCELLED
+        (not orphaned) when the task times out.
+
+        Without this: SoftTimeLimitExceeded fires on the Celery thread →
+        future.result() raises → task returns → BUT _run_graph() keeps running
+        on _worker_loop, blocking it permanently. The next task schedules a new
+        coroutine on the same loop, but single-threaded asyncio can't run it
+        while the orphaned coroutine is stuck. Both tasks timeout. Compounds.
+
+        With this: asyncio.TimeoutError fires at 840s (60s before soft limit),
+        which cancels _run_graph() cleanly via asyncio's CancelledError mechanism.
+        _worker_loop is free for the next task.
+        """
+        try:
+            return await asyncio.wait_for(_run_graph(), timeout=840)
+        except asyncio.TimeoutError:
+            log.error(
+                "[%s] _run_graph timed out after 840s — cancelled cleanly", workflow_id
+            )
+            raise RuntimeError("Graph execution timed out (840s) — cancelled")
+
     def _sync_mark_failed(wf_id: str) -> None:
         """Synchronous DB update — safe to call outside async context."""
         _pool = get_pg_pool()
@@ -1239,7 +1262,7 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
             _pool.putconn(_conn)
 
     try:
-        final_state = self.run_async(_run_graph())
+        final_state = self.run_async(_run_graph_with_cancel_guard())
         final_status = (final_state or {}).get("status", "")
 
         if final_status == WS.AWAITING_APPROVAL.value:
@@ -1362,8 +1385,17 @@ def resume_workflow_after_approval(
         finally:
             _pool.putconn(_conn)
 
+    async def _resume_with_cancel_guard():
+        try:
+            return await asyncio.wait_for(_resume(), timeout=540)
+        except asyncio.TimeoutError:
+            log.error(
+                "[%s] _resume timed out after 540s — cancelled cleanly", workflow_id
+            )
+            raise RuntimeError("Resume execution timed out (540s) — cancelled")
+
     try:
-        final_state = self.run_async(_resume())
+        final_state = self.run_async(_resume_with_cancel_guard())
         final_status = (final_state or {}).get("status", "")
         log.info(
             "[%s] resume_workflow_after_approval: completed (%s)", workflow_id, final_status
