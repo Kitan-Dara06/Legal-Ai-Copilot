@@ -140,6 +140,18 @@ def init_worker_process(**kwargs):
     except Exception as e:
         # repr(e) shows type even when str(e) is blank (e.g. TimeoutError)
         logger.error("Worker warmup failed (non-fatal): %s", repr(e))
+        # CRITICAL: cancel any stuck coroutines so _worker_loop stays free.
+        # A timed-out warmup leaves _setup_tables() or pool.open() still running
+        # on _worker_loop. Without cancellation, every subsequent task coroutine
+        # is queued but never scheduled — the loop is permanently locked.
+        try:
+            cancel_fut = asyncio.run_coroutine_threadsafe(
+                _cancel_worker_loop_tasks(), _worker_loop
+            )
+            cancel_fut.result(timeout=5)
+            logger.info("Worker loop cleaned up after warmup failure.")
+        except Exception as cancel_err:
+            logger.warning("Could not cancel warmup tasks: %s", cancel_err)
 
     # MongoDB audit init — start_consumer() fires its own daemon thread
     # with a dedicated event loop. This works synchronously (no asyncio needed
@@ -161,6 +173,27 @@ def shutdown_worker_process(**kwargs):
         future.result(timeout=10)
     except Exception:
         pass
+
+async def _cancel_worker_loop_tasks():
+    """Cancel all running asyncio tasks on _worker_loop except the current one.
+
+    Called after a warmup timeout to free the event loop. Without this,
+    orphaned coroutines (e.g. _setup_tables blocking on DDL) permanently
+    lock _worker_loop and prevent any subsequent coroutines from starting.
+    """
+    current = asyncio.current_task()
+    tasks = [
+        t for t in asyncio.all_tasks()
+        if t is not current and not t.done()
+    ]
+    if tasks:
+        logger.info(
+            "Cancelling %d orphaned task(s) on worker loop after warmup failure.",
+            len(tasks),
+        )
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _warmup():
