@@ -19,6 +19,7 @@ import uuid
 from typing import Dict, List, Optional
 
 from celery import Task
+from celery.exceptions import SoftTimeLimitExceeded
 from dotenv import load_dotenv
 
 from app.celery_app import celery_app
@@ -1083,20 +1084,25 @@ def process_scanned_pdf(
     name="app.tasks.process_workflow",
     bind=True,
     base=AsyncTask,
-    max_retries=3,
-    default_retry_delay=30,
+    max_retries=2,
+    default_retry_delay=60,
     queue="default",
     acks_late=True,
-    soft_time_limit=1800,  # 30 min (was 1200) — LangGraph agent can take long
-    time_limit=2100,  # 35 min (was 1500) hard cap
+    soft_time_limit=900,   # 15 min — detect+draft+qa+plan to interrupt; exits cleanly
+    time_limit=1200,       # 20 min hard cap
 )
 def process_workflow(self, workflow_id: str, session_file_ids: list | None = None):
     """
-    Celery task that runs the LangGraph for a REASON or ACT workflow.
-    Dispatched automatically when a goal is classified as REASON or ACT.
+    Task 1 of 2: Run the LangGraph from START to the AWAITING_APPROVAL interrupt.
 
-    Uses sync psycopg2 for DB reads (Celery prefork compatible),
-    then asyncio.run() only for the LangGraph execution.
+    Exits cleanly when the graph pauses at AWAITING_APPROVAL — RabbitMQ ACKs
+    the message immediately and the worker slot is freed.
+
+    resume_workflow_after_approval (Task 2) is enqueued by the approvals router
+    after the user clicks Approve.
+
+    SoftTimeLimitExceeded is caught BEFORE the generic Exception handler and
+    NEVER retried — this breaks the infinite 30-minute redelivery loop.
     """
     import json
     import logging
@@ -1213,16 +1219,41 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
                 interrupt_before=["ambiguity_gate", "human_approval"],
             )
             config = {"configurable": {"thread_id": str(workflow_id)}}
-            await app.ainvoke(initial_state, config=config)
+            final_state = await app.ainvoke(initial_state, config=config)
+            return final_state
+
+    def _sync_mark_failed(wf_id: str) -> None:
+        """Synchronous DB update — safe to call outside async context."""
+        _pool = get_pg_pool()
+        _conn = _pool.getconn()
+        try:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    "UPDATE workflow_executions SET status = 'FAILED' WHERE id = %s",
+                    (wf_id,),
+                )
+            _conn.commit()
+        except Exception as _dbe:
+            log.warning("[%s] Could not mark FAILED in DB: %s", wf_id, _dbe)
+        finally:
+            _pool.putconn(_conn)
 
     try:
-        self.run_async(_run_graph())
-        log.info("[%s] process_workflow: completed successfully", workflow_id)
-        # MongoDB audit: log workflow completed
+        final_state = self.run_async(_run_graph())
+        final_status = (final_state or {}).get("status", "")
+
+        if final_status == WS.AWAITING_APPROVAL.value:
+            # Graph paused at interrupt — task done, slot freed, message ACKed
+            log.info(
+                "[%s] process_workflow: paused at AWAITING_APPROVAL — exiting cleanly",
+                workflow_id,
+            )
+        else:
+            log.info("[%s] process_workflow: completed (%s)", workflow_id, final_status)
+
         try:
             from app.services.audit.events import emit
             from app.services.audit.schemas import CorrelationContext
-
             emit.workflow_completed(
                 workflow_id=workflow_id,
                 duration_ms=0,
@@ -1230,13 +1261,35 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
             )
         except Exception:
             pass
-    except Exception as e:
-        log.error("[%s] process_workflow: FAILED — %s", workflow_id, e, exc_info=True)
-        # MongoDB audit: log workflow failed
+
+        return {"status": final_status, "paused": final_status == WS.AWAITING_APPROVAL.value}
+
+    except SoftTimeLimitExceeded:
+        # ── NOT a transient error — never retry timeouts ──────────────────
+        # A clean return (not raise) ACKs the RabbitMQ message, breaking
+        # the infinite 30-min redelivery loop permanently.
+        log.error(
+            "[%s] process_workflow: SoftTimeLimitExceeded — marking FAILED, NOT retrying",
+            workflow_id,
+        )
+        _sync_mark_failed(workflow_id)
         try:
             from app.services.audit.events import emit
             from app.services.audit.schemas import CorrelationContext
+            emit.workflow_failed(
+                workflow_id=workflow_id,
+                error="SoftTimeLimitExceeded — detect/draft/qa/plan chain too slow",
+                correlation=CorrelationContext(workflow_id=workflow_id),
+            )
+        except Exception:
+            pass
+        return {"failed": True, "reason": "timeout"}  # clean return = ACK
 
+    except Exception as e:
+        log.error("[%s] process_workflow: FAILED — %s", workflow_id, e, exc_info=True)
+        try:
+            from app.services.audit.events import emit
+            from app.services.audit.schemas import CorrelationContext
             emit.workflow_failed(
                 workflow_id=workflow_id,
                 error=str(e),
@@ -1245,9 +1298,135 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
         except Exception:
             pass
         try:
-            self.retry(exc=e)
+            raise self.retry(exc=e, countdown=60)
         except Exception as retry_err:
             log.error("Workflow %s exhausted retries: %s", workflow_id, retry_err)
+            return {"failed": True}
+
+
+@celery_app.task(
+    name="app.tasks.resume_workflow_after_approval",
+    bind=True,
+    base=AsyncTask,
+    max_retries=2,
+    default_retry_delay=30,
+    queue="default",
+    acks_late=True,
+    soft_time_limit=600,   # 10 min for execute phase
+    time_limit=720,        # 12 min hard cap
+)
+def resume_workflow_after_approval(
+    self, workflow_id: str, actor_user_id: str | None = None
+):
+    """
+    Task 2 of 2: Resume the LangGraph from the AWAITING_APPROVAL checkpoint.
+
+    Enqueued by the approvals router after token validation. Never blocks
+    the FastAPI request — callers use .delay() and return immediately.
+
+    Resumes via ainvoke(None, config) which reads state from the checkpointer.
+    """
+    import logging
+    import sentry_sdk
+
+    log = logging.getLogger(__name__)
+    sentry_sdk.set_tag("workflow_id", workflow_id)
+    log.info("[%s] resume_workflow_after_approval: starting", workflow_id)
+
+    async def _resume():
+        from app.services.agent.checkpointer import get_checkpointer
+        from app.services.agent.graph import create_action_agent_graph
+
+        async with get_checkpointer() as checkpointer:
+            app = create_action_agent_graph().compile(
+                checkpointer=checkpointer,
+                interrupt_before=["ambiguity_gate", "human_approval"],
+            )
+            config = {"configurable": {"thread_id": str(workflow_id)}}
+            # ainvoke(None) resumes from the checkpoint — no new initial state
+            final_state = await app.ainvoke(None, config=config)
+            return final_state
+
+    def _sync_mark_failed_resume(wf_id: str) -> None:
+        _pool = get_pg_pool()
+        _conn = _pool.getconn()
+        try:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    "UPDATE workflow_executions SET status = 'FAILED' WHERE id = %s",
+                    (wf_id,),
+                )
+            _conn.commit()
+        except Exception as _dbe:
+            log.warning("[%s] Could not mark FAILED in DB: %s", wf_id, _dbe)
+        finally:
+            _pool.putconn(_conn)
+
+    try:
+        final_state = self.run_async(_resume())
+        final_status = (final_state or {}).get("status", "")
+        log.info(
+            "[%s] resume_workflow_after_approval: completed (%s)", workflow_id, final_status
+        )
+        try:
+            from app.services.audit.events import emit
+            from app.services.audit.schemas import CorrelationContext
+            emit.workflow_completed(
+                workflow_id=workflow_id,
+                duration_ms=0,
+                intent="approval.resumed",
+                correlation=CorrelationContext(
+                    workflow_id=workflow_id,
+                    user_id=actor_user_id,
+                ),
+            )
+        except Exception:
+            pass
+        return {"status": final_status}
+
+    except SoftTimeLimitExceeded:
+        log.error(
+            "[%s] resume_workflow_after_approval: SoftTimeLimitExceeded — NOT retrying",
+            workflow_id,
+        )
+        _sync_mark_failed_resume(workflow_id)
+        try:
+            from app.services.audit.events import emit
+            from app.services.audit.schemas import CorrelationContext
+            emit.workflow_failed(
+                workflow_id=workflow_id,
+                error="SoftTimeLimitExceeded during execute phase",
+                correlation=CorrelationContext(
+                    workflow_id=workflow_id, user_id=actor_user_id
+                ),
+            )
+        except Exception:
+            pass
+        return {"failed": True, "reason": "timeout"}
+
+    except Exception as e:
+        log.error(
+            "[%s] resume_workflow_after_approval: FAILED — %s", workflow_id, e, exc_info=True
+        )
+        try:
+            from app.services.audit.events import emit
+            from app.services.audit.schemas import CorrelationContext
+            emit.workflow_failed(
+                workflow_id=workflow_id,
+                error=str(e),
+                correlation=CorrelationContext(
+                    workflow_id=workflow_id, user_id=actor_user_id
+                ),
+            )
+        except Exception:
+            pass
+        try:
+            raise self.retry(exc=e, countdown=30)
+        except Exception as retry_err:
+            log.error(
+                "resume_workflow %s exhausted retries: %s", workflow_id, retry_err
+            )
+            return {"failed": True}
 
 
 @celery_app.task(name="app.tasks.cleanup_stale_data")

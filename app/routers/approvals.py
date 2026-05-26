@@ -42,8 +42,9 @@ from app.models import (
     WorkflowExecution,
     WorkflowStatus,
 )
-from app.services.agent.checkpointer import get_checkpointer
-from app.services.agent.graph import create_action_agent_graph
+from app.services.agent.checkpointer import get_checkpointer  # noqa: F401 kept for reject path
+from app.services.agent.graph import create_action_agent_graph  # noqa: F401 kept for reject path
+from app.tasks import resume_workflow_after_approval
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/approvals", tags=["Approvals"])
@@ -336,16 +337,14 @@ async def approve_via_token(
     approval.actor = actor_user_id  # FR-EXEC-01: actor IS NOT NULL required before execution
     await db.commit()
 
-    # Resume LangGraph workflow
-    async with get_checkpointer() as checkpointer:
-        app = create_action_agent_graph().compile(
-            checkpointer=checkpointer,
-            interrupt_before=["ambiguity_gate", "human_approval"],
-        )
-        config = _make_langgraph_config(str(workflow_id))
-        final_state = await app.ainvoke(None, config=config)
-
-    new_status = final_state.get("status", WorkflowStatus.EXECUTING.value)
+    # Enqueue LangGraph resume — returns immediately, worker runs async execution.
+    # resume_workflow_after_approval reads the checkpoint and continues from
+    # human_approval_node → execute_node without blocking this API request.
+    actor_user_id_str = str(actor_user_id) if actor_user_id else None
+    resume_workflow_after_approval.delay(
+        workflow_id=str(workflow_id),
+        actor_user_id=actor_user_id_str,
+    )
 
     emit.workflow_completed(
         workflow_id=str(workflow_id),
@@ -360,8 +359,8 @@ async def approve_via_token(
     return {
         "workflow_id": str(workflow_id),
         "approval_id": str(approval.id),
-        "status": new_status,
-        "message": "Workflow approved and resumed.",
+        "status": WorkflowStatus.EXECUTING.value,
+        "message": "Workflow approved. Execution queued — poll /goals/{goal_id}/status for updates.",
     }
 
 
