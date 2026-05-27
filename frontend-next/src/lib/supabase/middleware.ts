@@ -44,7 +44,7 @@ export async function updateSession(request: NextRequest) {
 
     // Guard protected routes
     const isProtected =
-        request.nextUrl.pathname.startsWith("/chat") ||
+        request.nextUrl.pathname.startsWith("/workspaces") ||
         request.nextUrl.pathname.startsWith("/setup");
 
     // Skip middleware check for the setup page if user is logged in
@@ -63,23 +63,23 @@ export async function updateSession(request: NextRequest) {
         return NextResponse.redirect(url);
     }
 
-    // If user is logged in and hits /login, redirect to /chat
+    // If user is logged in and hits /login, redirect to /workspaces
     if (request.nextUrl.pathname.startsWith("/login") && user) {
         console.log(
-            `[Middleware] Logged in user at /login. Redirecting to /chat`,
+            `[Middleware] Logged in user at /login. Redirecting to /workspaces`,
         );
         const url = request.nextUrl.clone();
-        url.pathname = "/chat";
+        url.pathname = "/workspaces";
         return NextResponse.redirect(url);
     }
 
     // If user is logged in, but hits root, redirect to chat
     if (request.nextUrl.pathname === "/" && user) {
         console.log(
-            `[Middleware] Logged in user at root. Redirecting to /chat`,
+            `[Middleware] Logged in user at root. Redirecting to /workspaces`,
         );
         const url = request.nextUrl.clone();
-        url.pathname = "/chat";
+        url.pathname = "/workspaces";
         return NextResponse.redirect(url);
     }
 

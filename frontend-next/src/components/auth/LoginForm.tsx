@@ -34,17 +34,17 @@ export function LoginForm() {
         }
 
         // Check whether this user has a local DB record (org set up).
-        // Route to /setup if not, /chat or custom redirect if all good.
+        // Route to /setup if not, /workspaces or custom redirect if all good.
         try {
             await getMe(data.session!.access_token);
-            window.location.href = redirectUrl || "/chat";
+            window.location.href = redirectUrl || "/workspaces";
         } catch (err) {
             if (err instanceof AppError && (err.code === "setup_required" || err.status === 403)) {
                 // Ignore redirect for setup because they strictly must do setup
                 window.location.href = "/setup";
             } else {
                 // Unexpected error 
-                window.location.href = redirectUrl || "/chat";
+                window.location.href = redirectUrl || "/workspaces";
             }
         }
     };

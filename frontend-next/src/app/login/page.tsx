@@ -44,7 +44,7 @@ function LoginContent() {
       setError(error.message);
       setIsRecovering(false);
     } else {
-      window.location.href = "/chat";
+      window.location.href = "/workspaces";
     }
   };
 

@@ -93,7 +93,7 @@ export function SignupForm() {
                 } catch {}
                 setError(msg);
             } else {
-                window.location.href = "/chat";
+                window.location.href = "/workspaces";
             }
         } catch (err: any) {
             setError(err.message || "Network error");

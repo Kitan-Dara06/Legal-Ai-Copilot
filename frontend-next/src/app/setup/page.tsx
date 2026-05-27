@@ -40,11 +40,11 @@ function SetupContent() {
       });
 
       // Redirect to chat on success
-      window.location.href = "/chat";
+      window.location.href = "/workspaces";
     } catch (err: any) {
       // 409 means user already has an org — redirect to chat
       if (err.status === 409) {
-        window.location.href = "/chat";
+        window.location.href = "/workspaces";
         return;
       }
       setError(err.message || "Failed to setup workspace");

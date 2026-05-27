@@ -51,7 +51,7 @@ export default function UpdatePasswordPage() {
     }
 
     setDone(true);
-    setTimeout(() => router.push('/chat'), 2000);
+    setTimeout(() => router.push('/workspaces'), 2000);
   };
 
   return (

@@ -66,7 +66,7 @@ function InviteContent() {
         await acceptInvite(token, "", "");
         setSuccess(true);
         setTimeout(() => {
-          router.push("/chat");
+          router.push("/workspaces");
         }, 1500);
       } catch (err: any) {
         setError(err.message || "Failed to accept invitation. Make sure you are logged in with the invited email.");
@@ -97,7 +97,7 @@ function InviteContent() {
       
       // 3. Seamless redirect
       setTimeout(() => {
-        router.push("/chat");
+        router.push("/workspaces");
       }, 1500);
 
     } catch (err: any) {
