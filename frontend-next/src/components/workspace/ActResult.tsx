@@ -132,7 +132,7 @@ export function ActResult({
                 {(action.urgency * 100).toFixed(0)}%
               </span>
               <Badge
-                variant={action.status === "DETECTED" ? "warning" : "info"}
+                variant={action.status === "DETECTED" ? "warning" : "violet"}
               >
                 {action.status}
               </Badge>

@@ -62,13 +62,6 @@ export function FileUpload({
               workspaceId,
               file,
               orgSlug,
-              (pct) => {
-                setUploads((prev) =>
-                  prev.map((u) =>
-                    u.filename === file.name ? { ...u, progress: pct } : u,
-                  ),
-                );
-              },
             );
 
             setUploads((prev) =>

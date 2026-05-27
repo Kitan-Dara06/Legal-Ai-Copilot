@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Scale } from "lucide-react";
-import { setupOrg } from "@/lib/api";
+import { setupOrgAdmin as setupOrg } from "@/lib/api";
 import { createClient } from "@/lib/supabase/client";
 
 function SetupContent() {

@@ -15,7 +15,7 @@ interface SidebarProps {
   onUploadSuccess: () => void;
   files: FileItem[];
   filesLoading: boolean;
-  onDeleteFile: (id: number) => void;
+  onDeleteFile: (id: any) => void;
   onSwitchOrg: (orgSlug: string) => void;
   selectedDocumentIds: string[];
   onToggleDocumentSelection: (docId: string) => void;
@@ -167,8 +167,8 @@ export function Sidebar({
               files={files}
               selectedIds={selectedDocumentIds}
               onToggleSelection={onToggleDocumentSelection}
-              onDeleteFile={onDeleteFile}
-              loading={filesLoading}
+              onDeleteFile={onDeleteFile as any}
+              isLoading={filesLoading}
             />
           </section>
 

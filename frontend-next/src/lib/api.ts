@@ -517,3 +517,15 @@ export function inviteByEmail(token: string, email: string, orgSlug?: string) {
 export function checkOrgAvailable(slug: string) {
   return apiFetch<{ available: boolean }>(`/auth/check-org?slug=${slug}`);
 }
+
+export function setupOrgAdmin(
+  _accessToken: string,
+  params: { org_id?: string; org_name: string },
+) {
+  // Legacy call from setup/page — maps to public registration endpoint
+  return apiFetch<{ message: string }>("/auth/setup-org", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+}

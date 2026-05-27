@@ -58,7 +58,7 @@ export function FileList({
           <Badge
             variant="danger"
             className="cursor-help"
-            title="Failed to embed document"
+           
           >
             Failed
           </Badge>

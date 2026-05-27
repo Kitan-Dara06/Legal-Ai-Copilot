@@ -4,7 +4,7 @@ export const dynamic = 'force-dynamic';
 
 import { Suspense, useState, useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { verifyInvite, acceptInvite, acceptInvite } from "@/lib/api";
+import { verifyInvite, acceptInvite } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
@@ -63,7 +63,7 @@ function InviteContent() {
       setIsSubmitting(true);
       setError("");
       try {
-        await acceptInvite(activeSessionToken, token);
+        await acceptInvite(token, "", "");
         setSuccess(true);
         setTimeout(() => {
           router.push("/chat");
@@ -83,7 +83,7 @@ function InviteContent() {
 
     try {
       // 1. Call Backend to create user, add to org, and consume token (The Magic Transaction)
-      const res = await acceptInvite({ token, full_name: fullName, password });
+      const res = await acceptInvite(token, password, fullName);
 
       // 2. Set the token manually in the local Supabase client so it 
       // immediately treats the user as logged in moving forward.

@@ -41,20 +41,17 @@ export function usePollDocumentStatus(
 
     const poll = async () => {
       try {
-        const data = await getDocumentStatus(
-          token,
-          workspaceId,
-          documentId,
-          orgSlug,
-        );
+        // getDocumentStatus is a stub that calls getIngestStatus (jobId = documentId here)
+        const data = await getDocumentStatus(token, documentId, orgSlug);
         setState({
           status: data.status,
-          stages: data.stages || null,
-          error: data.error || null,
+          stages: null, // IngestJobStatus doesn't have stages — field removed
+          error: data.error ?? null,
           loading: false,
         });
 
-        if (data.status === "READY" || data.status === "FAILED") {
+        // IngestJobStatus uses "complete" and "failed" (lowercase)
+        if (data.status === "complete" || data.status === "failed") {
           stop();
         }
       } catch {

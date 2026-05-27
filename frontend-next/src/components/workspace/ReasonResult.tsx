@@ -31,16 +31,16 @@ export function ReasonResult({ result }: ReasonResultProps) {
 
   const escalationColor = (
     type: string,
-  ): "success" | "warning" | "error" | "info" | "default" => {
+  ): "success" | "warning" | "danger" | "violet" | "default" => {
     switch (type) {
       case "DEFINITIONAL_CONFLICT":
         return "warning";
       case "STRUCTURAL_AMBIGUITY":
-        return "danger";
+        return "warning";
       case "DEGRADED":
         return "warning";
       case "INSUFFICIENT_COVERAGE":
-        return "danger";
+        return "warning";
       default:
         return "default";
     }

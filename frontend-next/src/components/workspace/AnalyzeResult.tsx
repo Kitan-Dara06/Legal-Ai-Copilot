@@ -39,13 +39,13 @@ export function AnalyzeResult({ result }: AnalyzeResultProps) {
       ? "success"
       : result.confidence >= 0.5
         ? "warning"
-        : "error";
+        : "danger";
   const faithfulnessColor =
     result.faithfulness_score >= 0.8
       ? "success"
       : result.faithfulness_score >= 0.5
         ? "warning"
-        : "error";
+        : "danger";
 
   return (
     <Card className="mb-6 p-4">
