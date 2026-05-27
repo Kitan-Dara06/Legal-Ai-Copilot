@@ -292,23 +292,38 @@ if not _allowed_origins:
     _allowed_origins = [
         "https://legalrag.codes",
         "https://www.legalrag.codes",
-        "https://legal-ai-copilot-xi.vercel.app",
     ]
     if is_dev:
         _allowed_origins.extend(
             [
                 "http://localhost:8501",
                 "http://localhost:3000",
+                "http://localhost:3001",
             ]
         )
 
-# HARD OVERRIDE: Ensure Vercel is always permitted regardless of .env configuration.
-if "https://legal-ai-copilot-xi.vercel.app" not in _allowed_origins:
-    _allowed_origins.append("https://legal-ai-copilot-xi.vercel.app")
+# Always permit the stable production Vercel URL
+_stable_vercel = "https://legal-ai-copilot-xi.vercel.app"
+if _stable_vercel not in _allowed_origins:
+    _allowed_origins.append(_stable_vercel)
+
+# Permit any Vercel preview deployment for this project (changes per deploy).
+# Pattern covers:  legal-ai-copilot-*.vercel.app  (all preview hashes)
+#             and  kitans-projects-*.vercel.app    (team-scoped previews)
+_vercel_preview_regex = (
+    r"^https://legal-ai-copilot(-[a-z0-9]+)*"
+    r"-kitans-projects-[a-z0-9]+\.vercel\.app$"
+    r"|^https://legal-ai-copilot-xi\.vercel\.app$"
+    r"|^https://legalrag\.codes$"
+    r"|^https://www\.legalrag\.codes$"
+)
+if is_dev:
+    _vercel_preview_regex += r"|^http://localhost:(3000|3001|8501)$"
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
+    allow_origin_regex=_vercel_preview_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
