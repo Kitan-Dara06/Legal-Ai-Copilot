@@ -80,8 +80,10 @@ class WorkflowStatus(str, enum.Enum):
     RETRIEVING = "RETRIEVING"
     EXPANDING = "EXPANDING"
     REASONING = "REASONING"
+    BRIEFING = "BRIEFING"                                          # decision_brief_node running
+    AWAITING_BRIEF_CONFIRMATION = "AWAITING_BRIEF_CONFIRMATION"    # HITL pause 1: lawyer reviews brief
     DRAFTING = "DRAFTING"
-    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"                        # HITL pause 2: lawyer reviews draft
     EXECUTING = "EXECUTING"
     REVISING = "REVISING"
     RECOVERING = "RECOVERING"
@@ -427,6 +429,11 @@ class WorkflowExecution(Base):
     )
     langgraph_checkpoint: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     result_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    decision_brief_payload: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="Stores DecisionBriefResult JSONB between HITL pause 1 (brief) and pause 2 (draft)",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

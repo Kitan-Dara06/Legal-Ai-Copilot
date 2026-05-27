@@ -4,7 +4,7 @@ export const dynamic = 'force-dynamic';
 
 import { Suspense, useState, useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { verifyInviteToken, acceptInvite, acceptExistingInvite } from "@/lib/api";
+import { verifyInvite, acceptInvite, acceptInvite } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
@@ -43,7 +43,7 @@ function InviteContent() {
       return;
     }
 
-    verifyInviteToken(token)
+    verifyInvite(token)
       .then((data) => {
         setInviteData(data);
         setIsLoading(false);
@@ -63,7 +63,7 @@ function InviteContent() {
       setIsSubmitting(true);
       setError("");
       try {
-        await acceptExistingInvite(activeSessionToken, token);
+        await acceptInvite(activeSessionToken, token);
         setSuccess(true);
         setTimeout(() => {
           router.push("/chat");
@@ -209,7 +209,7 @@ function InviteContent() {
                       <Button 
                         type="submit" 
                         className="w-full h-12 bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-lg shadow-blue-600/20 group"
-                        isLoading={isSubmitting}
+                        loading={isSubmitting}
                       >
                         Accept Invitation <ArrowRight className="ml-2 h-4 w-4 group-hover:translate-x-1 transition-transform" />
                       </Button>
@@ -258,7 +258,7 @@ function InviteContent() {
                       <Button 
                         type="submit" 
                         className="w-full h-12 mt-4 bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-lg shadow-blue-600/20 group"
-                        isLoading={isSubmitting}
+                        loading={isSubmitting}
                       >
                         Complete Registration <ArrowRight className="ml-2 h-4 w-4 group-hover:translate-x-1 transition-transform" />
                       </Button>

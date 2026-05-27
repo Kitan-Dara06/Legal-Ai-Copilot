@@ -36,11 +36,11 @@ export function ReasonResult({ result }: ReasonResultProps) {
       case "DEFINITIONAL_CONFLICT":
         return "warning";
       case "STRUCTURAL_AMBIGUITY":
-        return "error";
+        return "danger";
       case "DEGRADED":
         return "warning";
       case "INSUFFICIENT_COVERAGE":
-        return "error";
+        return "danger";
       default:
         return "default";
     }
@@ -89,7 +89,7 @@ export function ReasonResult({ result }: ReasonResultProps) {
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-white font-semibold text-lg">Findings</h3>
           {hasEscalations && (
-            <Badge variant="error">
+            <Badge variant="danger">
               {result.escalations!.length} escalations
             </Badge>
           )}

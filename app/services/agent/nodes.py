@@ -1229,29 +1229,201 @@ async def detect_node(state: PointerOnlyState) -> Dict[str, Any]:
             len(capped_deadlines),
         )
 
-        if detected:
-            stmt = pg_insert(Action).values(detected).on_conflict_do_nothing()
-            await db.execute(stmt)
-
+        # Status update only — no Action rows written yet (deferred to draft_node)
         await db.execute(
             update(WorkflowExecution)
             .where(WorkflowExecution.id == wf_uuid)
-            .values(status=WorkflowStatus.DRAFTING)
+            .values(status=WorkflowStatus.BRIEFING)
         )
         await db.commit()
 
     action_count = len(detected)
     summary = (
-        f"Detected {action_count} actions: {len(conflicts)} definitional conflicts, "
+        f"Detected {action_count} candidate actions: {len(conflicts)} definitional conflicts, "
         f"{len(capped_deadlines)} deadline obligations "
-        f"(filtered from {len(deadlines)} raw candidates)."
+        f"(filtered from {len(deadlines)} raw candidates). Awaiting brief confirmation."
     )
     logger.info("[%s] detect_node complete: %s", workflow_id, summary)
 
+    # Return raw data for decision_brief_node — NOT persisted Action rows
+    conflict_dicts = [
+        {
+            "term": c.term,
+            "definition": c.definition,
+            "clause_reference": c.clause_reference,
+            "conflict_description": c.conflict_description,
+        }
+        for c in conflicts
+    ]
+    deadline_dicts = [
+        {
+            "id": str(dl.id),
+            "obligation_description": dl.obligation_description,
+            "obligation_type": dl.obligation_type.value,
+            "urgency_score": float(dl.urgency_score),
+            "resolved_deadline": dl.resolved_deadline.isoformat() if dl.resolved_deadline else None,
+            "source_clause_a": dl.source_clause_a,
+        }
+        for dl in capped_deadlines
+    ]
+
     return {
-        "status": WorkflowStatus.DRAFTING.value,
+        "status": WorkflowStatus.BRIEFING.value,
         "findings_summary": summary,
         "action_count": action_count,
+        "_detected_conflicts": conflict_dicts,
+        "_detected_deadlines": deadline_dicts,
+    }
+
+
+
+# ── Decision Brief schemas (locked from test_decision_brief.py validation) ────
+from datetime import date as _date
+
+
+class _ActionRecommendation(BaseModel):
+    action_type: str
+    description: str
+    urgency: float = Field(ge=0.0, le=1.0)
+    deadline_date: Optional[_date] = None
+    deadline_source: Optional[str] = None
+
+
+class _RelevantClause(BaseModel):
+    clause_ref: str
+    excerpt: str
+    relevance_reason: str
+    document_id: str
+
+
+class _ConflictFlag(BaseModel):
+    type: str
+    description: str
+    source_a: str
+    source_b: Optional[str] = None
+
+
+class DecisionBriefResult(BaseModel):
+    goal: str
+    summary: str
+    recommended_actions: list[_ActionRecommendation]
+    relevant_clauses: list[_RelevantClause]
+    conflicts_to_resolve: list[_ConflictFlag]
+    deadlines_implicated: list[dict]
+    verification_checklist: list[str]
+    proceed_recommended: bool
+    proceed_reasoning: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+@traced_node
+async def decision_brief_node(state: PointerOnlyState) -> Dict[str, Any]:
+    """
+    ACT Phase 1: Generates a Decision Brief for the lawyer.
+
+    Synthesises retrieved contract context + raw detect output (conflicts,
+    deadlines) into a structured DecisionBriefResult.  The result is
+    persisted to workflow_executions.decision_brief_payload and the
+    workflow is paused at AWAITING_BRIEF_CONFIRMATION (HITL 1).
+
+    Action rows are NOT created here — deferred to draft_node after
+    lawyer confirms the brief.
+    """
+    state = _adapt_state(state)
+    workflow_id = state["workflow_id"]
+    wf_uuid = _uuid.UUID(workflow_id)
+    goal_text = state.get("goal_text", "")
+    org_id = state.get("org_id", "")
+    workspace_id = state.get("workspace_id", "")
+    context_text = state.get("context_text", "")
+    detected_conflicts = state.get("_detected_conflicts") or []
+    detected_deadlines = state.get("_detected_deadlines") or []
+
+    logger.info("[%s] decision_brief_node: generating brief", workflow_id)
+
+    # ── Build context block from retrieved context_text ─────────────────────
+    # context_text is already formatted by retrieval_node as numbered chunks
+    context_block = context_text if context_text else "[No retrieved context available]"
+
+    # Augment with registry findings from detect_node
+    registry_section = ""
+    if detected_conflicts:
+        registry_section += "\n\n=== DETECTED DEFINITIONAL CONFLICTS ===\n"
+        for c in detected_conflicts:
+            registry_section += (
+                f"- Term: {c.get('term')} | Ref: {c.get('clause_reference')}\n"
+                f"  Conflict: {c.get('conflict_description', 'N/A')}\n"
+            )
+    if detected_deadlines:
+        registry_section += "\n\n=== DETECTED DEADLINES (urgency ≥ 0.7) ===\n"
+        for d in detected_deadlines:
+            registry_section += (
+                f"- {d.get('obligation_description')} "
+                f"[urgency={d.get('urgency_score'):.2f}, "
+                f"deadline={d.get('resolved_deadline') or 'unresolved'}]\n"
+            )
+
+    # ── Prompt (validated in scripts/test_decision_brief.py) ────────────────
+    prompt = f"""You are a senior legal AI assistant generating a Decision Brief for a lawyer.
+
+The lawyer needs to decide: "Should I proceed with drafting a response, and if so, what exactly should I draft?"
+
+Your task is to synthesize the retrieved contract context into a structured brief that:
+1. Identifies the SPECIFIC clauses most relevant to the goal (not everything — just what matters)
+2. Recommends concrete actions with their action type (DRAFT_RESPONSE, DRAFT_NOTICE, or DRAFT_AMENDMENT)
+3. Flags any conflicts or ambiguities the lawyer must resolve before drafting
+4. Identifies implicated deadlines
+5. Produces a verification checklist of things the lawyer MUST confirm before a draft is generated
+6. Gives your own assessment of whether to proceed and why
+
+STRICT RULES:
+- relevant_clauses MUST only contain clauses from the provided context chunks — no hallucination
+- excerpt MUST be a verbatim quote from the chunk text — never paraphrased
+- If the context is insufficient to form a brief, set proceed_recommended=false and explain in proceed_reasoning
+- PREMISE CONFLICT RULE: If the retrieved context reveals that the goal references a wrong clause number, a non-existent provision, or a misidentified clause type, you MUST set proceed_recommended=false. The summary must lead with this conflict as sentence one — do not bury it. Do not recommend drafting on a faulty premise.
+- relevance_reason must explain specifically how this clause affects the drafting strategy — not just that the topic appears in it.
+- verification_checklist items must be specific and actionable — not generic platitudes like "review the contract"
+- summary must be 2-3 sentences maximum. Lead with the most important finding. Do not hedge. Write as if briefing a senior partner who has 20 seconds to read it.
+- If no deadlines are identified, deadlines_implicated must be an empty list [], not a list containing null objects.
+
+GOAL: {goal_text}
+
+RETRIEVED CONTRACT CONTEXT:
+{context_block}{registry_section}
+
+Generate the DecisionBriefResult now."""
+
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        temperature=0.0,
+        api_key=os.getenv("GROQ_API_KEY", ""),
+    ).with_structured_output(DecisionBriefResult)
+
+    brief: DecisionBriefResult = await llm.ainvoke(prompt)
+
+    # ── Persist brief and pause ──────────────────────────────────────────────
+    brief_payload = brief.model_dump(mode="json")
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(WorkflowExecution)
+            .where(WorkflowExecution.id == wf_uuid)
+            .values(
+                decision_brief_payload=brief_payload,
+                status=WorkflowStatus.AWAITING_BRIEF_CONFIRMATION,
+            )
+        )
+        await db.commit()
+
+    logger.info(
+        "[%s] decision_brief_node: brief generated (confidence=%.2f, proceed=%s)",
+        workflow_id,
+        brief.confidence,
+        brief.proceed_recommended,
+    )
+
+    return {
+        "status": WorkflowStatus.AWAITING_BRIEF_CONFIRMATION.value,
+        "findings_summary": brief.summary,
     }
 
 
@@ -1429,246 +1601,277 @@ async def _retrieve_additional_context(
 @traced_node
 async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
-    Uses Groq to generate drafts for detected actions.
-    Grounds each draft on actual source clause text retrieved from the document.
+    ACT Phase 2: Generates grounded drafts from the confirmed Decision Brief.
 
-    Groups are drafted CONCURRENTLY via asyncio.gather — each group gets its
-    own DB session and LLM call in parallel, cutting total time from N×T to ~1×T.
+    Reads DecisionBriefResult from workflow_executions.decision_brief_payload,
+    creates Action rows (first time — lawyer has confirmed the brief), then
+    generates one consolidated draft grounded against relevant_clauses only.
+
+    Pauses at AWAITING_APPROVAL (HITL 2) for lawyer review.
+    export_node filters on ActionStatus.DRAFTING to find the draft.
     """
     state = _adapt_state(state)
     workflow_id = state["workflow_id"]
     wf_uuid = _uuid.UUID(workflow_id)
     goal_text = state.get("goal_text", "")
-    additional_context = (
-        _compress_clause(state.get("context_text", ""))
-        if state.get("context_text")
-        else ""
-    )
+    org_id = _uuid.UUID(state["org_id"])
+    workspace_id = _uuid.UUID(state["workspace_id"])
 
-    logger.info("[%s] draft_node: generating drafts (parallel)", workflow_id)
+    logger.info("[%s] draft_node: reading brief and generating draft", workflow_id)
     await _set_wf_status(workflow_id, WorkflowStatus.DRAFTING)
 
-    # ── Phase 1: read all actions in ONE session, extract plain-dict group data ──
-    # We convert ORM objects to plain dicts immediately so each concurrent
-    # coroutine below can open its own independent session without sharing objects.
-    groups: dict[ActionType, dict] = {}  # action_type → {action_ids, source_entries}
+    # ── Read the confirmed brief ─────────────────────────────────────────────
+    async with AsyncSessionLocal() as db:
+        wf_res = await db.execute(
+            select(WorkflowExecution).where(WorkflowExecution.id == wf_uuid)
+        )
+        wf = wf_res.scalar_one_or_none()
+
+    if not wf or not wf.decision_brief_payload:
+        logger.error("[%s] draft_node: no decision_brief_payload found", workflow_id)
+        return {"status": WorkflowStatus.FAILED.value, "error_context": "Brief payload missing"}
+
+    brief = DecisionBriefResult(**wf.decision_brief_payload)
+
+    # ── Create Action rows now (brief confirmed by lawyer) ───────────────────
+    action_rows = []
+    for rec in brief.recommended_actions:
+        try:
+            action_type = ActionType[rec.action_type] if rec.action_type in ActionType.__members__ else ActionType.DRAFT_RESPONSE
+        except (KeyError, AttributeError):
+            action_type = ActionType.DRAFT_RESPONSE
+
+        action_rows.append(
+            dict(
+                id=_uuid.uuid4(),
+                workflow_id=wf_uuid,
+                org_id=org_id,
+                action_type=action_type,
+                description=rec.description,
+                urgency_score=rec.urgency,
+                status=ActionStatus.CONFIRMED,
+                task_order=0,
+            )
+        )
 
     async with AsyncSessionLocal() as db:
-        res = await db.execute(
-            select(Action).where(
-                Action.workflow_id == wf_uuid,
-                Action.status == ActionStatus.DETECTED,
-            )
-        )
-        actions = res.scalars().all()
+        if action_rows:
+            stmt = pg_insert(Action).values(action_rows).on_conflict_do_nothing()
+            await db.execute(stmt)
+        await db.commit()
 
-        if not actions:
-            return {"status": WorkflowStatus.DRAFTING.value}
-
-        for action in actions:
-            at = action.action_type
-            if at not in groups:
-                groups[at] = {"action_ids": [], "source_entries": []}
-            groups[at]["action_ids"].append(str(action.id))
-            source_text = _extract_source_text(action.source_clause_ref)
-            section_path = _extract_hierarchy(action.source_clause_ref)
-            doc_id = (action.source_clause_ref or {}).get("document_id", "unknown")
-            groups[at]["source_entries"].append(
-                {
-                    "text": source_text,
-                    "section_path": section_path,
-                    "doc_id": doc_id,
-                    "description": action.description,
-                }
-            )
-
-    # ── Phase 2: draft all groups concurrently ───────────────────────────────
-    async def _draft_one_group(action_type: ActionType, gdata: dict) -> None:
-        """Draft one action_type group. Runs concurrently with other groups."""
-        action_ids: list[str] = gdata["action_ids"]
-        primary_id: str = action_ids[0]
-        source_entries: list[dict] = gdata["source_entries"]
-        has_any_source = any(e["text"] for e in source_entries)
-
-        # ── No source → mark ungroundable ────────────────────────────────
-        if not has_any_source and not additional_context:
-            async with AsyncSessionLocal() as db:
-                res = await db.execute(
-                    select(Action).where(
-                        Action.id.in_([_uuid.UUID(aid) for aid in action_ids])
-                    )
-                )
-                for a in res.scalars().all():
-                    a.draft_payload = {
-                        "draft_text": (
-                            f"UNABLE TO DRAFT: No source clause text is available for this action. "
-                            f"The obligation '{a.description}' was detected but the original "
-                            f"contract text could not be retrieved. A lawyer must draft this manually."
-                        ),
-                        "grounding_failed": True,
-                    }
-                await db.commit()
-            logger.warning(
-                "[%s] No source text for %s group (%d actions) — skipping draft",
-                workflow_id,
-                action_type.value,
-                len(action_ids),
-            )
-            return
-
-        # ── Build prompt (same logic as before, now inside closure) ─────────
-        group_doc_id = source_entries[0].get("doc_id", "") if source_entries else ""
-        group_doc_name = (
-            f"document {group_doc_id}"
-            if group_doc_id and group_doc_id != "unknown"
-            else "the source document"
+    # ── Build grounding context from relevant_clauses ────────────────────────
+    clause_block = ""
+    for i, clause in enumerate(brief.relevant_clauses, 1):
+        clause_block += (
+            f"[Clause {i}] Ref: {clause.clause_ref} | Doc: {clause.document_id}\n"
+            f"Relevance: {clause.relevance_reason}\n"
+            f'Text: "{clause.excerpt}"\n\n'
         )
 
-        source_section = ""
-        for idx, entry in enumerate(source_entries, 1):
-            source_section += f"--- Source Clause {idx} ---\n"
-            source_section += f"Description: {entry['description']}\n"
-            if entry["section_path"]:
-                source_section += f"Section Path: {entry['section_path']}\n"
-            source_section += f"Document: {group_doc_name}\n"
-            source_section += f"Text:\n{entry['text']}\n" if entry["text"] else "Text: [not available]\n"
-            source_section += "\n"
-
-        prompt = (
-            f"You are an expert legal AI assistant.\n"
-            f"The user requested: {goal_text}\n\n"
-            f"Based solely on the source clauses below, "
-            f"draft the specific document the user requested.\n\n"
-            f"=== CRITICAL: ALL text below comes from the SAME document ({group_doc_name}) ===\n"
-            f"Do NOT invent or reference terms, sections, dates, or parties from any other document.\n"
-            f"\nFollow these steps:\n"
-            f"STEP 1 — EXTRACT: Read each source clause below and extract the key claims verbatim.\n"
-            f"STEP 2 — VERIFY: For each claim you plan to include in the draft, confirm it maps "
-            f"directly to a specific sentence in the source text. DISCARD any claim that cannot be mapped.\n"
-            f"STEP 3 — IDENTIFY GAPS: Note what information is MISSING from the source text that "
-            f"would be needed for a complete notice (e.g., exact dates, party names, deadline).\n"
-            f"STEP 4 — DRAFT: Synthesize ONLY the verified claims into a professional notice.\n\n"
-            f"--- NEGATIVE EXAMPLES ---\n"
-            f"BAD (not grounded): 'Pursuant to Section 7 of the Agreement...'\n"
-            f"   → The source text does NOT mention Section 7. This is a hallucination.\n"
-            f"GOOD (grounded): 'The section regarding Base Salary states that the Company will pay...'\n"
-            f"   → The source text says exactly this; no section number was invented.\n"
-            f"BAD (hallucination): 'The parties agree that stock options shall vest immediately.'\n"
-            f"   → The source text does not mention stock options or vesting.\n"
-            f"GOOD (honest): 'The provided text does not specify a deadline for this obligation.'\n"
-            f"   → Correctly identifies a gap in the source material.\n\n"
-            f"=== ACTION TYPE: {action_type.value} ===\n"
-            f"Number of obligations: {len(action_ids)}\n\n"
-            f"=== SOURCE CLAUSES ===\n{source_section}"
-        )
-        if additional_context:
-            prompt += (
-                f"=== ADDITIONAL CONTEXT (same document) ===\n{additional_context}\n\n"
-            )
-        prompt += (
-            f"=== OUTPUT REQUIREMENTS ===\n"
-            f"Your output MUST be a valid JSON object matching the DraftResult schema:\n"
-            f"- draft_text: The full consolidated notice\n"
-            f"- source_citations: List of verbatim source excerpts you cited (at least one per obligation)\n"
-            f"- grounding_score: 0.0 to 1.0 reflecting how much of the draft is directly grounded\n"
-            f"- missing_info: What information was needed but not available in the source text\n\n"
-            f"If the source text does not contain enough information to draft a meaningful notice, "
-            f"set grounding_score low and explain what is missing in missing_info."
-        )
-
-        # ── LLM call ────────────────────────────────────────────────────
-        try:
-            llm_structured = ChatGroq(
-                model="llama-3.3-70b-versatile",
-                temperature=0.0,
-                api_key=os.getenv("GROQ_API_KEY", ""),
-                max_tokens=4096,
-            ).with_structured_output(DraftResult)
-
-            result: DraftResult = await llm_structured.ainvoke(prompt)
-            draft_text = result.draft_text
-            source_citations = result.source_citations
-            grounding_score = result.grounding_score
-            missing_info_list = result.missing_info
-
-            if grounding_score < 0.5:
-                logger.warning(
-                    "[%s] Low grounding score %.2f for %s group: %s",
-                    workflow_id,
-                    grounding_score,
-                    action_type.value,
-                    missing_info_list,
-                )
-
-            # ── Write results — fresh session per group ────────────────────
-            async with AsyncSessionLocal() as db:
-                res = await db.execute(
-                    select(Action).where(
-                        Action.id.in_([_uuid.UUID(aid) for aid in action_ids])
-                    )
-                )
-                fresh = {str(a.id): a for a in res.scalars().all()}
-
-                primary = fresh.get(primary_id)
-                if primary:
-                    primary.draft_payload = {
-                        "draft_text": draft_text,
-                        "consolidated": True,
-                        "covers_action_count": len(action_ids),
-                        "source_citations": source_citations,
-                        "grounding_score": grounding_score,
-                        "missing_info": missing_info_list,
-                        "had_additional_context": bool(additional_context),
-                    }
-                for aid in action_ids[1:]:
-                    a = fresh.get(aid)
-                    if a:
-                        a.draft_payload = {
-                            "draft_text": draft_text,
-                            "consolidated_ref": primary_id,
-                            "consolidated": True,
-                        }
-                await db.commit()
-
-            logger.info(
-                "[%s] Drafted %s group: %d actions, grounding=%.2f, %d citations",
-                workflow_id,
-                action_type.value,
-                len(action_ids),
-                grounding_score,
-                len(source_citations),
-            )
-
-        except Exception as e:
-            logger.error(
-                "[%s] Drafting failed for %s group: %s",
-                workflow_id,
-                action_type.value,
-                e,
-            )
-            async with AsyncSessionLocal() as db:
-                res = await db.execute(
-                    select(Action).where(
-                        Action.id.in_([_uuid.UUID(aid) for aid in action_ids])
-                    )
-                )
-                for a in res.scalars().all():
-                    a.draft_payload = {"error": str(e)}
-                await db.commit()
-
-    # ── Run all groups concurrently ─────────────────────────────────────
-    # return_exceptions=True: one group failing doesn’t cancel the others
-    gather_results = await asyncio.gather(
-        *[_draft_one_group(at, gdata) for at, gdata in groups.items()],
-        return_exceptions=True,
+    checklist_block = "\n".join(
+        f"{i}. {item}" for i, item in enumerate(brief.verification_checklist, 1)
     )
-    for r in gather_results:
-        if isinstance(r, Exception):
-            logger.error("[%s] draft_node gather-level error: %s", workflow_id, r)
 
-    return {"status": WorkflowStatus.DRAFTING.value}
+    prompt = (
+        f"You are an expert legal AI assistant.\n"
+        f"The lawyer has reviewed the Decision Brief and confirmed: proceed with drafting.\n\n"
+        f"GOAL: {goal_text}\n\n"
+        f"BRIEF SUMMARY: {brief.summary}\n\n"
+        f"=== GROUNDING CLAUSES (draft ONLY from these) ===\n{clause_block}\n"
+        f"=== VERIFICATION CHECKLIST ===\n{checklist_block}\n\n"
+        f"RULES:\n"
+        f"- Draft ONLY from the grounding clauses above — no hallucination\n"
+        f"- Every factual claim must map to a specific excerpt\n"
+        f"- If information is missing, say so explicitly rather than inventing it\n"
+        f"- Address every item in the verification checklist in the draft\n\n"
+        f"Output format (JSON):\n"
+        f"- draft_text: the full professional draft\n"
+        f"- source_citations: list of verbatim excerpts cited\n"
+        f"- grounding_score: 0.0–1.0\n"
+        f"- missing_info: list of gaps not covered by the source clauses"
+    )
+
+    try:
+        llm = ChatGroq(
+            model="llama-3.3-70b-versatile",
+            temperature=0.0,
+            api_key=os.getenv("GROQ_API_KEY", ""),
+            max_tokens=4096,
+        )
+
+        class DraftOutput(BaseModel):
+            draft_text: str = Field(description="The full professional draft")
+            source_citations: list[str] = Field(
+                description="Verbatim excerpts from grounding clauses cited in the draft"
+            )
+            grounding_score: float = Field(
+                ge=0.0, le=1.0,
+                description="Fraction of claims traceable to a grounding clause"
+            )
+            missing_info: list[str] = Field(
+                description="Information gaps not covered by the source clauses"
+            )
+
+        structured_llm = llm.with_structured_output(DraftOutput)
+        draft_output: DraftOutput = await structured_llm.ainvoke(prompt)
+
+        draft_text = draft_output.draft_text
+        source_citations = draft_output.source_citations
+        grounding_score = draft_output.grounding_score
+        missing_info_list = draft_output.missing_info
+
+    except Exception as draft_err:
+        logger.error("[%s] draft_node LLM call failed: %s", workflow_id, draft_err)
+        return {
+            "status": WorkflowStatus.FAILED.value,
+            "error_context": f"Draft generation failed: {draft_err}",
+        }
+
+    # Write draft payload to the first Action row
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(
+            select(Action)
+            .where(Action.workflow_id == wf_uuid)
+            .order_by(Action.task_order)
+            .limit(1)
+        )
+        primary_action = res.scalar_one_or_none()
+        if primary_action:
+            primary_action.draft_payload = {
+                "draft_text": draft_text,
+                "source_citations": source_citations,
+                "grounding_score": grounding_score,
+                "missing_info": missing_info_list,
+                "verification_checklist": brief.verification_checklist,
+            }
+            primary_action.status = ActionStatus.AWAITING_APPROVAL
+        await db.commit()
+
+    await _set_wf_status(workflow_id, WorkflowStatus.AWAITING_APPROVAL)
+    logger.info(
+        "[%s] draft_node complete: grounding=%.2f, %d citations",
+        workflow_id, grounding_score, len(source_citations),
+    )
+    return {"status": WorkflowStatus.AWAITING_APPROVAL.value}
 
 
+@traced_node
+async def export_node(state: PointerOnlyState) -> Dict[str, Any]:
+    """
+    ACT Phase 3: Exports the approved draft as DOCX and uploads to R2.
+
+    Reads the approved Action row, builds a DOCX via python-docx,
+    uploads to R2 under drafts/{workflow_id}/{action_id}.docx,
+    stores the R2 key in draft_r2_key state field, and marks
+    WorkflowStatus.COMPLETED.
+    """
+    state = _adapt_state(state)
+    workflow_id = state["workflow_id"]
+    wf_uuid = _uuid.UUID(workflow_id)
+    org_id = _uuid.UUID(state["org_id"])
+
+    logger.info("[%s] export_node: building DOCX", workflow_id)
+
+    # Read the approved Action
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(
+            select(Action)
+            .where(
+                Action.workflow_id == wf_uuid,
+                Action.status == ActionStatus.AWAITING_APPROVAL,
+            )
+            .order_by(Action.task_order)
+            .limit(1)
+        )
+        action = res.scalar_one_or_none()
+
+    if not action or not action.draft_payload:
+        logger.error("[%s] export_node: no approved action with draft payload", workflow_id)
+        return {
+            "status": WorkflowStatus.FAILED.value,
+            "error_context": "No approved draft found for export",
+        }
+
+    draft_text: str = action.draft_payload.get("draft_text", "")
+    citations: list = action.draft_payload.get("source_citations", [])
+    checklist: list = action.draft_payload.get("verification_checklist", [])
+
+    # Build DOCX
+    try:
+        from docx import Document as DocxDocument
+        from docx.shared import Pt
+        import io
+
+        doc = DocxDocument()
+        doc.add_heading("Legal Draft", level=1)
+        doc.add_paragraph(draft_text)
+
+        if citations:
+            doc.add_heading("Source Citations", level=2)
+            for cite in citations:
+                p = doc.add_paragraph(style="List Bullet")
+                p.add_run(cite)
+
+        if checklist:
+            doc.add_heading("Verification Checklist", level=2)
+            for i, item in enumerate(checklist, 1):
+                p = doc.add_paragraph(style="List Number")
+                p.add_run(item)
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        docx_bytes = buf.getvalue()
+
+    except Exception as docx_err:
+        logger.error("[%s] export_node DOCX build failed: %s", workflow_id, docx_err)
+        return {
+            "status": WorkflowStatus.FAILED.value,
+            "error_context": f"DOCX build failed: {docx_err}",
+        }
+
+    # Upload to R2
+    r2_key = f"drafts/{workflow_id}/{action.id}.docx"
+    try:
+        await upload_bytes(
+            key=r2_key,
+            data=docx_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    except Exception as upload_err:
+        logger.error("[%s] export_node R2 upload failed: %s", workflow_id, upload_err)
+        return {
+            "status": WorkflowStatus.FAILED.value,
+            "error_context": f"R2 upload failed: {upload_err}",
+        }
+
+    # Mark action as EXECUTED and workflow COMPLETED
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(Action)
+            .where(Action.id == action.id)
+            .values(status=ActionStatus.EXECUTED)
+        )
+        await db.execute(
+            update(WorkflowExecution)
+            .where(WorkflowExecution.id == wf_uuid)
+            .values(
+                status=WorkflowStatus.COMPLETED,
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+
+    logger.info("[%s] export_node: uploaded DOCX to %s", workflow_id, r2_key)
+    return {
+        "status": WorkflowStatus.COMPLETED.value,
+        "draft_r2_key": r2_key,
+    }
+# =============================================================================
+# REMOVED: This node is no longer part of the ACT path (replaced by the
+# Decision Brief -> Draft -> Export pipeline). Kept for reference only.
+# DO NOT wire into graph.py.
+# =============================================================================
 
 @traced_node
 async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
@@ -1862,6 +2065,12 @@ async def qa_node(state: PointerOnlyState) -> Dict[str, Any]:
     return {"status": WorkflowStatus.DRAFTING.value, "qa_issues": issue_count}
 
 
+# =============================================================================
+# REMOVED: This node is no longer part of the ACT path (replaced by the
+# Decision Brief -> Draft -> Export pipeline). Kept for reference only.
+# DO NOT wire into graph.py.
+# =============================================================================
+
 @traced_node
 async def plan_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
@@ -2037,6 +2246,12 @@ async def plan_node(state: PointerOnlyState) -> Dict[str, Any]:
     }
 
 
+# =============================================================================
+# REMOVED: This node is no longer part of the ACT path (replaced by the
+# Decision Brief -> Draft -> Export pipeline). Kept for reference only.
+# DO NOT wire into graph.py.
+# =============================================================================
+
 @traced_node
 async def human_approval_node(state: PointerOnlyState) -> Dict[str, Any]:
     """
@@ -2061,6 +2276,12 @@ async def human_approval_node(state: PointerOnlyState) -> Dict[str, Any]:
 
     return {"status": WorkflowStatus.EXECUTING.value}
 
+
+# =============================================================================
+# REMOVED: This node is no longer part of the ACT path (replaced by the
+# Decision Brief -> Draft -> Export pipeline). Kept for reference only.
+# DO NOT wire into graph.py.
+# =============================================================================
 
 @traced_node
 async def execute_node(state: PointerOnlyState) -> Dict[str, Any]:
@@ -2273,6 +2494,12 @@ async def execute_node(state: PointerOnlyState) -> Dict[str, Any]:
         "status": WorkflowStatus.EXECUTING.value,
     }
 
+
+# =============================================================================
+# REMOVED: This node is no longer part of the ACT path (replaced by the
+# Decision Brief -> Draft -> Export pipeline). Kept for reference only.
+# DO NOT wire into graph.py.
+# =============================================================================
 
 @traced_node
 async def compensate_node(state: PointerOnlyState) -> Dict[str, Any]:

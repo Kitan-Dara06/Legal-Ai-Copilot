@@ -59,3 +59,7 @@ class PointerOnlyState(TypedDict):
 
     # ── Document scoping ───────────────────────────────────────────────────────
     session_file_ids: list[int]  # Qdrant file_ids from the Redis session
+
+    # ── ACT path Phase 1 & 2 gate flags ──────────────────────────────────────
+    brief_confirmed: Optional[bool]   # True after lawyer clicks "proceed to draft"
+    draft_r2_key: Optional[str]       # R2 key for the exported DOCX after approval

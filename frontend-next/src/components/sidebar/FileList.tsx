@@ -56,7 +56,7 @@ export function FileList({
       case "FAILED":
         return (
           <Badge
-            variant="error"
+            variant="danger"
             className="cursor-help"
             title="Failed to embed document"
           >
@@ -64,7 +64,7 @@ export function FileList({
           </Badge>
         );
       default:
-        return <Badge variant="info">Pending</Badge>;
+        return <Badge variant="violet">Pending</Badge>;
     }
   };
 

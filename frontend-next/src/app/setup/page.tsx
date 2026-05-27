@@ -104,7 +104,7 @@ function SetupContent() {
               </div>
             )}
 
-            <Button type="submit" className="w-full mt-6" isLoading={isLoading}>
+            <Button type="submit" className="w-full mt-6" loading={isLoading}>
               Create Workspace
             </Button>
           </form>

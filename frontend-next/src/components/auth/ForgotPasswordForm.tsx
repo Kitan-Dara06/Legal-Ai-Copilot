@@ -70,7 +70,7 @@ export function ForgotPasswordForm() {
         
         {error && <div className="text-sm text-red-500 bg-red-500/10 p-3 rounded">{error}</div>}
         
-        <Button type="submit" className="w-full" isLoading={isLoading}>
+        <Button type="submit" className="w-full" loading={isLoading}>
           Send Reset Link
         </Button>
       </form>

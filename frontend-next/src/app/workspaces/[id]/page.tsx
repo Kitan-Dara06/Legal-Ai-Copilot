@@ -1,570 +1,481 @@
 "use client";
 
-import { Suspense, useEffect, useState, useCallback, useRef } from "react";
-import { useParams, useRouter, useSearchParams } from "next/navigation";
-import Link from "next/link";
-import { getWorkspace, createWorkspaceSession } from "@/lib/api";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { uploadDocument } from "@/lib/api";
-import { createGoal, getGoalStatus, getWorkflowActions, listGoals } from "@/lib/api";
-import { WorkspaceDetailResponse, WorkspaceDocument } from "@/lib/types";
-import { Card } from "@/components/ui/Card";
+import {
+  getWorkspace, uploadDocument, deleteDocument,
+  createGoal, listGoals, getGoalResult, confirmGoalIntent,
+} from "@/lib/api";
+import type {
+  WorkspaceDetailResponse, WorkspaceDocument,
+  GoalSummary, GoalIntent,
+} from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
-import { AmbiguityGate } from "@/components/workspace/AmbiguityGate";
-import { AnalyzeResult } from "@/components/workspace/AnalyzeResult";
-import { ReasonResult } from "@/components/workspace/ReasonResult";
-import { ActResult } from "@/components/workspace/ActResult";
+import { Card } from "@/components/ui/Card";
+import {
+  Upload, FileText, Trash2, ChevronRight,
+  Clock, Loader2, Sparkles, Send, CheckCircle2,
+  AlertTriangle, Info, X,
+} from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
+import Link from "next/link";
+import ReactMarkdown from "react-markdown";
 
-// ── Status helpers ────────────────────────────────────────────────────────────
+// ── Document Status ───────────────────────────────────────────────────────────
 
-const STATUS_PROGRESS: Record<string, number> = {
-  PENDING: 0.2,
-  PROCESSING: 0.6,
-  READY: 1.0,
-  FAILED: 0.0,
-};
-
-const TERMINAL_STATUSES = ["COMPLETED", "FAILED", "CANCELLED", "ESCALATED"];
-
-// Polling backoff: first 15 polls (30s) at 2s, then settle at 10s
-function getPollingInterval(pollCount: number): number {
-  return pollCount < 15 ? 2000 : 10000;
+function docStatusBadge(status: string) {
+  if (status === "READY")      return <Badge variant="success">Ready</Badge>;
+  if (status === "PROCESSING") return <Badge variant="violet">Processing</Badge>;
+  if (status === "PENDING")    return <Badge variant="muted">Pending</Badge>;
+  if (status === "FAILED")     return <Badge variant="danger">Failed</Badge>;
+  return <Badge variant="muted">{status}</Badge>;
 }
 
-// ── Main content (uses useSearchParams — must be inside Suspense) ─────────────
+// ── Goal / workflow status chip ────────────────────────────────────────────────
+
+function GoalStatusChip({ status }: { status: string }) {
+  const actStates = ["BRIEFING","AWAITING_BRIEF_CONFIRMATION","DRAFTING","AWAITING_APPROVAL"];
+  const done = status === "COMPLETED";
+  const act  = actStates.includes(status);
+  const fail = ["FAILED","CANCELLED","ESCALATED"].includes(status);
+
+  return (
+    <Badge
+      variant={done ? "success" : act ? "gold" : fail ? "danger" : "muted"}
+    >
+      {status.replace(/_/g, " ")}
+    </Badge>
+  );
+}
+
+// ── Workspace Detail ───────────────────────────────────────────────────────────
 
 function WorkspaceDetailContent() {
-  const params = useParams();
+  const params = useParams<{ id: string }>();
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const workspaceId = params.id as string;
+  const supabase = createClient();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Auth
-  const [token, setToken] = useState<string | null>(null);
-  const [orgSlug, setOrgSlug] = useState<string | null>(null);
+  const [token, setToken]           = useState<string | null>(null);
+  const [orgSlug, setOrgSlug]       = useState<string | undefined>();
+  const [workspace, setWorkspace]   = useState<WorkspaceDetailResponse | null>(null);
+  const [goals, setGoals]           = useState<GoalSummary[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [uploading, setUploading]   = useState(false);
+  const [goalText, setGoalText]     = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  // Workspace
-  const [workspace, setWorkspace] = useState<WorkspaceDetailResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-
-  // Goal input
-  const [goalText, setGoalText] = useState("");
-  const [goalCharCount, setGoalCharCount] = useState(0);
-  const [processing, setProcessing] = useState(false);
-
-  // Workflow tracking — both IDs persisted in URL
-  const [workflowId, setWorkflowId] = useState<string | null>(null);
-  const [workflowStatus, setWorkflowStatus] = useState<string | null>(null);
-  const [goalId, setGoalId] = useState<string | null>(null);
-
-  // Polling state
-  const pollCountRef = useRef(0);
-  const errorCountRef = useRef(0);
-
-  // Ambiguity gate
-  const [showAmbiguity, setShowAmbiguity] = useState(false);
-  const [detectedIntent, setDetectedIntent] = useState<string>("");
+  // Ambiguity gate state
+  const [pendingGoalId, setPendingGoalId]       = useState<string | null>(null);
+  const [pendingIntent, setPendingIntent]       = useState<GoalIntent | null>(null);
+  const [showAmbiguity, setShowAmbiguity]       = useState(false);
   const [intentConfidence, setIntentConfidence] = useState(0);
 
-  // Results
-  const [analyzeResult, setAnalyzeResult] = useState<any>(null);
-  const [reasonResult, setReasonResult] = useState<any>(null);
-  const [actResult, setActResult] = useState<any>(null);
-
-  // Error toast
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 5000);
-  };
-
-  // ── Auth ──────────────────────────────────────────────────────────────────
+  // Analyze/Reason result inline display
+  const [inlineResult, setInlineResult] = useState<{ type: "analyze" | "reason"; content: string } | null>(null);
 
   useEffect(() => {
-    void (async () => {
-      const supabase = createClient();
-      const { data } = await supabase.auth.getSession();
-      if (data.session) {
-        setToken(data.session.access_token);
-        setOrgSlug(localStorage.getItem("legalrag_active_org"));
-      }
-    })();
+    supabase.auth.getSession().then(({ data }: any) => {
+      if (!data?.session) { router.push("/login"); return; }
+      setToken(data?.session?.access_token);
+      setOrgSlug(data?.session?.user?.user_metadata?.org_slug);
+    });
   }, []);
 
-  // ── URL restoration on refresh ────────────────────────────────────────────
-  // Both goalId and workflowId are stored in URL so polling + ACT panel survive refresh
+  const load = useCallback(async () => {
+    if (!token) return;
+    try {
+      const [ws, goalsRes] = await Promise.all([
+        getWorkspace(token, params.id, orgSlug),
+        listGoals(token, params.id, orgSlug).catch(() => ({ goals: [], total: 0 })),
+      ]);
+      setWorkspace(ws);
+      setGoals(goalsRes.goals ?? []);
+    } catch (e) { console.error(e); }
+    finally { setLoading(false); }
+  }, [token, params.id, orgSlug]);
 
-  useEffect(() => {
-    const urlGoalId = searchParams.get("goalId");
-    const urlWorkflowId = searchParams.get("workflowId");
-    if (urlGoalId && !goalId) {
-      setGoalId(urlGoalId);
-      setProcessing(true);
-      setWorkflowStatus("PROCESSING");
-      pollCountRef.current = 0;
-    }
-    if (urlWorkflowId && !workflowId) {
-      setWorkflowId(urlWorkflowId);
-    }
-  }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [load]);
 
-  // ── Workspace loading ─────────────────────────────────────────────────────
-
-  const loadWorkspace = useCallback(() => {
-    if (!token || !workspaceId) return;
-    setLoading(true);
-    getWorkspace(token, workspaceId, orgSlug || undefined)
-      .then(setWorkspace)
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [token, workspaceId, orgSlug]);
-
-  useEffect(() => {
-    loadWorkspace();
-  }, [loadWorkspace]);
-
-  // ── Polling with backoff + retry ──────────────────────────────────────────
-
-  useEffect(() => {
-    if (!goalId || !token) return;
-
-    const tick = async () => {
-      try {
-        const res = await getGoalStatus(token, workspaceId, goalId, orgSlug || undefined);
-        errorCountRef.current = 0; // reset error streak on success
-        pollCountRef.current += 1;
-
-        setWorkflowStatus(res.status);
-
-        // Fetch ACT actions when workflow is awaiting approval
-        const workflows = (res as any).workflows as any[] | undefined;
-        if (res.status === "AWAITING_APPROVAL" && workflows && workflows.length > 0) {
-          const wfId = workflows[0].id;
-          if (wfId !== workflowId) setWorkflowId(wfId);
-          try {
-            const actData = await getWorkflowActions(token, wfId, orgSlug || undefined);
-            setActResult({ actions: actData.actions, workflow_id: wfId });
-          } catch (e) {
-            console.error("Failed to fetch actions:", e);
-          }
-        }
-
-        // Terminal: stop polling, clear URL
-        if (TERMINAL_STATUSES.includes(res.status)) {
-          clearInterval(intervalRef.current!);
-          setProcessing(false);
-          loadWorkspace();
-          router.replace(`/workspaces/${workspaceId}`, { scroll: false });
-        }
-      } catch {
-        errorCountRef.current += 1;
-        // Allow up to 3 consecutive network errors before giving up
-        if (errorCountRef.current >= 3) {
-          clearInterval(intervalRef.current!);
-          setProcessing(false);
-          showToast("Lost connection to server. Refresh to resume.");
-        }
-      }
-    };
-
-    // Dynamic interval: start fast, slow down after 30s
-    const intervalRef = { current: null as ReturnType<typeof setInterval> | null };
-    const schedule = () => {
-      intervalRef.current = setInterval(tick, getPollingInterval(pollCountRef.current));
-    };
-    schedule();
-
-    // Re-schedule when poll count crosses the backoff threshold
-    const backoffWatcher = setInterval(() => {
-      if (pollCountRef.current === 15) {
-        clearInterval(intervalRef.current!);
-        schedule();
-      }
-    }, 1000);
-
-    return () => {
-      clearInterval(intervalRef.current!);
-      clearInterval(backoffWatcher);
-    };
-  }, [goalId, token, workspaceId, orgSlug, loadWorkspace]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Handlers ──────────────────────────────────────────────────────────────
-
+  // Upload handler
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files?.length || !token) return;
+    if (!files || !token) return;
     setUploading(true);
     try {
       for (const file of Array.from(files)) {
-        await uploadDocument(token, workspaceId, file, orgSlug || undefined);
+        await uploadDocument(token, params.id, file, orgSlug);
       }
-      loadWorkspace();
-    } catch (err) {
-      showToast("Upload failed. Please try again.");
-      console.error("Upload failed:", err);
-    } finally {
-      setUploading(false);
-      e.target.value = "";
-    }
+      await load();
+    } catch (err) { console.error(err); }
+    finally { setUploading(false); if (fileInputRef.current) fileInputRef.current.value = ""; }
   };
 
-  const handleCreateSession = async () => {
-    if (!token || !workspace) return;
-    const readyDocs = workspace.documents.filter((d) => d.status === "READY");
-    if (readyDocs.length === 0) return;
+  // Delete document
+  const handleDelete = async (docId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!token) return;
     try {
-      const res = await createWorkspaceSession(
-        token,
-        workspaceId,
-        readyDocs.map((d) => d.document_id),
-        orgSlug || undefined,
-      );
-      setSessionId(res.session_id);
-    } catch (err) {
-      showToast("Session creation failed.");
-      console.error("Session creation failed:", err);
-    }
+      await deleteDocument(token, params.id, docId, orgSlug);
+      await load();
+    } catch (err) { console.error(err); }
   };
 
-  const handleSubmitGoal = async () => {
-    if (!token || !goalText.trim()) return;
-    setProcessing(true);
-    setAnalyzeResult(null);
-    setReasonResult(null);
-    setShowAmbiguity(false);
-    setWorkflowId(null);
-    setWorkflowStatus(null);
-    setGoalId(null);
-    pollCountRef.current = 0;
-    errorCountRef.current = 0;
+  // Submit goal
+  const handleSubmit = async () => {
+    if (!token || !goalText.trim() || submitting) return;
 
+    // Pick first READY doc as primary document
+    const primaryDoc = workspace?.documents.find((d) => d.status === "READY");
+    if (!primaryDoc) return;
+
+    setSubmitting(true);
+    setInlineResult(null);
     try {
-      const res = await createGoal(
-        token,
-        workspaceId,
-        goalText.trim(),
-        undefined,
-        orgSlug || undefined,
-      );
+      const res = await createGoal(token, params.id, goalText.trim(), undefined, orgSlug);
 
-      // Build URL params — store both IDs for refresh resilience
-      const params = new URLSearchParams();
-      if (res.goal_id) {
-        setGoalId(res.goal_id);
-        params.set("goalId", res.goal_id);
-      }
-      if (res.workflow_id) {
-        setWorkflowId(res.workflow_id);
-        setWorkflowStatus(res.status || "PROCESSING");
-        params.set("workflowId", res.workflow_id);
-      }
-      if (params.toString()) {
-        router.replace(`/workspaces/${workspaceId}?${params.toString()}`, { scroll: false });
+      if (!res.goal_id) throw new Error("No goal_id returned");
+
+      const confidence = res.intent_confidence ?? 0;
+      const intent = res.primary_intent;
+
+      // Ambiguity gate
+      if (confidence < 0.8 || !intent) {
+        setPendingGoalId(res.goal_id);
+        setPendingIntent(intent ?? null);
+        setIntentConfidence(confidence);
+        setShowAmbiguity(true);
+        setSubmitting(false);
+        return;
       }
 
-      if (res.primary_intent && res.intent_confidence !== undefined) {
-        if (res.intent_confidence < 0.8 && res.primary_intent) {
-          setDetectedIntent(res.primary_intent);
-          setIntentConfidence(res.intent_confidence);
-          setShowAmbiguity(true);
+      // ACT → navigate to workflow review page
+      if (intent === "ACT" && res.workflow_id) {
+        setGoalText("");
+        router.push(`/workspaces/${params.id}/workflows/${res.workflow_id}`);
+        return;
+      }
+
+      // ANALYZE / REASON — poll for result inline
+      if ((intent === "ANALYZE" || intent === "REASON") && res.goal_id) {
+        setGoalText("");
+        await pollGoalResult(res.goal_id, intent);
+        await load();
+      }
+    } catch (err) { console.error(err); }
+    finally { setSubmitting(false); }
+  };
+
+  const pollGoalResult = async (goalId: string, intent: GoalIntent) => {
+    const MAX = 60;
+    for (let i = 0; i < MAX; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const res = await getGoalResult(token!, params.id, goalId, orgSlug);
+        if (res.status === "COMPLETED" || res.answer) {
+          setInlineResult({
+            type: intent.toLowerCase() as "analyze" | "reason",
+            content: res.answer ?? "",
+          });
+          return;
         }
-      }
-
-      if (res.answer) {
-        setAnalyzeResult({
-          answer: res.answer,
-          confidence: res.intent_confidence || 0.5,
-          source_citations: [],
-          faithfulness_score: 1.0,
-        });
-      }
-
-      setGoalText("");
-    } catch (err) {
-      showToast("Failed to submit goal. Please try again.");
-      console.error("Goal creation failed:", err);
-      setProcessing(false);
+        if (["FAILED","ESCALATED","CANCELLED"].includes(res.status)) return;
+      } catch {}
     }
   };
 
-  const handleConfirmIntent = (confirmedIntent: string) => {
+  const handleConfirmIntent = async (intent: GoalIntent) => {
+    if (!token || !pendingGoalId) return;
     setShowAmbiguity(false);
-    setWorkflowStatus("EXECUTING");
+    try {
+      await confirmGoalIntent(token, params.id, pendingGoalId, intent, orgSlug);
+      // After confirming, check if it became ACT
+      if (intent === "ACT") {
+        // poll for workflow_id
+        for (let i = 0; i < 20; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          const res = await getGoalResult(token, params.id, pendingGoalId, orgSlug);
+          if (res.status && ["BRIEFING","AWAITING_BRIEF_CONFIRMATION","AWAITING_APPROVAL","COMPLETED"].includes(res.status)) {
+            // find workflow_id from goals list
+            const fresh = await listGoals(token, params.id, orgSlug);
+            const g = fresh.goals.find((g) => g.id === pendingGoalId);
+            if (g?.workflow_id) {
+              router.push(`/workspaces/${params.id}/workflows/${g.workflow_id}`);
+              return;
+            }
+          }
+        }
+      } else {
+        await pollGoalResult(pendingGoalId, intent);
+        await load();
+      }
+    } catch (err) { console.error(err); }
+    finally { setPendingGoalId(null); }
   };
 
-  // ── Status helpers ────────────────────────────────────────────────────────
-
-  const statusVariant = (
-    status: string,
-  ): "success" | "info" | "warning" | "error" | "default" => {
-    switch (status) {
-      case "READY":
-        return "success";
-      case "PROCESSING":
-        return "info";
-      case "PENDING":
-        return "warning";
-      case "FAILED":
-        return "error";
-      default:
-        return "default";
-    }
-  };
-
-  // ── Loading & error states ────────────────────────────────────────────────
+  const readyDocs = workspace?.documents.filter((d) => d.status === "READY") ?? [];
+  const canSubmit = readyDocs.length > 0 && goalText.trim().length > 0 && !submitting;
 
   if (loading) {
     return (
-      <div className="max-w-6xl mx-auto px-4 py-8">
-        {/* Skeleton loader */}
-        <div className="animate-pulse space-y-4">
-          <div className="h-8 bg-slate-800 rounded w-1/3" />
-          <div className="h-4 bg-slate-800 rounded w-1/4" />
-          <div className="h-48 bg-slate-800 rounded mt-6" />
-          <div className="h-32 bg-slate-800 rounded" />
-        </div>
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="w-8 h-8 text-[#D4A853] animate-spin" />
       </div>
     );
   }
 
-  if (!workspace) {
-    return (
-      <div className="max-w-6xl mx-auto px-4 py-8">
-        <div className="text-slate-400 text-center py-12">Workspace not found</div>
-      </div>
-    );
-  }
-
-  const readyDocs = workspace.documents.filter((d) => d.status === "READY");
-
-  // ── Render ────────────────────────────────────────────────────────────────
+  if (!workspace) return null;
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8">
-      {/* Global toast */}
-      {toastMessage && (
-        <div className="fixed top-4 right-4 z-50 bg-red-900/90 border border-red-500/40 text-red-200 text-sm px-4 py-3 rounded-lg shadow-lg max-w-sm">
-          {toastMessage}
-        </div>
-      )}
+    <div className="max-w-[1000px] mx-auto px-6 py-8">
 
-      {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-white">{workspace.name}</h1>
-        {workspace.description && (
-          <p className="text-slate-400 text-sm mt-1">{workspace.description}</p>
-        )}
-        <div className="flex items-center gap-3 mt-2">
-          <Badge variant={statusVariant(workspace.intelligence_status)}>
-            {workspace.intelligence_status}
-          </Badge>
-          <span className="text-slate-400 text-sm">
-            {workspace.document_count} documents
-          </span>
-        </div>
+      {/* Breadcrumb */}
+      <div className="flex items-center gap-2 text-xs text-[#7A7A8A] mb-6">
+        <Link href="/workspaces" className="hover:text-[#F0EEE9] transition-colors">Workspaces</Link>
+        <span>/</span>
+        <span className="text-[#F0EEE9]">{workspace.name}</span>
       </div>
 
-      {/* AWAITING_APPROVAL banner — prominent, actionable */}
-      {workflowStatus === "AWAITING_APPROVAL" && (
-        <div className="mb-6 p-4 bg-amber-900/20 border border-amber-500/40 rounded-lg flex items-center justify-between">
-          <div>
-            <p className="text-amber-300 font-semibold text-sm">
-              ⚖️ Action requires your approval
-            </p>
-            <p className="text-amber-500/80 text-xs mt-0.5">
-              Lex has drafted a notice. Review and approve or reject it to continue.
-            </p>
+      {/* Workspace header */}
+      <div className="flex items-start justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-semibold text-[#F0EEE9] tracking-tight">{workspace.name}</h1>
+          {workspace.description && (
+            <p className="text-sm text-[#7A7A8A] mt-1">{workspace.description}</p>
+          )}
+          <div className="flex items-center gap-3 mt-2">
+            {workspace.intelligence_status === "READY"
+              ? <Badge variant="success">Intelligence Ready</Badge>
+              : <Badge variant="muted">{workspace.intelligence_status}</Badge>}
+            <span className="text-xs text-[#4A4A5A]">{workspace.document_count} documents</span>
           </div>
-          <Link
-            href="/approvals"
-            className="flex-shrink-0 ml-4 px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black text-sm font-semibold rounded-lg transition-colors"
-          >
-            Go to Approvals →
-          </Link>
         </div>
-      )}
+        <Button variant="ghost" size="sm" onClick={() => router.push("/workspaces")}>
+          ← Back
+        </Button>
+      </div>
 
-      {/* Document Library */}
-      <Card className="mb-6 p-4">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-white">Document Library</h2>
-          <label className="cursor-pointer">
-            <span
-              className={`inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors px-4 py-2 ${uploading
-                  ? "bg-slate-700 text-slate-400 cursor-not-allowed"
-                  : "bg-accent-blue text-white hover:bg-accent-blue/90"
-                }`}
-            >
-              {uploading ? "Uploading..." : "Upload PDF"}
-            </span>
-            <input
-              type="file"
-              accept=".pdf,.docx"
-              multiple
-              className="hidden"
-              onChange={handleUpload}
-            />
-          </label>
-        </div>
-        {workspace.documents.length === 0 ? (
-          <p className="text-slate-500 text-sm py-4">
-            No documents yet. Upload a PDF to get started.
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {workspace.documents.map((doc) => (
-              <div
-                key={doc.document_id}
-                className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="text-slate-300 text-sm">{doc.filename}</span>
-                  {doc.stages && (
-                    <div className="flex gap-1">
-                      {Object.entries(doc.stages).map(([stage, done]) => (
-                        <Badge
-                          key={stage}
-                          variant={done ? "success" : "warning"}
-                        >
-                          {stage}
-                        </Badge>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <Badge variant={statusVariant(doc.status)}>{doc.status}</Badge>
-                  {doc.status === "FAILED" && doc.error && (
-                    <span className="text-red-400 text-xs" title={doc.error}>
-                      ⚠
-                    </span>
-                  )}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-5">
+
+        {/* LEFT — Goal input + results + history */}
+        <div className="space-y-5">
+
+          {/* Goal input */}
+          <Card className="p-5">
+            <h2 className="text-sm font-semibold text-[#F0EEE9] mb-3 flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-[#7C6AF7]" strokeWidth={1.5} />
+              Ask a Question or Request a Draft
+            </h2>
+            {readyDocs.length === 0 ? (
+              <div className="flex items-start gap-2 p-3 rounded-lg bg-[#E8A44C]/5 border border-[#E8A44C]/15">
+                <Info className="w-4 h-4 text-[#E8A44C] mt-0.5 shrink-0" strokeWidth={1.5} />
+                <p className="text-xs text-[#F0EEE9]/70">
+                  Upload and process at least one document before submitting a goal.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <textarea
+                  className="w-full bg-[#1E1E28] border border-[#2A2A32] focus:border-[#7C6AF7] rounded-lg px-4 py-3 text-sm text-[#F0EEE9] placeholder-[#4A4A5A] resize-none outline-none transition-colors"
+                  rows={4}
+                  placeholder={`e.g. "Summarize the termination clauses" or "Draft a response to the notice in clause 15"`}
+                  value={goalText}
+                  onChange={(e) => setGoalText(e.target.value)}
+                  disabled={submitting}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSubmit();
+                  }}
+                  maxLength={2000}
+                />
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-[#4A4A5A]">{goalText.length}/2000 · ⌘↵ to submit</span>
+                  <Button variant="primary" size="sm" loading={submitting} disabled={!canSubmit} onClick={handleSubmit}>
+                    <Send className="w-3.5 h-3.5" />
+                    Submit
+                  </Button>
                 </div>
               </div>
-            ))}
-          </div>
-        )}
-      </Card>
+            )}
+          </Card>
 
-      {/* Active Session Panel */}
-      <Card className="mb-6 p-4">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-white">Active Session</h2>
-          {!sessionId && readyDocs.length > 0 && (
-            <Button onClick={handleCreateSession} size="sm">
-              Initialize Session ({readyDocs.length} ready docs)
-            </Button>
+          {/* Ambiguity gate */}
+          {showAmbiguity && (
+            <Card className="p-5 border-[#D4A853]/25 animate-slide-up" gold>
+              <div className="flex items-start justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-[#D4A853]" strokeWidth={1.5} />
+                  <h3 className="text-sm font-semibold text-[#F0EEE9]">Confirm Intent</h3>
+                </div>
+                <button onClick={() => setShowAmbiguity(false)} className="text-[#7A7A8A] hover:text-[#F0EEE9]">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="text-xs text-[#7A7A8A] mb-4">
+                Confidence: <span className="text-[#D4A853] font-mono">{Math.round(intentConfidence * 100)}%</span> —
+                What do you want Lex to do?
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                {(["ANALYZE", "REASON", "ACT"] as GoalIntent[]).map((intent) => (
+                  <button
+                    key={intent}
+                    onClick={() => handleConfirmIntent(intent)}
+                    className={`p-3 rounded-lg border text-xs font-medium transition-all text-center ${
+                      pendingIntent === intent
+                        ? "border-[#D4A853] bg-[#D4A853]/10 text-[#D4A853]"
+                        : "border-[#2A2A32] bg-[#1E1E28] text-[#7A7A8A] hover:border-[#363644] hover:text-[#F0EEE9]"
+                    }`}
+                  >
+                    <span className="block text-base mb-1">
+                      {intent === "ANALYZE" ? "📊" : intent === "REASON" ? "🔍" : "✍️"}
+                    </span>
+                    {intent}
+                    <span className="block text-[9px] mt-0.5 opacity-60">
+                      {intent === "ANALYZE" ? "Summarize" : intent === "REASON" ? "Find conflicts" : "Draft document"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {/* Inline result (ANALYZE / REASON) */}
+          {inlineResult && (
+            <Card className="p-5 animate-slide-up" violet>
+              <div className="flex items-center gap-2 mb-3">
+                <CheckCircle2 className="w-4 h-4 text-[#3ECFA4]" strokeWidth={1.5} />
+                <span className="text-sm font-semibold text-[#F0EEE9]">
+                  {inlineResult.type === "analyze" ? "Analysis Complete" : "Reasoning Complete"}
+                </span>
+              </div>
+              <div className="prose prose-sm prose-invert max-w-none text-[#F0EEE9]/90 text-sm leading-relaxed">
+                <ReactMarkdown>{inlineResult.content}</ReactMarkdown>
+              </div>
+              <button
+                className="mt-3 text-xs text-[#7A7A8A] hover:text-[#F0EEE9] transition-colors"
+                onClick={() => setInlineResult(null)}
+              >
+                Dismiss
+              </button>
+            </Card>
+          )}
+
+          {/* Goal history */}
+          {goals.length > 0 && (
+            <div>
+              <h2 className="text-sm font-semibold text-[#7A7A8A] mb-3 uppercase tracking-wider text-xs">
+                Recent Goals
+              </h2>
+              <div className="space-y-2">
+                {goals.slice(0, 8).map((goal) => (
+                  <button
+                    key={goal.id}
+                    onClick={() => {
+                      if (goal.workflow_id && ["BRIEFING","AWAITING_BRIEF_CONFIRMATION","DRAFTING","AWAITING_APPROVAL","COMPLETED"].includes(goal.status)) {
+                        router.push(`/workspaces/${params.id}/workflows/${goal.workflow_id}`);
+                      }
+                    }}
+                    className="w-full flex items-center justify-between p-4 rounded-lg border border-[#2A2A32] bg-[#16161D] hover:bg-[#1E1E28] transition-colors text-left group"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm text-[#F0EEE9] truncate">{goal.goal_text}</p>
+                      <p className="text-[10px] text-[#4A4A5A] mt-0.5 flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        {formatDistanceToNow(new Date(goal.created_at), { addSuffix: true })}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 ml-3 shrink-0">
+                      <GoalStatusChip status={goal.status} />
+                      {goal.workflow_id && (
+                        <ChevronRight className="w-4 h-4 text-[#4A4A5A] group-hover:text-[#7A7A8A] transition-colors" />
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </div>
-        {sessionId ? (
-          <div>
-            <Badge variant="success">Session Active</Badge>
-            <span className="text-slate-400 text-xs ml-2 font-mono">
-              {sessionId.slice(0, 8)}...
-            </span>
-            <p className="text-slate-500 text-sm mt-2">
-              {readyDocs.length} documents in context
-            </p>
-          </div>
-        ) : (
-          <p className="text-slate-500 text-sm">
-            {readyDocs.length === 0
-              ? "No documents ready. Wait for processing to complete."
-              : "Select ready documents and initialize a session to start querying."}
-          </p>
-        )}
-      </Card>
 
-      {/* Goal Input */}
-      {sessionId && (
-        <Card className="mb-6 p-4">
-          <h2 className="text-lg font-semibold text-white mb-4">What do you need?</h2>
-          <div className="relative">
-            <textarea
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg p-4 text-white placeholder-slate-500 resize-none focus:outline-none focus:border-blue-500"
-              rows={3}
-              placeholder="What do you need?"
-              value={goalText}
-              disabled={processing}
-              onChange={(e) => {
-                setGoalText(e.target.value);
-                setGoalCharCount(e.target.value.length);
-              }}
-              maxLength={2000}
-            />
-            <div className="absolute bottom-3 right-3 text-xs text-slate-500">
-              {goalCharCount}/2000
+        {/* RIGHT — Document Library */}
+        <div>
+          <Card className="overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[#2A2A32]">
+              <h2 className="text-sm font-semibold text-[#F0EEE9]">Documents</h2>
+              <label className="cursor-pointer">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  loading={uploading}
+                  onClick={() => fileInputRef.current?.click()}
+                  type="button"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Upload
+                </Button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf,.docx"
+                  multiple
+                  className="hidden"
+                  onChange={handleUpload}
+                />
+              </label>
             </div>
-          </div>
-          <div className="flex justify-end mt-3">
-            <Button onClick={handleSubmitGoal} disabled={!goalText.trim() || processing}>
-              {processing ? "Processing..." : "Submit"}
-            </Button>
-          </div>
-        </Card>
-      )}
 
-      {/* Workflow Status spinner — hide when awaiting approval (banner covers it) */}
-      {workflowStatus &&
-        workflowStatus !== "COMPLETED" &&
-        workflowStatus !== "FAILED" &&
-        workflowStatus !== "AWAITING_APPROVAL" && (
-          <Card className="mb-6 p-4">
-            <div className="flex items-center gap-3">
-              <div className="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full" />
-              <span className="text-slate-300 text-sm">{workflowStatus}</span>
-              {pollCountRef.current >= 15 && (
-                <span className="text-slate-500 text-xs">
-                  (checking every 10s — this may take a few minutes)
-                </span>
+            {/* Document list */}
+            <div className="divide-y divide-[#2A2A32]">
+              {workspace.documents.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-10 gap-2 text-center px-4">
+                  <FileText className="w-8 h-8 text-[#2A2A32]" strokeWidth={1} />
+                  <p className="text-xs text-[#7A7A8A]">No documents yet</p>
+                  <p className="text-[10px] text-[#4A4A5A]">Upload a PDF or DOCX to get started</p>
+                </div>
+              ) : (
+                workspace.documents.map((doc) => (
+                  <div
+                    key={doc.document_id}
+                    className="flex items-center justify-between px-4 py-3 hover:bg-[#1E1E28] transition-colors group"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <FileText className="w-3.5 h-3.5 text-[#7A7A8A] shrink-0" strokeWidth={1.5} />
+                      <div className="min-w-0">
+                        <p className="text-xs text-[#F0EEE9] truncate font-medium">{doc.filename}</p>
+                        <p className="text-[10px] text-[#4A4A5A] mt-0.5">
+                          {formatDistanceToNow(new Date(doc.upload_date), { addSuffix: true })}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 ml-2 shrink-0">
+                      {docStatusBadge(doc.status)}
+                      <button
+                        onClick={(e) => handleDelete(doc.document_id, e)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-[#7A7A8A] hover:text-[#F06B6B]"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))
               )}
             </div>
           </Card>
-        )}
-
-      {/* Ambiguity Gate */}
-      {showAmbiguity && (
-        <AmbiguityGate
-          detectedIntent={detectedIntent}
-          confidence={intentConfidence}
-          onConfirm={handleConfirmIntent}
-        />
-      )}
-
-      {/* Analyze Result */}
-      {analyzeResult && <AnalyzeResult result={analyzeResult} />}
-
-      {/* Reason Result */}
-      {reasonResult && <ReasonResult result={reasonResult} />}
-
-      {/* Act Result */}
-      {actResult && (
-        <ActResult actions={actResult.actions} workflowId={actResult.workflow_id} />
-      )}
+        </div>
+      </div>
     </div>
   );
 }
 
-// ── Page export — Suspense required for useSearchParams in Next.js 14 ─────────
-
 export default function WorkspaceDetailPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="max-w-6xl mx-auto px-4 py-8">
-          <div className="animate-pulse space-y-4">
-            <div className="h-8 bg-slate-800 rounded w-1/3" />
-            <div className="h-4 bg-slate-800 rounded w-1/4" />
-            <div className="h-48 bg-slate-800 rounded mt-6" />
-            <div className="h-32 bg-slate-800 rounded" />
-          </div>
-        </div>
-      }
-    >
+    <Suspense fallback={
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="w-8 h-8 text-[#D4A853] animate-spin" />
+      </div>
+    }>
       <WorkspaceDetailContent />
     </Suspense>
   );

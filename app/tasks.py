@@ -1216,7 +1216,7 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
         async with get_checkpointer() as checkpointer:
             app = create_action_agent_graph().compile(
                 checkpointer=checkpointer,
-                interrupt_before=["ambiguity_gate", "human_approval"],
+                interrupt_before=["ambiguity_gate", "decision_brief", "draft"],
             )
             config = {"configurable": {"thread_id": str(workflow_id)}}
             final_state = await app.ainvoke(initial_state, config=config)
@@ -1363,7 +1363,7 @@ def resume_workflow_after_approval(
         async with get_checkpointer() as checkpointer:
             app = create_action_agent_graph().compile(
                 checkpointer=checkpointer,
-                interrupt_before=["ambiguity_gate", "human_approval"],
+                interrupt_before=["ambiguity_gate", "decision_brief", "draft"],
             )
             config = {"configurable": {"thread_id": str(workflow_id)}}
             # ainvoke(None) resumes from the checkpoint — no new initial state

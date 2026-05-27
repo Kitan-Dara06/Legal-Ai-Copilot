@@ -1,34 +1,39 @@
-// ── API Service Layer ────────────────────────────────────────────────────────
-// Typed wrapper around fetch. Reads Supabase token from cookie via
-// a getter passed in at call time (works in both server + client components).
+// ── API Service Layer ─────────────────────────────────────────────────────────
+// Typed wrapper around fetch. All calls require a Supabase JWT token.
 
 import type {
   AcceptInviteResponse,
+  ConfirmIntentResponse,
+  CreateGoalResponse,
+  DeadlineItem,
+  DecisionBrief,
+  EscalationItem,
+  GetActionsResponse,
+  GoalDetail,
+  GoalIntent,
+  GoalSummary,
+  IngestJobQueued,
+  IngestJobStatus,
   InviteVerifyResponse,
+  LexAction,
+  NotificationItem,
   OrgEntry,
+  OrgMember,
   SetupOrgResponse,
   User,
-  OrgMember,
-  WorkspaceResponse,
+  WorkflowBriefResponse,
+  WorkflowStatusResponse,
   WorkspaceDetailResponse,
-  CreateGoalResponse,
-  GoalDetail,
-  GoalSummary,
-  GoalIntent,
-  ConfirmIntentResponse,
-  NotificationItem,
-  ApprovalRequest,
+  WorkspaceResponse,
 } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
-if (!API_URL) {
-  if (typeof window !== "undefined") {
-    console.error("NEXT_PUBLIC_API_URL is not defined. API calls will fail.");
-  }
+if (!API_URL && typeof window !== "undefined") {
+  console.error("NEXT_PUBLIC_API_URL is not defined. API calls will fail.");
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 type Headers = Record<string, string>;
 
@@ -44,7 +49,7 @@ export class AppError extends Error {
 }
 
 function buildHeaders(token?: string | null, orgSlug?: string | null): Headers {
-  const h: Headers = { "Content-Type": "application/json" };
+  const h: Headers = {};
   if (token) h["Authorization"] = `Bearer ${token}`;
   if (orgSlug) h["X-Active-Org"] = orgSlug;
   return h;
@@ -56,92 +61,66 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const { token, orgSlug, headers: extraHeaders, ...rest } = opts;
   const url = `${API_URL}${path}`;
-  console.log(`[apiFetch] Calling ${url}...`);
-
   const res = await fetch(url, {
     ...rest,
-    headers: {
-      ...buildHeaders(token, orgSlug),
-      ...(extraHeaders as Record<string, string>),
-    },
-  }).catch((err) => {
-    console.error(`[apiFetch] Network error calling ${url}:`, err);
-    throw err;
+    headers: { ...buildHeaders(token, orgSlug), ...(extraHeaders as Headers) },
   });
-
   if (!res.ok) {
-    console.error(`[apiFetch] HTTP ${res.status} for ${url}`);
-    let message = res.statusText;
-    let code: string | undefined;
+    let detail = `HTTP ${res.status}`;
     try {
-      const body = await res.json();
-      if (body.detail && typeof body.detail === "object") {
-        code = body.detail.code;
-        message = body.detail.message || JSON.stringify(body.detail);
-      } else if (typeof body.detail === "string") {
-        message = body.detail;
-      }
-    } catch {
-      /* ignore */
-    }
-
-    if (res.status === 401) {
-      console.warn(`[apiFetch] 401 Unauthorized for ${url}`);
-      if (typeof window !== "undefined") window.location.href = "/login";
-    }
-
-    throw new AppError(message, code, res.status);
+      const json = await res.json();
+      detail = json?.detail ?? json?.message ?? detail;
+    } catch {}
+    throw new AppError(detail, undefined, res.status);
   }
-
-  if (res.status === 204) {
-    return undefined as T;
-  }
-
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
-// ── Auth ──────────────────────────────────────────────────────────────────────
-
-export async function checkOrgAvailable(orgId: string) {
-  const res = await fetch(
-    `${API_URL}/auth/check-org?org_id=${encodeURIComponent(orgId)}`,
-  );
-  const data = await res.json();
-  return data as { available: boolean };
-}
+// ── Auth / Identity ───────────────────────────────────────────────────────────
 
 export function getMe(token: string, orgSlug?: string) {
   return apiFetch<User>("/auth/me", { token, orgSlug });
 }
 
-export async function getMyOrgs(token: string) {
-  const res = await apiFetch<OrgEntry[]>("/auth/my-orgs", { token });
-  return res;
+export function listOrgs(token: string) {
+  return apiFetch<OrgEntry[]>("/auth/orgs", { token });
 }
 
-export function setupOrg(
-  token: string,
-  payload: { org_id: string; org_name?: string },
+export function setupOrg(email: string, orgName: string, password: string) {
+  return apiFetch<SetupOrgResponse>("/auth/setup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, org_name: orgName, password }),
+  });
+}
+
+export function verifyInvite(token: string) {
+  return apiFetch<InviteVerifyResponse>(`/auth/invite/verify?token=${token}`);
+}
+
+export function acceptInvite(
+  inviteToken: string,
+  password: string,
+  fullName: string,
 ) {
-  return apiFetch<SetupOrgResponse>("/auth/setup-org", {
-    token,
+  return apiFetch<AcceptInviteResponse>("/auth/invite/accept", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ token: inviteToken, password, full_name: fullName }),
   });
 }
 
-export function inviteByEmail(token: string, email: string, orgSlug?: string) {
-  return apiFetch<{ message: string }>("/auth/invite-by-email", {
+export function updatePassword(token: string, newPassword: string) {
+  return apiFetch<{ message: string }>("/auth/update-password", {
     token,
-    orgSlug,
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ new_password: newPassword }),
   });
 }
 
-export function getMembers(token: string, orgSlug?: string) {
+export function listOrgMembers(token: string, orgSlug?: string) {
   return apiFetch<OrgMember[]>("/auth/members", { token, orgSlug });
 }
 
@@ -153,39 +132,28 @@ export function removeMember(token: string, userId: string, orgSlug?: string) {
   });
 }
 
-// ── Invites ───────────────────────────────────────────────────────────────────
-
-export function verifyInviteToken(token: string) {
-  return apiFetch<InviteVerifyResponse>(
-    `/invites/verify?token=${encodeURIComponent(token)}`,
-  );
-}
-
-export function acceptInvite(payload: {
-  token: string;
-  full_name?: string;
-  password?: string;
-}) {
-  return apiFetch<AcceptInviteResponse>("/invites/accept", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export function acceptExistingInvite(token: string, inviteToken: string) {
-  return apiFetch<{ message: string }>("/auth/accept-invite-by-token", {
+export function inviteMember(
+  token: string,
+  email: string,
+  orgSlug?: string,
+  role: "ADMIN" | "MEMBER" = "MEMBER",
+) {
+  return apiFetch<{ message: string }>("/auth/invite", {
     token,
+    orgSlug,
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token: inviteToken }),
+    body: JSON.stringify({ email, role }),
   });
 }
 
 // ── Workspaces ────────────────────────────────────────────────────────────────
 
 export function listWorkspaces(token: string, orgSlug?: string) {
-  return apiFetch<WorkspaceResponse[]>("/workspaces", { token, orgSlug });
+  return apiFetch<{ workspaces: WorkspaceResponse[] }>("/workspaces", {
+    token,
+    orgSlug,
+  });
 }
 
 export function getWorkspace(
@@ -193,19 +161,16 @@ export function getWorkspace(
   workspaceId: string,
   orgSlug?: string,
 ) {
-  return apiFetch<WorkspaceDetailResponse>(
-    `/workspaces/${workspaceId}?include_docs=true`,
-    {
-      token,
-      orgSlug,
-    },
-  );
+  return apiFetch<WorkspaceDetailResponse>(`/workspaces/${workspaceId}`, {
+    token,
+    orgSlug,
+  });
 }
 
 export function createWorkspace(
   token: string,
   name: string,
-  description?: string,
+  description: string,
   orgSlug?: string,
 ) {
   return apiFetch<WorkspaceResponse>("/workspaces", {
@@ -217,41 +182,32 @@ export function createWorkspace(
   });
 }
 
-// ── Workspace Documents ───────────────────────────────────────────────────────
+// ── Documents ─────────────────────────────────────────────────────────────────
 
-export async function uploadDocument(
+export function uploadDocument(
   token: string,
   workspaceId: string,
   file: File,
   orgSlug?: string,
-  onProgress?: (pct: number) => void,
-): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${API_URL}/workspaces/${workspaceId}/documents`);
-    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-    if (orgSlug) xhr.setRequestHeader("X-Active-Org", orgSlug);
+) {
+  const fd = new FormData();
+  fd.append("file", file);
+  return apiFetch<IngestJobQueued>(`/workspaces/${workspaceId}/documents`, {
+    token,
+    orgSlug,
+    method: "POST",
+    body: fd,
+  });
+}
 
-    if (onProgress) {
-      xhr.upload.addEventListener("progress", (e) => {
-        if (e.lengthComputable)
-          onProgress(Math.round((e.loaded / e.total) * 100));
-      });
-    }
-
-    xhr.onload = () => {
-      // Backend returns 200 (not 202) for successful upload
-      if (xhr.status === 200 || xhr.status === 202) {
-        resolve(JSON.parse(xhr.responseText));
-      } else {
-        reject(new Error(`Upload failed: HTTP ${xhr.status}`));
-      }
-    };
-    xhr.onerror = () => reject(new Error("Network error during upload"));
-
-    const fd = new FormData();
-    fd.append("file", file);
-    xhr.send(fd);
+export function getIngestStatus(
+  token: string,
+  jobId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<IngestJobStatus>(`/ingest/status/${jobId}`, {
+    token,
+    orgSlug,
   });
 }
 
@@ -267,26 +223,9 @@ export function deleteDocument(
   );
 }
 
-export function getDocumentStatus(
-  token: string,
-  workspaceId: string,
-  documentId: string,
-  orgSlug?: string,
-) {
-  return apiFetch<{
-    document_id: string;
-    status: string;
-    stages?: Record<string, boolean> | null;
-    error?: string | null;
-  }>(`/workspaces/${workspaceId}/documents/${documentId}/status`, {
-    token,
-    orgSlug,
-  });
-}
+// ── Sessions ──────────────────────────────────────────────────────────────────
 
-// ── Workspace Sessions (scoped document subset) ───────────────────────────────
-
-export function createWorkspaceSession(
+export function createSession(
   token: string,
   workspaceId: string,
   documentIds: string[],
@@ -304,38 +243,7 @@ export function createWorkspaceSession(
   );
 }
 
-export function getWorkspaceSession(
-  token: string,
-  workspaceId: string,
-  sessionId: string,
-  orgSlug?: string,
-) {
-  return apiFetch<{
-    session_id: string;
-    workspace_id: string;
-    documents: { document_id: string; filename: string; status: string }[];
-  }>(`/workspaces/${workspaceId}/sessions/${sessionId}`, { token, orgSlug });
-}
-
-export function createWorkspaceScopedSession(
-  token: string,
-  workspaceId: string,
-  documentIds: string[],
-  orgSlug?: string,
-) {
-  return apiFetch<{ session_id: string }>(
-    `/workspaces/${workspaceId}/session`,
-    {
-      token,
-      orgSlug,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ document_ids: documentIds }),
-    },
-  );
-}
-
-// ── Unified Goals API ────────────────────────────────────────────────────────
+// ── Goals ─────────────────────────────────────────────────────────────────────
 
 export function createGoal(
   token: string,
@@ -366,7 +274,7 @@ export function listGoals(
   );
 }
 
-export function getGoalStatus(
+export function getGoalDetail(
   token: string,
   workspaceId: string,
   goalId: string,
@@ -376,44 +284,6 @@ export function getGoalStatus(
     token,
     orgSlug,
   });
-}
-
-export function getGoalResult(
-  token: string,
-  workspaceId: string,
-  goalId: string,
-  orgSlug?: string,
-) {
-  return apiFetch<{
-    goal_id: string;
-    status: string;
-    intent?: string | null;
-    answer?: string | null;
-    actions?: {
-      id: string;
-      action_type: string;
-      description: string;
-      status: string;
-      urgency: number;
-    }[];
-    logs?: {
-      id: string;
-      tool_name: string;
-      status: string;
-      summary: string;
-      created_at: string;
-    }[];
-    findings?: {
-      id: string;
-      claim: string;
-      confidence: number;
-      supporting_citations?: any;
-      reference_chain?: any;
-      definitional_conflicts?: any;
-      escalated: boolean;
-      escalation_type?: string | null;
-    }[];
-  }>(`/workspaces/${workspaceId}/goals/${goalId}/result`, { token, orgSlug });
 }
 
 export function confirmGoalIntent(
@@ -435,18 +305,6 @@ export function confirmGoalIntent(
   );
 }
 
-export function confirmGoalPlan(
-  token: string,
-  workspaceId: string,
-  goalId: string,
-  orgSlug?: string,
-) {
-  return apiFetch<{ message: string }>(
-    `/workspaces/${workspaceId}/goals/${goalId}/confirm-plan`,
-    { token, orgSlug, method: "POST" },
-  );
-}
-
 export function deleteGoal(
   token: string,
   workspaceId: string,
@@ -459,102 +317,141 @@ export function deleteGoal(
   );
 }
 
-// ── Approvals ────────────────────────────────────────────────────────────────
-
-export function listApprovals(token: string, orgSlug?: string) {
-  return apiFetch<ApprovalRequest[]>("/approvals", { token, orgSlug });
-}
-
-export function getApprovalDetail(
+export function getGoalResult(
   token: string,
-  approvalId: string,
+  workspaceId: string,
+  goalId: string,
   orgSlug?: string,
 ) {
-  return apiFetch<ApprovalRequest>(`/approvals/${approvalId}`, {
+  return apiFetch<{
+    goal_id: string;
+    status: string;
+    intent?: string | null;
+    answer?: string | null;
+    findings?: unknown[];
+  }>(`/workspaces/${workspaceId}/goals/${goalId}/result`, { token, orgSlug });
+}
+
+// ── Workflow (ACT path) ───────────────────────────────────────────────────────
+
+export function getWorkflowStatus(
+  token: string,
+  workflowId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<WorkflowStatusResponse>(`/agent/status/${workflowId}`, {
     token,
     orgSlug,
   });
 }
 
-export function approveWorkflowToken(
+export function getWorkflowBrief(
   token: string,
   workflowId: string,
-  approvalToken: string,
   orgSlug?: string,
 ) {
-  return apiFetch<{ workflow_id: string; status: string }>(
-    `/approvals/workflows/${workflowId}/approve`,
-    {
-      token,
-      orgSlug,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: approvalToken }),
-    },
-  );
-}
-
-export function rejectWorkflowToken(
-  token: string,
-  workflowId: string,
-  approvalToken: string,
-  reason: string,
-  orgSlug?: string,
-) {
-  return apiFetch<{ workflow_id: string; status: string }>(
-    `/approvals/workflows/${workflowId}/reject`,
-    {
-      token,
-      orgSlug,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: approvalToken, reason }),
-    },
-  );
-}
-
-export function reissueApproval(
-  token: string,
-  approvalId: string,
-  orgSlug?: string,
-) {
-  return apiFetch<{ message: string }>(`/approvals/${approvalId}/reissue`, {
+  return apiFetch<WorkflowBriefResponse>(`/agent/${workflowId}/brief`, {
     token,
     orgSlug,
-    method: "POST",
   });
 }
 
-
-// ── Actions & Approval ────────────────────────────────────────────────────────
+export function confirmBrief(
+  token: string,
+  workflowId: string,
+  proceed: boolean,
+  orgSlug?: string,
+) {
+  return apiFetch<{ workflow_id: string; status: string; message: string }>(
+    `/agent/confirm-brief/${workflowId}`,
+    {
+      token,
+      orgSlug,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ proceed }),
+    },
+  );
+}
 
 export function getWorkflowActions(
   token: string,
   workflowId: string,
   orgSlug?: string,
 ) {
-  return apiFetch<{ actions: any[] }>(`/agent/${workflowId}/actions`, { token, orgSlug });
+  return apiFetch<GetActionsResponse>(`/agent/${workflowId}/actions`, {
+    token,
+    orgSlug,
+  });
 }
 
-export function confirmPlan(
+export function approveWorkflow(
   token: string,
-  workspaceId: string,
-  goalId: string,
+  workflowId: string,
   orgSlug?: string,
 ) {
-  return apiFetch<{ status: string }>(
-    `/workspaces/${workspaceId}/goals/${goalId}/confirm-plan`,
+  return apiFetch<{
+    workflow_id: string;
+    status: string;
+    draft_r2_key?: string;
+  }>(`/agent/approve/${workflowId}`, {
+    token,
+    orgSlug,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+}
+
+export function rejectWorkflow(
+  token: string,
+  workflowId: string,
+  reason: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ workflow_id: string; status: string }>(
+    `/agent/reject/${workflowId}`,
     {
       token,
       orgSlug,
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ reason }),
     },
   );
 }
 
-// ── Notifications ────────────────────────────────────────────────────────────
+// ── Deadlines ─────────────────────────────────────────────────────────────────
+
+export function listDeadlines(
+  token: string,
+  workspaceId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<DeadlineItem[]>(
+    `/workspaces/${workspaceId}/deadlines`,
+    { token, orgSlug },
+  );
+}
+
+// ── Escalations ───────────────────────────────────────────────────────────────
+
+export function listEscalations(token: string, orgSlug?: string) {
+  return apiFetch<EscalationItem[]>("/escalations", { token, orgSlug });
+}
+
+export function resolveEscalation(
+  token: string,
+  escalationId: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ message: string }>(
+    `/escalations/${escalationId}/resolve`,
+    { token, orgSlug, method: "POST" },
+  );
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
 
 export function listNotifications(token: string, orgSlug?: string) {
   return apiFetch<NotificationItem[]>("/notifications", { token, orgSlug });
@@ -565,11 +462,10 @@ export function markNotificationRead(
   notificationId: string,
   orgSlug?: string,
 ) {
-  return apiFetch<{ status: string }>(`/notifications/${notificationId}/read`, {
-    token,
-    orgSlug,
-    method: "POST",
-  });
+  return apiFetch<{ status: string }>(
+    `/notifications/${notificationId}/read`,
+    { token, orgSlug, method: "POST" },
+  );
 }
 
 export function markAllNotificationsRead(token: string, orgSlug?: string) {
@@ -580,7 +476,7 @@ export function markAllNotificationsRead(token: string, orgSlug?: string) {
   });
 }
 
-// ── Audit ────────────────────────────────────────────────────────────────────
+// ── Audit ─────────────────────────────────────────────────────────────────────
 
 export function getGoalAuditTrail(
   token: string,
@@ -591,59 +487,33 @@ export function getGoalAuditTrail(
   return apiFetch<{
     goal_id: string;
     goal_text: string;
-    events: {
-      timestamp: string;
-      type: string;
-      detail: Record<string, unknown>;
-    }[];
+    events: { timestamp: string; type: string; detail: Record<string, unknown> }[];
   }>(`/workspaces/${workspaceId}/goals/${goalId}/audit`, { token, orgSlug });
 }
 
-// ── Deadlines ────────────────────────────────────────────────────────────────
+// ── Legacy compat stubs ───────────────────────────────────────────────────────
+// These are used by old sidebar/hook components that haven't been rewritten yet.
 
-export function listDeadlines(
-  token: string,
-  workspaceId: string,
-  orgSlug?: string,
-) {
-  return apiFetch<
-    {
-      id: string;
-      obligation_description: string;
-      obligation_type: string;
-      raw_date_expression: string;
-      resolved_deadline: string | null;
-      resolution_status: string;
-      conflict_flag: boolean;
-      status: string;
-      urgency_score: number;
-      days_remaining?: number;
-    }[]
-  >(`/workspaces/${workspaceId}/deadlines`, { token, orgSlug });
+export function getDocumentStatus(token: string, jobId: string, orgSlug?: string) {
+  return getIngestStatus(token, jobId, orgSlug);
 }
 
-// ── Escalations ──────────────────────────────────────────────────────────────
-
-export function listEscalations(token: string, orgSlug?: string) {
-  return apiFetch<
-    {
-      id: string;
-      status: string;
-      intent: string;
-      error_context?: string;
-      created_at: string;
-    }[]
-  >("/escalations", { token, orgSlug });
+export function getGoalStatus(token: string, workspaceId: string, goalId: string, orgSlug?: string) {
+  return getGoalDetail(token, workspaceId, goalId, orgSlug);
 }
 
-export function resolveEscalation(
-  token: string,
-  escalationId: string,
-  orgSlug?: string,
-) {
-  return apiFetch<{ message: string }>(`/escalations/${escalationId}/resolve`, {
-    token,
-    orgSlug,
-    method: "POST",
-  });
+export function getMyOrgs(token: string) {
+  return listOrgs(token);
+}
+
+export function getMembers(token: string, orgSlug?: string) {
+  return listOrgMembers(token, orgSlug);
+}
+
+export function inviteByEmail(token: string, email: string, orgSlug?: string) {
+  return inviteMember(token, email, orgSlug);
+}
+
+export function checkOrgAvailable(slug: string) {
+  return apiFetch<{ available: boolean }>(`/auth/check-org?slug=${slug}`);
 }

@@ -168,7 +168,7 @@ export function Sidebar({
               selectedIds={selectedDocumentIds}
               onToggleSelection={onToggleDocumentSelection}
               onDeleteFile={onDeleteFile}
-              isLoading={filesLoading}
+              loading={filesLoading}
             />
           </section>
 

@@ -18,12 +18,12 @@ type Escalation = {
 
 function getStatusVariant(
   status: string,
-): "default" | "success" | "warning" | "error" | "info" {
+): "default" | "success" | "warning" | "danger" | "violet" {
   const s = status.toLowerCase();
   if (s === "resolved" || s === "closed") return "success";
   if (s === "open" || s === "pending" || s === "active") return "warning";
-  if (s === "failed" || s === "error") return "error";
-  if (s === "escalated") return "info";
+  if (s === "failed" || s === "danger") return "danger";
+  if (s === "escalated") return "violet";
   return "default";
 }
 
@@ -34,7 +34,7 @@ export default function EscalationsPage() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [message, setMessage] = useState<{
-    type: "success" | "error";
+    type: "success" | "danger";
     text: string;
   } | null>(null);
 
@@ -89,7 +89,7 @@ export default function EscalationsPage() {
     } catch (err) {
       const errorMsg =
         err instanceof Error ? err.message : "Failed to resolve escalation.";
-      setMessage({ type: "error", text: errorMsg });
+      setMessage({ type: "danger", text: errorMsg });
       console.error("Resolve failed:", err);
     } finally {
       setActionLoading(null);

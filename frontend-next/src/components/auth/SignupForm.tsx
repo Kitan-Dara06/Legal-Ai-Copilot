@@ -187,7 +187,7 @@ export function SignupForm() {
             </div>
 
             {error && <div className="text-sm text-red-500">{error}</div>}
-            <Button type="submit" className="w-full mt-6" isLoading={isLoading}>
+            <Button type="submit" className="w-full mt-6" loading={isLoading}>
                 Create Account & Workspace
             </Button>
         </form>

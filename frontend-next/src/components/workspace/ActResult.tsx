@@ -77,7 +77,7 @@ export function ActResult({
     <Card className="mb-6 p-4">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-white font-semibold text-lg">Action Plan</h3>
-        <Badge variant="info">{actions.length} actions</Badge>
+        <Badge variant="violet">{actions.length} actions</Badge>
       </div>
 
       {/* Dependency Validation Error */}

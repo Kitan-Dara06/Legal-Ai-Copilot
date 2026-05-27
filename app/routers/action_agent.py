@@ -1,24 +1,24 @@
 """
 Action Agent Router
 ====================
-POST /agent/start             — Initialize a new LangGraph thread, classify intent
+POST /agent/start               — Initialize a new LangGraph thread, classify intent
 POST /agent/confirm-intent/{id} — Resume thread after ambiguity gate (HITL pause)
-POST /agent/approve/{id}      — Resume thread after human approval (ACT path)
-POST /agent/reject/{id}       — Reject plan with feedback
-GET  /agent/status/{id}       — Poll human-readable status from WorkflowExecution
-GET  /agent/{id}/actions      — Fetch ordered Action records
-GET  /agent/{id}/logs         — Fetch ToolCallLog execution results
+POST /agent/confirm-brief/{id}  — Resume thread after decision_brief (HITL pause 1, ACT)
+POST /agent/approve/{id}        — Resume thread after draft review (HITL pause 2, ACT)
+POST /agent/reject/{id}         — Reject draft with feedback
+GET  /agent/status/{id}         — Poll human-readable status
+GET  /agent/{id}/actions        — Fetch ordered Action records
+GET  /agent/{id}/brief          — Fetch the DecisionBriefResult for this workflow
 
 Design notes:
-  - `thread_id` is the workflow UUID (str) — this is how LangGraph identifies
-    the checkpoint in its internal tables.
-  - The checkpointer tables are separate from our workflow_executions table.
-  - We use `interrupt_before=["ambiguity_gate", "human_approval"]` to hit our HITL gates.
+  - `thread_id` is the workflow UUID (str) — LangGraph identifies the checkpoint by this.
+  - interrupt_before=["ambiguity_gate", "decision_brief", "draft"] creates three HITL pauses.
+  - The brief payload lives in workflow_executions.decision_brief_payload (JSONB).
 
 Security:
   - All endpoints require Supabase JWT (via get_org_id_unified).
-  - Every DB query includes an org_id == authenticated_org_id filter to enforce tenant isolation.
-  - Rate limiting is applied to all write endpoints.
+  - Every DB query includes org_id == authenticated_org_id filter.
+  - Rate limiting applied to all write endpoints.
 """
 
 import logging
@@ -37,8 +37,6 @@ from app.database import get_db
 from app.dependencies import get_org_id_unified
 from app.models import (
     Action,
-    ApprovalRequest,
-    ApprovalStatus,
     Goal,
     IntentLog,
     ToolCallLog,
@@ -67,15 +65,17 @@ class ConfirmIntentRequest(BaseModel):
     confirmed_intent: str
 
 
+class ConfirmBriefRequest(BaseModel):
+    proceed: bool = True           # False = lawyer aborts after reviewing brief
+    override_notes: str | None = None  # Optional lawyer annotation
+
+
 class ApproveRequest(BaseModel):
-    token: str | None = (
-        None  # Optional: HMAC approval token. If not provided, JWT auth is used.
-    )
+    pass  # JWT auth only — HMAC token pattern removed from ACT path
 
 
 class RejectRequest(BaseModel):
     reason: str
-    token: str | None = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -163,12 +163,15 @@ async def start_workflow(
         messages=[],
         error_context=None,
         retry_count=0,
+        session_file_ids=[],
+        brief_confirmed=None,
+        draft_r2_key=None,
     )
 
     async with get_checkpointer() as checkpointer:
         app = create_action_agent_graph().compile(
             checkpointer=checkpointer,
-            interrupt_before=["ambiguity_gate", "human_approval"],
+            interrupt_before=["ambiguity_gate", "decision_brief", "draft"],
         )
         config = _make_config(workflow_id)
         final_state = await app.ainvoke(initial_state, config=config)
@@ -233,7 +236,7 @@ async def confirm_intent(
     async with get_checkpointer() as checkpointer:
         app = create_action_agent_graph().compile(
             checkpointer=checkpointer,
-            interrupt_before=["ambiguity_gate", "human_approval"],
+            interrupt_before=["ambiguity_gate", "decision_brief", "draft"],
         )
         config = _make_config(str(workflow_id))
 
@@ -255,7 +258,54 @@ async def confirm_intent(
     }
 
 
-@router.post("/approve/{workflow_id}", summary="Approve plan and resume execution")
+
+@router.post("/confirm-brief/{workflow_id}", summary="Confirm Decision Brief and proceed to drafting")
+@limiter.limit("10/minute")
+async def confirm_brief(
+    request: Request,
+    workflow_id: uuid.UUID,
+    req: ConfirmBriefRequest,
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    HITL Pause 1 (ACT path): Lawyer has reviewed the Decision Brief.
+
+    If proceed=True: inject brief_confirmed=True into state and resume.
+    If proceed=False: cancel the workflow.
+    """
+    wf = await _get_workflow_for_org(workflow_id, org_id, db)
+
+    if wf.status != WorkflowStatus.AWAITING_BRIEF_CONFIRMATION:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot confirm brief in status: {wf.status.value}",
+        )
+
+    if not req.proceed:
+        # Lawyer chose to abort — mark cancelled
+        wf.status = WorkflowStatus.CANCELLED
+        await db.commit()
+        return {"workflow_id": str(workflow_id), "status": "CANCELLED", "message": "Brief rejected. Workflow cancelled."}
+
+    async with get_checkpointer() as checkpointer:
+        app = create_action_agent_graph().compile(
+            checkpointer=checkpointer,
+            interrupt_before=["ambiguity_gate", "decision_brief", "draft"],
+        )
+        config = _make_config(str(workflow_id))
+
+        await app.aupdate_state(config, {"brief_confirmed": True})
+        final_state = await app.ainvoke(None, config=config)
+
+    return {
+        "workflow_id": str(workflow_id),
+        "status": final_state.get("status"),
+        "message": "Brief confirmed. Draft generation started.",
+    }
+
+
+@router.post("/approve/{workflow_id}", summary="Approve draft and trigger export")
 @limiter.limit("10/minute")
 async def approve_workflow(
     request: Request,
@@ -264,70 +314,33 @@ async def approve_workflow(
     org_id: str = Depends(get_org_id_unified),
     db: AsyncSession = Depends(get_db),
 ):
-    import hashlib
-    import hmac
-    import os as os_module
+    """
+    HITL Pause 2 (ACT path): Lawyer has reviewed the draft and approves export.
 
+    JWT auth only — no HMAC tokens in the new pipeline.
+    Resumes the graph which runs export_node to generate and upload the DOCX.
+    """
     wf = await _get_workflow_for_org(workflow_id, org_id, db)
 
-    if wf.status not in (WorkflowStatus.AWAITING_APPROVAL,):
+    if wf.status != WorkflowStatus.AWAITING_APPROVAL:
         raise HTTPException(
             status_code=409, detail=f"Cannot approve in status: {wf.status.value}"
         )
 
-    # If an HMAC token is provided, verify it. Otherwise, trust JWT auth (chat UI flow).
-    if req.token:
-        token_hash = hashlib.sha256(req.token.encode()).hexdigest()
-        approval_res = await db.execute(
-            select(ApprovalRequest).where(
-                ApprovalRequest.workflow_id == workflow_id,
-                ApprovalRequest.token_hash == token_hash,
-                ApprovalRequest.status == ApprovalStatus.PENDING,
-                ApprovalRequest.expires_at > datetime.now(timezone.utc),
-            )
-        )
-        approval = approval_res.scalar_one_or_none()
-        if not approval:
-            raise HTTPException(
-                status_code=403,
-                detail="Invalid, expired, or already used approval token.",
-            )
-    else:
-        # No token provided — find the first pending approval for this workflow
-        approval_res = await db.execute(
-            select(ApprovalRequest)
-            .where(
-                ApprovalRequest.workflow_id == workflow_id,
-                ApprovalRequest.org_id == uuid.UUID(org_id),  # H9: tenant isolation
-                ApprovalRequest.status == ApprovalStatus.PENDING,
-                ApprovalRequest.expires_at > datetime.now(timezone.utc),
-            )
-            .order_by(ApprovalRequest.created_at)
-            .limit(1)
-        )
-        approval = approval_res.scalar_one_or_none()
-        if not approval:
-            raise HTTPException(
-                status_code=403,
-                detail="No pending approval request found for this workflow.",
-            )
-
-    # Mark token as USED
-    approval.status = ApprovalStatus.USED
-    await db.commit()
-
     async with get_checkpointer() as checkpointer:
         app = create_action_agent_graph().compile(
             checkpointer=checkpointer,
-            interrupt_before=["ambiguity_gate", "human_approval"],
+            interrupt_before=["ambiguity_gate", "decision_brief", "draft"],
         )
         config = _make_config(str(workflow_id))
         final_state = await app.ainvoke(None, config=config)
 
     return {
         "workflow_id": str(workflow_id),
-        "status": final_state.get("status", WorkflowStatus.EXECUTING.value),
+        "status": final_state.get("status", WorkflowStatus.COMPLETED.value),
+        "draft_r2_key": final_state.get("draft_r2_key"),
     }
+
 
 
 @router.post("/reject/{workflow_id}", summary="Reject plan")
@@ -410,7 +423,33 @@ async def get_workflow_status(
     }
 
 
+@router.get("/{workflow_id}/brief", summary="Get Decision Brief for workflow")
+async def get_workflow_brief(
+    workflow_id: uuid.UUID,
+    org_id: str = Depends(get_org_id_unified),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns the DecisionBriefResult payload stored after decision_brief_node runs.
+    Available once status == AWAITING_BRIEF_CONFIRMATION.
+    """
+    wf = await _get_workflow_for_org(workflow_id, org_id, db)
+
+    if not wf.decision_brief_payload:
+        raise HTTPException(
+            status_code=404,
+            detail="Decision brief not yet available. Status: " + wf.status.value,
+        )
+
+    return {
+        "workflow_id": str(wf.id),
+        "status": wf.status.value,
+        "brief": wf.decision_brief_payload,
+    }
+
+
 @router.get("/{workflow_id}/actions", summary="Get actions for workflow")
+
 async def get_workflow_actions(
     workflow_id: uuid.UUID,
     org_id: str = Depends(get_org_id_unified),

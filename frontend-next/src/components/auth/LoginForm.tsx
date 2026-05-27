@@ -86,7 +86,7 @@ export function LoginForm() {
                 </div>
             </div>
             {error && <div className="text-sm text-red-500">{error}</div>}
-            <Button type="submit" className="w-full" isLoading={isLoading}>
+            <Button type="submit" className="w-full" loading={isLoading}>
                 Log In
             </Button>
         </form>

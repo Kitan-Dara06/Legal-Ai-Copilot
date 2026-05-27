@@ -1,31 +1,18 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import { Analytics } from "@vercel/analytics/next";
-import { NotificationBar } from "@/components/layout/NotificationBar";
 import "./globals.css";
 
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-});
-
 export const metadata: Metadata = {
-  title: "Legal AI Copilot",
-  description:
-    "Chat seamlessly with your securely embedded corporate contracts.",
+  title: "Lex — Legal AI Copilot",
+  description: "AI-powered legal analysis, drafting, and review for modern law practice.",
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+}: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className="dark">
-      <body
-        className={`${inter.variable} font-sans antialiased bg-[#0A0F1E] text-slate-100 min-h-screen`}
-      >
-        <NotificationBar />
+    <html lang="en">
+      <body className="antialiased min-h-screen" style={{ background: "var(--color-bg, #0E0E12)", color: "var(--color-text-primary, #F0EEE9)" }}>
         {children}
         <Analytics />
       </body>

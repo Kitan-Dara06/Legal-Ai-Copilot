@@ -12,9 +12,12 @@ Routing logic:
 
   - ambiguity_gate_node → route by primary_intent (resumes here after user confirms)
 
-  - ANALYZE path: retrieval_node → synthesis_node → END
-  - REASON path: retrieval_node → graph_expansion_node → findings_node → END
-  - ACT path: detect_node → draft_node → plan_node → human_approval_node (HITL pause) → execute_node (loop) → END
+  - ANALYZE path: retrieve → synthesis → END
+  - REASON path:  retrieve → graph_expansion → defined_terms → contradiction
+                          → findings → escalation → result → END
+  - ACT path:     detect → decision_brief   [HITL pause 1: lawyer confirms brief]
+                        → draft             [HITL pause 2: lawyer approves draft]
+                        → export → END
 """
 
 import logging
@@ -25,19 +28,16 @@ from app.models import WorkflowStatus
 from app.services.agent.agent_state import PointerOnlyState
 from app.services.agent.nodes import (
     ambiguity_gate_node,
-    compensate_node,
     contradiction_node,
+    decision_brief_node,
     defined_terms_node,
     detect_node,
     draft_node,
     escalation_node,
-    execute_node,
+    export_node,
     findings_node,
     graph_expansion_node,
-    human_approval_node,
     intent_node,
-    plan_node,
-    qa_node,
     result_node,
     retrieval_node,
     synthesis_node,
@@ -78,28 +78,16 @@ def _post_ambiguity_router(state: PointerOnlyState) -> str:
     return "analyze_path"
 
 
-def _execution_router(state: PointerOnlyState) -> str:
-    """
-    Routes after execute_node (ACT path).
-    - Loop back to execute if tasks remain.
-    - End if status is COMPLETED or FAILED.
-    """
-    status = state.get("status", "")
-    current = state.get("current_task_index", 0)
-    total = state.get("total_tasks", 0)
-
-    if status == WorkflowStatus.RECOVERING.value:
-        return "compensate"
-    if status in (WorkflowStatus.COMPLETED.value, WorkflowStatus.FAILED.value):
-        return END
-    if current >= total:
-        return END
-    return "execute"
-
-
 def create_action_agent_graph() -> StateGraph:
     """
-    Returns the compiled graph (without checkpointer — injected at call time).
+    Returns the compiled graph (without checkpointer — injected at call site).
+
+    ACT path interrupt_before points (passed at compile time by the router):
+      - "decision_brief": graph pauses before running the node; lawyer reviews
+        retrieved context and the brief; resumes when brief_confirmed=True is
+        injected via aupdate_state + ainvoke(None, ...).
+      - "draft": graph pauses before generating the draft; lawyer has confirmed
+        the brief; resumes when the approve endpoint calls ainvoke(None, ...).
     """
     workflow = StateGraph(PointerOnlyState)
 
@@ -107,7 +95,7 @@ def create_action_agent_graph() -> StateGraph:
     workflow.add_node("intent", intent_node)
     workflow.add_node("ambiguity_gate", ambiguity_gate_node)
 
-    # ANALYZE / REASON shared nodes
+    # ANALYZE / REASON shared retrieval
     workflow.add_node("retrieve", retrieval_node)
 
     # ANALYZE path
@@ -121,19 +109,16 @@ def create_action_agent_graph() -> StateGraph:
     workflow.add_node("escalation", escalation_node)
     workflow.add_node("result", result_node)
 
-    # ACT path
+    # ACT path (new 3-phase pipeline)
     workflow.add_node("detect", detect_node)
-    workflow.add_node("draft", draft_node)
-    workflow.add_node("qa", qa_node)
-    workflow.add_node("plan", plan_node)
-    workflow.add_node("human_approval", human_approval_node)
-    workflow.add_node("execute", execute_node)
-    workflow.add_node("compensate", compensate_node)
+    workflow.add_node("decision_brief", decision_brief_node)  # HITL pause 1
+    workflow.add_node("draft", draft_node)                    # HITL pause 2
+    workflow.add_node("export", export_node)
 
     # ── Edges ──────────────────────────────────────────────────────────────
     workflow.add_edge(START, "intent")
 
-    # Ambiguity Check
+    # Intent routing
     workflow.add_conditional_edges(
         "intent",
         _ambiguity_router,
@@ -145,7 +130,7 @@ def create_action_agent_graph() -> StateGraph:
         },
     )
 
-    # Post-Ambiguity Gate
+    # Post-ambiguity gate
     workflow.add_conditional_edges(
         "ambiguity_gate",
         _post_ambiguity_router,
@@ -156,9 +141,8 @@ def create_action_agent_graph() -> StateGraph:
         },
     )
 
-    # Shared Retrieval router (differentiates ANALYZE vs REASON)
+    # Shared retrieval: differentiates ANALYZE vs REASON
     def _post_retrieve_router(state: PointerOnlyState) -> str:
-        # UNDETERMINED: skip synthesis if retrieval found < 3 relevant chunks
         if state.get("retrieval_aborted", False):
             return "undetermined"
         if state.get("primary_intent") == "REASON":
@@ -186,25 +170,10 @@ def create_action_agent_graph() -> StateGraph:
     workflow.add_edge("escalation", "result")
     workflow.add_edge("result", END)
 
-    # ACT edges
-    workflow.add_edge("detect", "draft")
-    workflow.add_edge("draft", "qa")
-    workflow.add_edge("qa", "plan")
-    workflow.add_edge("plan", "human_approval")  # graph pauses BEFORE this node
-    workflow.add_edge("human_approval", "execute")
-
-    # Execution loop: keep running tasks until complete
-    workflow.add_conditional_edges(
-        "execute",
-        _execution_router,
-        {
-            "execute": "execute",
-            "compensate": "compensate",
-            END: END,
-        },
-    )
-
-    # Saga failure end
-    workflow.add_edge("compensate", END)
+    # ACT edges (new pipeline — no saga, no execution loop)
+    workflow.add_edge("detect", "decision_brief")   # graph pauses BEFORE decision_brief (HITL 1)
+    workflow.add_edge("decision_brief", "draft")    # graph pauses BEFORE draft (HITL 2)
+    workflow.add_edge("draft", "export")
+    workflow.add_edge("export", END)
 
     return workflow
