@@ -44,7 +44,7 @@ port = os.getenv("UPSTASH_PORT", "6379")
 password = (os.getenv("UPSTASH_PASSWORD") or "").strip()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
 
 class AsyncTask(Task):

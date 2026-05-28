@@ -9,7 +9,7 @@ Design goals:
 
 Requirements:
 - Set env var GEMINI_API_KEY.
-- Optional: GEMINI_MODEL (default: gemini-2.5-pro).
+- Optional: GEMINI_MODEL (default: gemini-2.5-flash).
 
 Notes:
 - Google Gemini supports direct PDF inputs. This module uses the "google-genai" SDK.
@@ -31,7 +31,7 @@ class GeminiOcrError(RuntimeError):
 @dataclass(frozen=True)
 class GeminiOcrConfig:
     api_key: str
-    model: str = "gemini-2.5-pro"
+    model: str = "gemini-2.5-flash"
     # Token budget is a safety rail; OCR markdown for large PDFs can be big.
     # If you hit truncation, lower page batch size or raise this.
     max_output_tokens: int = 8192
@@ -50,7 +50,7 @@ def _load_config(
         raise GeminiOcrError(
             "GEMINI_API_KEY is missing. Set it in your environment / .env.production."
         )
-    mdl = (model or os.getenv("GEMINI_MODEL", "")).strip() or "gemini-2.5-pro"
+    mdl = (model or os.getenv("GEMINI_MODEL", "")).strip() or "gemini-2.5-flash"
     return GeminiOcrConfig(api_key=key, model=mdl)
 
 

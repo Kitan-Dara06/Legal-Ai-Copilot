@@ -78,6 +78,18 @@ def is_scanned_pdf(file_bytes: bytes) -> bool:
     """Heuristic: if the first few pages contain almost no text, it's likely scanned."""
     import io
 
+    # Try PyMuPDF (fitz) first as it is generally faster and already installed
+    try:
+        import fitz
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        text = ""
+        for i in range(min(3, len(doc))):
+            text += doc[i].get_text() or ""
+        return len(text.strip()) < 50
+    except Exception:
+        pass
+
+    # Fall back to pypdf
     try:
         from pypdf import PdfReader
 
