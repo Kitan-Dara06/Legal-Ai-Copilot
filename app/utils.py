@@ -85,7 +85,7 @@ def is_scanned_pdf(file_bytes: bytes) -> bool:
         text = ""
         for i in range(min(3, len(doc))):
             text += doc[i].get_text() or ""
-        return len(text.strip()) < 50
+        return len(text.strip()) < 5
     except Exception:
         pass
 
@@ -97,7 +97,7 @@ def is_scanned_pdf(file_bytes: bytes) -> bool:
         text = ""
         for i in range(min(3, len(reader.pages))):
             text += reader.pages[i].extract_text() or ""
-        return len(text.strip()) < 50
+        return len(text.strip()) < 5
     except Exception as e:
         logger.warning(f"Failed to check if PDF is scanned: {e}")
         return True  # Default to scanned (OCR) if we can't tell, to be safe
