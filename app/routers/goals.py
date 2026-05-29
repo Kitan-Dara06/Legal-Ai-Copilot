@@ -35,6 +35,7 @@ from app.models import (
     ToolCallLog,
     WorkflowExecution,
     WorkflowStatus,
+    WorkspaceSession,
 )
 from app.redis_client import get_session
 from app.services.agent.nodes import IntentClassification
@@ -107,6 +108,7 @@ class GoalSummary(BaseModel):
     intent: Optional[str] = None
     mode: Optional[str] = None
     answer: Optional[str] = None
+    workflow_id: Optional[str] = None
     created_at: str
 
 
@@ -381,6 +383,21 @@ async def create_goal(
 
     session_data = await get_session(req.session_id, redis)
     if not session_data:
+        try:
+            ws_sess_uuid = uuid.UUID(req.session_id)
+            pg_sess_result = await db.execute(
+                select(WorkspaceSession).where(WorkspaceSession.id == ws_sess_uuid)
+            )
+            pg_sess = pg_sess_result.scalar_one_or_none()
+            if pg_sess:
+                session_data = {
+                    "org_id": str(org_uuid),
+                    "files": {str(did): "READY" for did in pg_sess.document_subset}
+                }
+        except ValueError:
+            pass
+
+    if not session_data:
         raise HTTPException(
             status_code=404,
             detail="Session expired or not found. Please re-select documents.",
@@ -522,7 +539,7 @@ async def list_goals(
     query = (
         select(Goal)
         .where(Goal.workspace_id == workspace_id, Goal.org_id == org_uuid)
-        .order_by(Goal.created_at.asc())
+        .order_by(Goal.created_at.desc())
     )
 
     if status_filter:
@@ -544,9 +561,24 @@ async def list_goals(
     )
     total = len(count_res.scalars().all())
 
-    # Paginated results
+    # Paginated results — join latest workflow_id per goal
+    from sqlalchemy import outerjoin
     res = await db.execute(query.offset(offset).limit(limit))
     goals = res.scalars().all()
+
+    # Fetch workflow_ids for these goals in one query
+    goal_ids = [g.id for g in goals]
+    wf_res = await db.execute(
+        select(WorkflowExecution.goal_id, WorkflowExecution.id)
+        .where(WorkflowExecution.goal_id.in_(goal_ids))
+        .order_by(WorkflowExecution.goal_id, WorkflowExecution.id)
+    )
+    # Keep only the first workflow per goal
+    workflow_map: dict[str, str] = {}
+    for row in wf_res.all():
+        gid = str(row[0])
+        if gid not in workflow_map:
+            workflow_map[gid] = str(row[1])
 
     return GoalListResponse(
         goals=[
@@ -556,6 +588,8 @@ async def list_goals(
                 status=g.status.value if g.status else "UNKNOWN",
                 intent=g.intent.value if g.intent else None,
                 mode=g.mode,
+                answer=g.answer[:500] if g.answer else None,
+                workflow_id=workflow_map.get(str(g.id)),
                 created_at=g.created_at.isoformat(),
             )
             for g in goals

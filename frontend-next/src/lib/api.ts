@@ -147,6 +147,35 @@ export function inviteMember(
   });
 }
 
+// Alias used by Sidebar
+export function inviteByEmail(
+  token: string,
+  email: string,
+  orgSlug?: string,
+) {
+  return apiFetch<{ message: string; invite_link?: string; already_registered?: boolean }>(
+    "/auth/invite-by-email",
+    {
+      token,
+      orgSlug,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    },
+  );
+}
+
+export function getMembers(token: string, orgSlug?: string) {
+  return apiFetch<OrgMember[]>("/auth/members", { token, orgSlug });
+}
+
+export function listMyOrgs(token: string) {
+  return apiFetch<{ org_id: string; org_slug: string; org_name: string; role: string; is_active: boolean }[]>(
+    "/auth/my-orgs",
+    { token },
+  );
+}
+
 // ── Workspaces ────────────────────────────────────────────────────────────────
 
 export function listWorkspaces(token: string, orgSlug?: string) {
@@ -225,6 +254,9 @@ export function deleteDocument(
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
+// Uses the Redis-backed /session (singular) endpoint — this is what the goals
+// router looks up via get_session(). The Postgres /sessions (plural) endpoint
+// is for persistent session storage only and is NOT checked by goals.
 export function createSession(
   token: string,
   workspaceId: string,
@@ -232,7 +264,7 @@ export function createSession(
   orgSlug?: string,
 ) {
   return apiFetch<{ session_id: string }>(
-    `/workspaces/${workspaceId}/sessions`,
+    `/workspaces/${workspaceId}/session`,
     {
       token,
       orgSlug,
@@ -504,14 +536,6 @@ export function getGoalStatus(token: string, workspaceId: string, goalId: string
 
 export function getMyOrgs(token: string) {
   return listOrgs(token);
-}
-
-export function getMembers(token: string, orgSlug?: string) {
-  return listOrgMembers(token, orgSlug);
-}
-
-export function inviteByEmail(token: string, email: string, orgSlug?: string) {
-  return inviteMember(token, email, orgSlug);
 }
 
 export function checkOrgAvailable(slug: string) {

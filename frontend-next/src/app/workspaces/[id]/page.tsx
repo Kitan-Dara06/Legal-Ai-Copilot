@@ -87,6 +87,7 @@ function WorkspaceDetailContent() {
 
   // Analyze/Reason result inline display
   const [inlineResult, setInlineResult] = useState<{ type: "analyze" | "reason"; content: string } | null>(null);
+  const [submitError, setSubmitError]   = useState<string | null>(null);
 
   // Document selection
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
@@ -175,13 +176,12 @@ function WorkspaceDetailContent() {
 
     setSubmitting(true);
     setInlineResult(null);
+    setSubmitError(null);
     try {
-      // Create session for selected documents
       const sessionRes = await createSession(token, params.id, selectedDocIds, orgSlug);
       if (!sessionRes.session_id) throw new Error("Failed to create session");
 
       const res = await createGoal(token, params.id, goalText.trim(), sessionRes.session_id, orgSlug);
-
       if (!res.goal_id) throw new Error("No goal_id returned");
 
       const confidence = res.intent_confidence ?? 0;
@@ -197,24 +197,27 @@ function WorkspaceDetailContent() {
         return;
       }
 
-      // ACT → navigate to workflow review page
+      // ACT → navigate to workflow
       if (intent === "ACT" && res.workflow_id) {
         setGoalText("");
         router.push(`/workspaces/${params.id}/workflows/${res.workflow_id}`);
         return;
       }
 
-      // ANALYZE / REASON — poll for result inline
+      // ANALYZE / REASON — poll then refresh history
       if ((intent === "ANALYZE" || intent === "REASON") && res.goal_id) {
         setGoalText("");
-        await pollGoalResult(res.goal_id, intent);
+        const gotResult = await pollGoalResult(res.goal_id, intent);
+        if (!gotResult) setSubmitError("Lex couldn't generate a response. Try again.");
         await load();
       }
-    } catch (err) { console.error(err); }
+    } catch (err: any) {
+      setSubmitError(err?.message || "Something went wrong. Please try again.");
+    }
     finally { setSubmitting(false); }
   };
 
-  const pollGoalResult = async (goalId: string, intent: GoalIntent) => {
+  const pollGoalResult = async (goalId: string, intent: GoalIntent): Promise<boolean> => {
     const MAX = 60;
     for (let i = 0; i < MAX; i++) {
       await new Promise((r) => setTimeout(r, 3000));
@@ -225,11 +228,12 @@ function WorkspaceDetailContent() {
             type: intent.toLowerCase() as "analyze" | "reason",
             content: res.answer ?? "",
           });
-          return;
+          return true;
         }
-        if (["FAILED","ESCALATED","CANCELLED"].includes(res.status)) return;
+        if (["FAILED","ESCALATED","CANCELLED"].includes(res.status)) return false;
       } catch {}
     }
+    return false;
   };
 
   const handleConfirmIntent = async (intent: GoalIntent) => {
@@ -317,9 +321,7 @@ function WorkspaceDetailContent() {
             {readyDocs.length === 0 ? (
               <div className="flex items-start gap-2 p-3 rounded-lg bg-[#E8A44C]/5 border border-[#E8A44C]/15">
                 <Info className="w-4 h-4 text-[#E8A44C] mt-0.5 shrink-0" strokeWidth={1.5} />
-                <p className="text-xs text-[#F0EEE9]/70">
-                  Upload and process at least one document before submitting a goal.
-                </p>
+                <p className="text-xs text-[#F0EEE9]/70">Upload and process at least one document before asking questions.</p>
               </div>
             ) : (
               <div className="space-y-3">
@@ -328,13 +330,23 @@ function WorkspaceDetailContent() {
                   rows={4}
                   placeholder={`e.g. "Summarize the termination clauses" or "Draft a response to the notice in clause 15"`}
                   value={goalText}
-                  onChange={(e) => setGoalText(e.target.value)}
+                  onChange={(e) => { setGoalText(e.target.value); setSubmitError(null); }}
                   disabled={submitting}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSubmit();
-                  }}
+                  onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSubmit(); }}
                   maxLength={2000}
                 />
+                {selectedDocIds.length === 0 && goalText.trim().length > 0 && (
+                  <div className="flex items-center gap-2 text-[11px] text-[#E8A44C]">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    Select at least one document on the right before submitting.
+                  </div>
+                )}
+                {submitError && (
+                  <div className="flex items-start gap-2 p-2.5 rounded-lg bg-[#F06B6B]/5 border border-[#F06B6B]/20">
+                    <AlertTriangle className="w-3.5 h-3.5 text-[#F06B6B] mt-0.5 shrink-0" />
+                    <p className="text-xs text-[#F06B6B]">{submitError}</p>
+                  </div>
+                )}
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-[#4A4A5A]">{goalText.length}/2000 · ⌘↵ to submit</span>
                   <Button variant="primary" size="sm" loading={submitting} disabled={!canSubmit} onClick={handleSubmit}>
@@ -407,37 +419,73 @@ function WorkspaceDetailContent() {
             </Card>
           )}
 
-          {/* Goal history */}
+          {/* Conversation history — chat log */}
           {goals.length > 0 && (
             <div>
-              <h2 className="text-sm font-semibold text-[#7A7A8A] mb-3 uppercase tracking-wider text-xs">
-                Recent Goals
+              <h2 className="text-xs font-semibold text-[#7A7A8A] mb-3 uppercase tracking-wider">
+                Conversation History
               </h2>
-              <div className="space-y-2">
-                {goals.slice(0, 8).map((goal) => (
-                  <button
-                    key={goal.id}
-                    onClick={() => {
-                      if (goal.workflow_id && ["BRIEFING","AWAITING_BRIEF_CONFIRMATION","DRAFTING","AWAITING_APPROVAL","COMPLETED"].includes(goal.status)) {
-                        router.push(`/workspaces/${params.id}/workflows/${goal.workflow_id}`);
-                      }
-                    }}
-                    className="w-full flex items-center justify-between p-4 rounded-lg border border-[#2A2A32] bg-[#16161D] hover:bg-[#1E1E28] transition-colors text-left group"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm text-[#F0EEE9] truncate">{goal.goal_text}</p>
-                      <p className="text-[10px] text-[#4A4A5A] mt-0.5 flex items-center gap-1">
-                        <Clock className="w-3 h-3" />
-                        {safeFormatDistance(goal.created_at)}
-                      </p>
+              <div className="space-y-3">
+                {goals.slice(0, 20).map((goal) => (
+                  <div key={goal.id} className="rounded-xl border border-[#2A2A32] bg-[#16161D] overflow-hidden">
+                    {/* Question bubble */}
+                    <div className="flex items-start gap-3 p-4">
+                      <div className="w-6 h-6 rounded-full bg-[#7C6AF7]/15 border border-[#7C6AF7]/30 flex items-center justify-center shrink-0 mt-0.5">
+                        <span className="text-[9px] font-bold text-[#7C6AF7]">Q</span>
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm text-[#F0EEE9] leading-relaxed">{goal.goal_text}</p>
+                        <p className="text-[10px] text-[#4A4A5A] mt-1 flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          {safeFormatDistance(goal.created_at)}
+                          {goal.intent && (
+                            <span className="ml-2 px-1.5 py-0.5 rounded bg-[#2A2A32] text-[#7A7A8A] text-[9px] uppercase">
+                              {goal.intent}
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                      <div className="shrink-0">
+                        <GoalStatusChip status={goal.status} />
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2 ml-3 shrink-0">
-                      <GoalStatusChip status={goal.status} />
-                      {goal.workflow_id && (
-                        <ChevronRight className="w-4 h-4 text-[#4A4A5A] group-hover:text-[#7A7A8A] transition-colors" />
-                      )}
-                    </div>
-                  </button>
+
+                    {/* Answer bubble */}
+                    {goal.answer ? (
+                      <div className="flex items-start gap-3 px-4 pb-4 border-t border-[#1A1A22]">
+                        <div className="w-6 h-6 rounded-full bg-[#D4A853]/15 border border-[#D4A853]/30 flex items-center justify-center shrink-0 mt-3">
+                          <span className="text-[9px] font-bold text-[#D4A853]">A</span>
+                        </div>
+                        <div className="flex-1 min-w-0 pt-3">
+                          <div className="prose prose-sm prose-invert max-w-none text-[#F0EEE9]/85 text-sm leading-relaxed">
+                            <ReactMarkdown>{goal.answer}</ReactMarkdown>
+                          </div>
+                        </div>
+                      </div>
+                    ) : goal.workflow_id ? (
+                      <button
+                        onClick={() => router.push(`/workspaces/${params.id}/workflows/${goal.workflow_id}`)}
+                        className="w-full flex items-center gap-2 px-4 py-3 border-t border-[#1A1A22] text-xs text-[#7C6AF7] hover:text-[#9A8AFF] hover:bg-[#7C6AF7]/5 transition-colors text-left"
+                      >
+                        <ChevronRight className="w-3.5 h-3.5" />
+                        View draft workflow →
+                      </button>
+                    ) : ["FAILED","ESCALATED","CANCELLED"].includes(goal.status) ? (
+                      <div className="px-4 pb-3 border-t border-[#1A1A22]">
+                        <p className="text-xs text-[#F06B6B] pt-3 flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          This request could not be completed.
+                        </p>
+                      </div>
+                    ) : ["PENDING","PROCESSING"].includes(goal.status) ? (
+                      <div className="px-4 pb-3 border-t border-[#1A1A22]">
+                        <p className="text-xs text-[#7A7A8A] pt-3 flex items-center gap-1.5">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          Generating response...
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
                 ))}
               </div>
             </div>
