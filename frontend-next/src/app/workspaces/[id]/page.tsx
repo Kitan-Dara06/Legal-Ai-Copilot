@@ -99,6 +99,23 @@ function WorkspaceDetailContent() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Poll workspace state every 3 seconds while any document is PENDING or PROCESSING
+  useEffect(() => {
+    if (!workspace || !token || loading) return;
+
+    const hasActiveDocs = workspace.documents.some(
+      (doc) => doc.status === "PENDING" || doc.status === "PROCESSING"
+    );
+
+    if (!hasActiveDocs) return;
+
+    const interval = setInterval(() => {
+      load();
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [workspace, token, loading, load]);
+
   // Upload handler
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
