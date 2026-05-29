@@ -150,10 +150,10 @@ export function inviteMember(
 // ── Workspaces ────────────────────────────────────────────────────────────────
 
 export function listWorkspaces(token: string, orgSlug?: string) {
-  return apiFetch<{ workspaces: WorkspaceResponse[] }>("/workspaces", {
+  return apiFetch<WorkspaceResponse[]>("/workspaces", {
     token,
     orgSlug,
-  });
+  }).then((workspaces) => ({ workspaces }));
 }
 
 export function getWorkspace(

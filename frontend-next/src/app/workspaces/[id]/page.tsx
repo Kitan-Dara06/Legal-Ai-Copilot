@@ -6,6 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 import {
   getWorkspace, uploadDocument, deleteDocument,
   createGoal, listGoals, getGoalResult, confirmGoalIntent,
+  createSession,
 } from "@/lib/api";
 import type {
   WorkspaceDetailResponse, WorkspaceDocument,
@@ -76,6 +77,22 @@ function WorkspaceDetailContent() {
   // Analyze/Reason result inline display
   const [inlineResult, setInlineResult] = useState<{ type: "analyze" | "reason"; content: string } | null>(null);
 
+  // Document selection
+  const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
+
+  // Auto-select all READY documents when the list of READY documents changes,
+  // but only if selectedDocIds has none of the current ready documents (e.g. on first load)
+  useEffect(() => {
+    if (!workspace) return;
+    const readyIds = workspace.documents
+      .filter((d) => d.status === "READY")
+      .map((d) => d.document_id);
+      
+    if (readyIds.length > 0 && selectedDocIds.length === 0) {
+      setSelectedDocIds(readyIds);
+    }
+  }, [workspace, selectedDocIds.length]);
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data }: any) => {
       if (!data?.session) { router.push("/login"); return; }
@@ -142,16 +159,16 @@ function WorkspaceDetailContent() {
 
   // Submit goal
   const handleSubmit = async () => {
-    if (!token || !goalText.trim() || submitting) return;
-
-    // Pick first READY doc as primary document
-    const primaryDoc = workspace?.documents.find((d) => d.status === "READY");
-    if (!primaryDoc) return;
+    if (!token || !goalText.trim() || submitting || selectedDocIds.length === 0) return;
 
     setSubmitting(true);
     setInlineResult(null);
     try {
-      const res = await createGoal(token, params.id, goalText.trim(), undefined, orgSlug);
+      // Create session for selected documents
+      const sessionRes = await createSession(token, params.id, selectedDocIds, orgSlug);
+      if (!sessionRes.session_id) throw new Error("Failed to create session");
+
+      const res = await createGoal(token, params.id, goalText.trim(), sessionRes.session_id, orgSlug);
 
       if (!res.goal_id) throw new Error("No goal_id returned");
 
@@ -233,7 +250,7 @@ function WorkspaceDetailContent() {
   };
 
   const readyDocs = workspace?.documents.filter((d) => d.status === "READY") ?? [];
-  const canSubmit = readyDocs.length > 0 && goalText.trim().length > 0 && !submitting;
+  const canSubmit = selectedDocIds.length > 0 && goalText.trim().length > 0 && !submitting;
 
   if (loading) {
     return (
@@ -452,31 +469,52 @@ function WorkspaceDetailContent() {
                   <p className="text-[10px] text-[#4A4A5A]">Upload a PDF or DOCX to get started</p>
                 </div>
               ) : (
-                workspace.documents.map((doc) => (
-                  <div
-                    key={doc.document_id}
-                    className="flex items-center justify-between px-4 py-3 hover:bg-[#1E1E28] transition-colors group"
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <FileText className="w-3.5 h-3.5 text-[#7A7A8A] shrink-0" strokeWidth={1.5} />
-                      <div className="min-w-0">
-                        <p className="text-xs text-[#F0EEE9] truncate font-medium">{doc.filename}</p>
-                        <p className="text-[10px] text-[#4A4A5A] mt-0.5">
-                          {formatDistanceToNow(new Date(doc.upload_date), { addSuffix: true })}
-                        </p>
+                workspace.documents.map((doc) => {
+                  const isReady = doc.status === "READY";
+                  const isChecked = selectedDocIds.includes(doc.document_id);
+                  return (
+                    <div
+                      key={doc.document_id}
+                      className={`flex items-center justify-between px-4 py-3 hover:bg-[#1E1E28] transition-colors group ${
+                        isReady && isChecked ? "bg-[#7C6AF7]/[0.02]" : ""
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        {isReady ? (
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {
+                              setSelectedDocIds((prev) =>
+                                prev.includes(doc.document_id)
+                                  ? prev.filter((id) => id !== doc.document_id)
+                                  : [...prev, doc.document_id]
+                              );
+                            }}
+                            className="w-3.5 h-3.5 rounded border-[#2A2A32] bg-[#16161D] text-[#7C6AF7] focus:ring-[#7C6AF7] focus:ring-offset-0 cursor-pointer"
+                          />
+                        ) : (
+                          <FileText className="w-3.5 h-3.5 text-[#7A7A8A] shrink-0" strokeWidth={1.5} />
+                        )}
+                        <div className="min-w-0">
+                          <p className="text-xs text-[#F0EEE9] truncate font-medium">{doc.filename}</p>
+                          <p className="text-[10px] text-[#4A4A5A] mt-0.5">
+                            {formatDistanceToNow(new Date(doc.upload_date), { addSuffix: true })}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 ml-2 shrink-0">
+                        {docStatusBadge(doc.status)}
+                        <button
+                          onClick={(e) => handleDelete(doc.document_id, e)}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-[#7A7A8A] hover:text-[#F06B6B]"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
-                    <div className="flex items-center gap-1.5 ml-2 shrink-0">
-                      {docStatusBadge(doc.status)}
-                      <button
-                        onClick={(e) => handleDelete(doc.document_id, e)}
-                        className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-[#7A7A8A] hover:text-[#F06B6B]"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </Card>
