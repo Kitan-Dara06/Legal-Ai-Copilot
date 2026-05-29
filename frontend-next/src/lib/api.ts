@@ -66,6 +66,10 @@ export async function apiFetch<T>(
     headers: { ...buildHeaders(token, orgSlug), ...(extraHeaders as Headers) },
   });
   if (!res.ok) {
+    // 401 — session expired. Throw a typed error so callers can redirect to login.
+    if (res.status === 401 || res.status === 403) {
+      throw new AppError("AUTH_EXPIRED", "AUTH_EXPIRED", res.status);
+    }
     let detail = `HTTP ${res.status}`;
     try {
       const json = await res.json();

@@ -107,11 +107,22 @@ function WorkspaceDetailContent() {
   }, [workspace, hasInitializedDocs]);
 
   useEffect(() => {
+    // Get initial session
     supabase.auth.getSession().then(({ data }: any) => {
       if (!data?.session) { router.push("/login"); return; }
-      setToken(data?.session?.access_token);
-      setOrgSlug(data?.session?.user?.user_metadata?.org_slug);
+      setToken(data.session.access_token);
+      setOrgSlug(data.session.user?.user_metadata?.org_slug);
     });
+
+    // Keep token fresh whenever Supabase silently refreshes it
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event: string, session: any) => {
+        if (!session) { router.push("/login"); return; }
+        setToken(session.access_token);
+        setOrgSlug(session.user?.user_metadata?.org_slug);
+      },
+    );
+    return () => subscription.unsubscribe();
   }, []);
 
   const load = useCallback(async () => {
@@ -172,22 +183,27 @@ function WorkspaceDetailContent() {
 
   // Submit goal
   const handleSubmit = async () => {
-    if (!token || !goalText.trim() || submitting || selectedDocIds.length === 0) return;
+    if (!goalText.trim() || submitting || selectedDocIds.length === 0) return;
+
+    // Always get a fresh token from Supabase before making API calls
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData?.session) { router.push("/login"); return; }
+    const freshToken = sessionData.session.access_token;
+    setToken(freshToken);
 
     setSubmitting(true);
     setInlineResult(null);
     setSubmitError(null);
     try {
-      const sessionRes = await createSession(token, params.id, selectedDocIds, orgSlug);
+      const sessionRes = await createSession(freshToken, params.id, selectedDocIds, orgSlug);
       if (!sessionRes.session_id) throw new Error("Failed to create session");
 
-      const res = await createGoal(token, params.id, goalText.trim(), sessionRes.session_id, orgSlug);
+      const res = await createGoal(freshToken, params.id, goalText.trim(), sessionRes.session_id, orgSlug);
       if (!res.goal_id) throw new Error("No goal_id returned");
 
       const confidence = res.intent_confidence ?? 0;
       const intent = res.primary_intent;
 
-      // Ambiguity gate
       if (confidence < 0.8 || !intent) {
         setPendingGoalId(res.goal_id);
         setPendingIntent(intent ?? null);
@@ -197,32 +213,34 @@ function WorkspaceDetailContent() {
         return;
       }
 
-      // ACT → navigate to workflow
       if (intent === "ACT" && res.workflow_id) {
         setGoalText("");
         router.push(`/workspaces/${params.id}/workflows/${res.workflow_id}`);
         return;
       }
 
-      // ANALYZE / REASON — poll then refresh history
       if ((intent === "ANALYZE" || intent === "REASON") && res.goal_id) {
         setGoalText("");
-        const gotResult = await pollGoalResult(res.goal_id, intent);
+        const gotResult = await pollGoalResult(res.goal_id, intent, freshToken);
         if (!gotResult) setSubmitError("Lex couldn't generate a response. Try again.");
         await load();
       }
     } catch (err: any) {
+      if (err?.code === "AUTH_EXPIRED") {
+        router.push("/login");
+        return;
+      }
       setSubmitError(err?.message || "Something went wrong. Please try again.");
-    }
-    finally { setSubmitting(false); }
+    } finally { setSubmitting(false); }
   };
 
-  const pollGoalResult = async (goalId: string, intent: GoalIntent): Promise<boolean> => {
+  const pollGoalResult = async (goalId: string, intent: GoalIntent, freshToken?: string): Promise<boolean> => {
+    const t = freshToken || token;
     const MAX = 60;
     for (let i = 0; i < MAX; i++) {
       await new Promise((r) => setTimeout(r, 3000));
       try {
-        const res = await getGoalResult(token!, params.id, goalId, orgSlug);
+        const res = await getGoalResult(t!, params.id, goalId, orgSlug);
         if (res.status === "COMPLETED" || res.answer) {
           setInlineResult({
             type: intent.toLowerCase() as "analyze" | "reason",
@@ -231,7 +249,9 @@ function WorkspaceDetailContent() {
           return true;
         }
         if (["FAILED","ESCALATED","CANCELLED"].includes(res.status)) return false;
-      } catch {}
+      } catch (err: any) {
+        if (err?.code === "AUTH_EXPIRED") { router.push("/login"); return false; }
+      }
     }
     return false;
   };
