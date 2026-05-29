@@ -1,4 +1,3 @@
-import io
 import logging
 
 logger = logging.getLogger(__name__)
@@ -9,6 +8,7 @@ def generate_final_answer(question: str, context_chunks: list[str], groq_client)
     Takes the user's question and the list of LABELED chunks from the DB,
     and produces a cited legal response.
     """
+
     context_text = "\n\n" + "=" * 30 + "\n\n".join(context_chunks) + "\n\n" + "=" * 30
 
     system_prompt = f"""
@@ -26,6 +26,12 @@ def generate_final_answer(question: str, context_chunks: list[str], groq_client)
 
     6. COMPARISON MODE: If the user asks to compare documents or lists multiple contracts,
            you MUST output the answer as a Markdown Table.
+
+           Table Format Example:
+           | Contract Name | Clause Type | Snippet | Citation |
+           |---------------|-------------|---------|----------|
+           | Vendor Agrmt  | Termination | 30 days notice... | (vendor.pdf, Page 4) |
+           | Lease Agrmt   | Breach      | Immediate...      | (lease.pdf, Page 9)  |
 
         CONTEXT:
         {context_text}
@@ -65,12 +71,25 @@ def sanitize_goal_text(text: str) -> str:
         if phrase in lower_text:
             logger.warning("Prompt injection attempt detected and sanitized.")
             return "Provide a safe, default legal analysis of the documents."
-    # Cap length to prevent context exhaustion.
-    return text[:2000]
+    return text[:2000]  # Cap length to prevent buffer overflow/context exhaustion
 
 
 def is_scanned_pdf(file_bytes: bytes) -> bool:
-    """Heuristic: if first pages have little text, treat as scanned."""
+    """Heuristic: if the first few pages contain almost no text, it's likely scanned."""
+    import io
+
+    # Try PyMuPDF (fitz) first as it is generally faster and already installed
+    try:
+        import fitz
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        text = ""
+        for i in range(min(3, len(doc))):
+            text += doc[i].get_text() or ""
+        return len(text.strip()) < 5
+    except Exception:
+        pass
+
+    # Fall back to pypdf
     try:
         from pypdf import PdfReader
 
@@ -78,8 +97,7 @@ def is_scanned_pdf(file_bytes: bytes) -> bool:
         text = ""
         for i in range(min(3, len(reader.pages))):
             text += reader.pages[i].extract_text() or ""
-        return len(text.strip()) < 50
+        return len(text.strip()) < 5
     except Exception as e:
-        logger.warning("Failed to check if PDF is scanned: %s", e)
-        # Fail safe toward OCR path.
-        return True
+        logger.warning(f"Failed to check if PDF is scanned: {e}")
+        return True  # Default to scanned (OCR) if we can't tell, to be safe
