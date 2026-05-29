@@ -24,6 +24,17 @@ import { formatDistanceToNow } from "date-fns";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 
+function safeFormatDistance(dateStr: string | null | undefined) {
+  if (!dateStr) return "recently";
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return "recently";
+    return formatDistanceToNow(d, { addSuffix: true });
+  } catch {
+    return "recently";
+  }
+}
+
 // ── Document Status ───────────────────────────────────────────────────────────
 
 function docStatusBadge(status: string) {
@@ -79,19 +90,20 @@ function WorkspaceDetailContent() {
 
   // Document selection
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
+  const [hasInitializedDocs, setHasInitializedDocs] = useState(false);
 
-  // Auto-select all READY documents when the list of READY documents changes,
-  // but only if selectedDocIds has none of the current ready documents (e.g. on first load)
+  // Auto-select all READY documents ONCE on first load of the workspace
   useEffect(() => {
-    if (!workspace) return;
+    if (!workspace || hasInitializedDocs) return;
     const readyIds = workspace.documents
       .filter((d) => d.status === "READY")
       .map((d) => d.document_id);
       
-    if (readyIds.length > 0 && selectedDocIds.length === 0) {
+    if (readyIds.length > 0) {
       setSelectedDocIds(readyIds);
+      setHasInitializedDocs(true);
     }
-  }, [workspace, selectedDocIds.length]);
+  }, [workspace, hasInitializedDocs]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }: any) => {
@@ -416,7 +428,7 @@ function WorkspaceDetailContent() {
                       <p className="text-sm text-[#F0EEE9] truncate">{goal.goal_text}</p>
                       <p className="text-[10px] text-[#4A4A5A] mt-0.5 flex items-center gap-1">
                         <Clock className="w-3 h-3" />
-                        {formatDistanceToNow(new Date(goal.created_at), { addSuffix: true })}
+                        {safeFormatDistance(goal.created_at)}
                       </p>
                     </div>
                     <div className="flex items-center gap-2 ml-3 shrink-0">
@@ -499,7 +511,7 @@ function WorkspaceDetailContent() {
                         <div className="min-w-0">
                           <p className="text-xs text-[#F0EEE9] truncate font-medium">{doc.filename}</p>
                           <p className="text-[10px] text-[#4A4A5A] mt-0.5">
-                            {formatDistanceToNow(new Date(doc.upload_date), { addSuffix: true })}
+                            {safeFormatDistance(doc.upload_date)}
                           </p>
                         </div>
                       </div>

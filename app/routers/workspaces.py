@@ -7,6 +7,7 @@ FR-WS-01: Workspaces are strictly org-scoped.
 FR-WS-02: Documents are uploaded into a workspace context.
 """
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -103,6 +104,30 @@ async def create_workspace(
     }
 
 
+async def sync_workspace_status_async(db: AsyncSession, workspace_id: uuid.UUID) -> IntelligenceStatus:
+    pending_res = await db.execute(
+        select(Document.id)
+        .where(
+            Document.workspace_id == workspace_id,
+            Document.status.in_([DocumentStatus.PENDING, DocumentStatus.PROCESSING])
+        )
+        .limit(1)
+    )
+    has_pending = pending_res.scalar_one_or_none() is not None
+    expected_status = IntelligenceStatus.PENDING if has_pending else IntelligenceStatus.READY
+    
+    ws_res = await db.execute(
+        select(Workspace).where(Workspace.id == workspace_id)
+    )
+    ws = ws_res.scalar_one_or_none()
+    if ws and ws.intelligence_status != expected_status:
+        ws.intelligence_status = expected_status
+        await db.commit()
+        await db.refresh(ws)
+    
+    return expected_status
+
+
 @router.get("")
 async def list_workspaces(
     request: Request,
@@ -118,6 +143,9 @@ async def list_workspaces(
         .order_by(Workspace.last_active_at.desc())
     )
     workspaces = result.scalars().all()
+
+    # Sync intelligence status of all workspaces dynamically
+    await asyncio.gather(*(sync_workspace_status_async(db, ws.id) for ws in workspaces))
 
     return [
         {
@@ -154,11 +182,13 @@ async def get_workspace(
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found.")
 
+    current_status = await sync_workspace_status_async(db, workspace_id)
+
     response = {
         "workspace_id": str(ws.id),
         "name": ws.name,
         "description": ws.description,
-        "intelligence_status": ws.intelligence_status.value,
+        "intelligence_status": current_status.value,
         "document_count": ws.document_count,
         "created_at": ws.created_at.isoformat(),
         "last_active_at": ws.last_active_at.isoformat(),

@@ -219,17 +219,37 @@ def update_postgres_status_sync(
         with conn.cursor() as cur:
             if stages_complete is not None:
                 cur.execute(
-                    "UPDATE documents SET status=%s, intelligence_stages_complete=%s WHERE id=%s",
+                    "UPDATE documents SET status=%s, intelligence_stages_complete=%s WHERE id=%s RETURNING workspace_id",
                     (status, json.dumps(stages_complete), document_id),
                 )
             elif error is not None:
                 cur.execute(
-                    "UPDATE documents SET status=%s, error_message=%s WHERE id=%s",
+                    "UPDATE documents SET status=%s, error_message=%s WHERE id=%s RETURNING workspace_id",
                     (status, error, document_id),
                 )
             else:
                 cur.execute(
-                    "UPDATE documents SET status=%s WHERE id=%s", (status, document_id)
+                    "UPDATE documents SET status=%s WHERE id=%s RETURNING workspace_id", (status, document_id)
+                )
+            
+            row = cur.fetchone()
+            if row:
+                workspace_id = str(row[0])
+                cur.execute(
+                    """
+                    SELECT 1 FROM documents
+                    WHERE workspace_id = %s
+                      AND status IN ('PENDING', 'PROCESSING')
+                    LIMIT 1
+                    """,
+                    (workspace_id,),
+                )
+                has_pending = cur.fetchone() is not None
+                new_status = 'PENDING' if has_pending else 'READY'
+                
+                cur.execute(
+                    "UPDATE workspaces SET intelligence_status = %s WHERE id = %s",
+                    (new_status, workspace_id),
                 )
         conn.commit()
     except Exception as e:
