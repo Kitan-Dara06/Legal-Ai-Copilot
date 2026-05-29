@@ -125,17 +125,27 @@ function WorkspaceDetailContent() {
     return () => subscription.unsubscribe();
   }, []);
 
+  const [goalsError, setGoalsError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     if (!token) return;
+    setGoalsError(null);
     try {
-      const [ws, goalsRes] = await Promise.all([
-        getWorkspace(token, params.id, orgSlug),
-        listGoals(token, params.id, orgSlug).catch(() => ({ goals: [], total: 0 })),
-      ]);
+      const ws = await getWorkspace(token, params.id, orgSlug);
       setWorkspace(ws);
+    } catch (e: any) {
+      if (e?.code === "AUTH_EXPIRED") { router.push("/login"); return; }
+      console.error("Failed to load workspace:", e);
+    }
+    try {
+      const goalsRes = await listGoals(token, params.id, orgSlug);
       setGoals(goalsRes.goals ?? []);
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
+    } catch (e: any) {
+      if (e?.code === "AUTH_EXPIRED") { router.push("/login"); return; }
+      setGoalsError("Could not load conversation history.");
+      console.error("Failed to load goals:", e);
+    }
+    setLoading(false);
   }, [token, params.id, orgSlug]);
 
   useEffect(() => { load(); }, [load]);
@@ -440,6 +450,12 @@ function WorkspaceDetailContent() {
           )}
 
           {/* Conversation history — chat log */}
+          {goalsError && (
+            <div className="flex items-center gap-2 p-3 rounded-lg bg-[#F06B6B]/5 border border-[#F06B6B]/20">
+              <AlertTriangle className="w-4 h-4 text-[#F06B6B] shrink-0" />
+              <p className="text-xs text-[#F06B6B]">{goalsError}</p>
+            </div>
+          )}
           {goals.length > 0 && (
             <div>
               <h2 className="text-xs font-semibold text-[#7A7A8A] mb-3 uppercase tracking-wider">

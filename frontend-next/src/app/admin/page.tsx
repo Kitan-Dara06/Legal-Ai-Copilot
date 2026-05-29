@@ -1,123 +1,150 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { createClient } from "@/lib/supabase/client";
+import { listEscalations } from "@/lib/api";
+import {
+  Mail, Calendar, Slack, Link2, AlertTriangle,
+  CheckCircle2, XCircle, Settings2, Activity,
+} from "lucide-react";
+import type { EscalationItem } from "@/lib/types";
+
+const INTEGRATIONS = [
+  {
+    key: "smtp",
+    icon: Mail,
+    label: "SMTP Email",
+    desc: "Send deadline alerts and invite emails from your firm's address",
+  },
+  {
+    key: "nylas",
+    icon: Calendar,
+    label: "Calendar Sync",
+    desc: "Push extracted deadlines to Google Calendar or Outlook via Nylas",
+  },
+  {
+    key: "slack",
+    icon: Slack,
+    label: "Slack Notifications",
+    desc: "Notify your team channel when a workflow needs review or a deadline is near",
+  },
+  {
+    key: "clio",
+    icon: Link2,
+    label: "Clio Integration",
+    desc: "Sync matters and documents with your Clio practice management system",
+  },
+];
+
+const SERVICES = ["Vector Search", "Graph DB", "Message Queue", "Database", "Cache"];
 
 export default function AdminPage() {
-  const [token, setToken] = useState<string | null>(null);
+  const router = useRouter();
+  const [token, setToken]           = useState<string | null>(null);
+  const [orgSlug, setOrgSlug]       = useState<string | undefined>();
+  const [escalations, setEscalations] = useState<EscalationItem[]>([]);
 
   useEffect(() => {
-    void (async () => {
-      const supabase = createClient();
-      const { data } = await supabase.auth.getSession();
-      if (data.session) setToken(data.session.access_token);
-    })();
+    const supabase = createClient();
+    supabase.auth.getSession().then(({ data }: any) => {
+      if (!data?.session) { router.push("/login"); return; }
+      setToken(data.session.access_token);
+      setOrgSlug(data.session.user?.user_metadata?.org_slug);
+    });
   }, []);
 
-  return (
-    <div className="max-w-6xl mx-auto px-4 py-8">
-      <h1 className="text-2xl font-bold text-white mb-2">
-        Admin Control Plane
-      </h1>
-      <p className="text-slate-400 text-sm mb-8">
-        System health, integration settings, and telemetry dashboard.
-      </p>
+  useEffect(() => {
+    if (!token) return;
+    listEscalations(token, orgSlug).then(setEscalations).catch(() => {});
+  }, [token, orgSlug]);
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+  const unresolvedCount = escalations.filter((e) => e.status !== "COMPLETED").length;
+
+  return (
+    <div className="max-w-3xl mx-auto px-6 py-10">
+      <div className="mb-8">
+        <h1 className="text-2xl font-semibold text-[#F0EEE9] tracking-tight">Firm Settings</h1>
+        <p className="text-sm text-[#7A7A8A] mt-1">
+          Manage your firm's integrations, team access, and platform health.
+        </p>
+      </div>
+
+      {/* Quick stats */}
+      <div className="grid grid-cols-2 gap-4 mb-8">
         <Card className="p-4">
-          <h3 className="text-white font-semibold text-sm mb-1">
-            API Latency (p95)
-          </h3>
-          <p className="text-2xl text-blue-400 font-bold">--</p>
-          <p className="text-slate-500 text-xs">Requires OpenTelemetry</p>
+          <div className="flex items-center gap-3">
+            <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${unresolvedCount > 0 ? "bg-[#F06B6B]/10" : "bg-[#3ECFA4]/10"}`}>
+              {unresolvedCount > 0
+                ? <AlertTriangle className="w-4 h-4 text-[#F06B6B]" />
+                : <CheckCircle2 className="w-4 h-4 text-[#3ECFA4]" />}
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#F0EEE9]">{unresolvedCount}</p>
+              <p className="text-xs text-[#7A7A8A]">Unresolved workflow failures</p>
+            </div>
+          </div>
         </Card>
         <Card className="p-4">
-          <h3 className="text-white font-semibold text-sm mb-1">
-            Unresolved Failures
-          </h3>
-          <p className="text-2xl text-green-400 font-bold">0</p>
-          <p className="text-slate-500 text-xs">
-            UNCOMPENSATABLE_FAILURE events
-          </p>
-        </Card>
-        <Card className="p-4">
-          <h3 className="text-white font-semibold text-sm mb-1">
-            Avg Faithfulness
-          </h3>
-          <p className="text-2xl text-blue-400 font-bold">--</p>
-          <p className="text-slate-500 text-xs">Across all models this week</p>
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-[#7C6AF7]/10 flex items-center justify-center">
+              <Activity className="w-4 h-4 text-[#7C6AF7]" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#F0EEE9]">{SERVICES.length}</p>
+              <p className="text-xs text-[#7A7A8A]">Services connected</p>
+            </div>
+          </div>
         </Card>
       </div>
 
-      <h2 className="text-lg font-semibold text-white mb-4">
-        Integration Settings
-      </h2>
-      <Card className="p-4 mb-4">
-        <p className="text-slate-400 text-sm mb-4">
-          Configure external service credentials. These are stored encrypted via
-          pgcrypto.
-        </p>
-        <div className="space-y-3">
-          <div className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg">
-            <div>
-              <span className="text-white text-sm font-medium">SMTP Email</span>
-              <p className="text-slate-500 text-xs">
-                Send legal notices via SMTP
-              </p>
-            </div>
-            <Badge variant="warning">Not configured</Badge>
-          </div>
-          <div className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg">
-            <div>
-              <span className="text-white text-sm font-medium">
-                Nylas Calendar
-              </span>
-              <p className="text-slate-500 text-xs">
-                Calendar integration via Nylas API
-              </p>
-            </div>
-            <Badge variant="warning">Not configured</Badge>
-          </div>
-          <div className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg">
-            <div>
-              <span className="text-white text-sm font-medium">
-                Slack Webhook
-              </span>
-              <p className="text-slate-500 text-xs">Escalation notifications</p>
-            </div>
-            <Badge variant="warning">Not configured</Badge>
-          </div>
-          <div className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg">
-            <div>
-              <span className="text-white text-sm font-medium">Clio API</span>
-              <p className="text-slate-500 text-xs">Case tracker updates</p>
-            </div>
-            <Badge variant="warning">Not configured</Badge>
-          </div>
+      {/* Integrations */}
+      <div className="mb-8">
+        <div className="flex items-center gap-2 mb-4">
+          <Settings2 className="w-4 h-4 text-[#D4A853]" />
+          <h2 className="text-sm font-semibold text-[#F0EEE9]">Integrations</h2>
         </div>
-      </Card>
-
-      <h2 className="text-lg font-semibold text-white mb-4">System Health</h2>
-      <Card className="p-4">
-        <div className="space-y-3">
-          {["Qdrant", "FalkorDB", "RabbitMQ", "PostgreSQL", "Redis"].map(
-            (service) => (
-              <div
-                key={service}
-                className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg"
-              >
-                <span className="text-white text-sm">{service}</span>
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 rounded-full bg-green-400" />
-                  <span className="text-green-400 text-xs">Connected</span>
+        <Card className="divide-y divide-[#2A2A32]">
+          {INTEGRATIONS.map(({ key, icon: Icon, label, desc }) => (
+            <div key={key} className="flex items-center justify-between px-4 py-3.5">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-[#1E1E28] border border-[#2A2A32] flex items-center justify-center shrink-0">
+                  <Icon className="w-4 h-4 text-[#7A7A8A]" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-[#F0EEE9]">{label}</p>
+                  <p className="text-[11px] text-[#4A4A5A] mt-0.5">{desc}</p>
                 </div>
               </div>
-            ),
-          )}
+              <Badge variant="warning">Not configured</Badge>
+            </div>
+          ))}
+        </Card>
+        <p className="text-[10px] text-[#4A4A5A] mt-2 px-1">
+          Contact your account manager to enable integrations.
+        </p>
+      </div>
+
+      {/* Service health */}
+      <div>
+        <div className="flex items-center gap-2 mb-4">
+          <Activity className="w-4 h-4 text-[#D4A853]" />
+          <h2 className="text-sm font-semibold text-[#F0EEE9]">Platform Health</h2>
         </div>
-      </Card>
+        <Card className="divide-y divide-[#2A2A32]">
+          {SERVICES.map((service) => (
+            <div key={service} className="flex items-center justify-between px-4 py-3">
+              <span className="text-sm text-[#F0EEE9]">{service}</span>
+              <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 rounded-full bg-[#3ECFA4] animate-pulse" />
+                <span className="text-[11px] text-[#3ECFA4] font-medium">Operational</span>
+              </div>
+            </div>
+          ))}
+        </Card>
+      </div>
     </div>
   );
 }
