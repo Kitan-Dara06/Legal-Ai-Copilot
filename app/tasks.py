@@ -229,9 +229,10 @@ def update_postgres_status_sync(
                 )
             else:
                 cur.execute(
-                    "UPDATE documents SET status=%s WHERE id=%s RETURNING workspace_id", (status, document_id)
+                    "UPDATE documents SET status=%s WHERE id=%s RETURNING workspace_id",
+                    (status, document_id),
                 )
-            
+
             row = cur.fetchone()
             if row:
                 workspace_id = str(row[0])
@@ -245,8 +246,8 @@ def update_postgres_status_sync(
                     (workspace_id,),
                 )
                 has_pending = cur.fetchone() is not None
-                new_status = 'PENDING' if has_pending else 'READY'
-                
+                new_status = "PENDING" if has_pending else "READY"
+
                 cur.execute(
                     "UPDATE workspaces SET intelligence_status = %s WHERE id = %s",
                     (new_status, workspace_id),
@@ -1103,261 +1104,100 @@ def process_scanned_pdf(
 @celery_app.task(
     name="app.tasks.process_workflow",
     bind=True,
-    base=AsyncTask,
-    max_retries=2,
-    default_retry_delay=60,
+    max_retries=0,
     queue="default",
     acks_late=True,
-    soft_time_limit=900,   # 15 min — detect+draft+qa+plan to interrupt; exits cleanly
-    time_limit=1200,       # 20 min hard cap
+    soft_time_limit=120,
+    time_limit=180,
 )
 def process_workflow(self, workflow_id: str, session_file_ids: list | None = None):
-    """
-    Task 1 of 2: Run the LangGraph from START to the AWAITING_APPROVAL interrupt.
-
-    Exits cleanly when the graph pauses at AWAITING_APPROVAL — RabbitMQ ACKs
-    the message immediately and the worker slot is freed.
-
-    resume_workflow_after_approval (Task 2) is enqueued by the approvals router
-    after the user clicks Approve.
-
-    SoftTimeLimitExceeded is caught BEFORE the generic Exception handler and
-    NEVER retried — this breaks the infinite 30-minute redelivery loop.
-    """
-    import json
-    import logging
+    """Direct node calls - no LangGraph, no checkpointer, no 900s timeout."""
+    import asyncio
     import uuid
 
     import sentry_sdk
 
-    # Enrich the Sentry transaction (created automatically by CeleryIntegration)
-    # so the Performance waterfall shows workflow context on every span
-    sentry_sdk.set_tag("workflow_id", workflow_id)
-
-    # MongoDB audit: log workflow task started
-    try:
-        from app.services.audit.events import emit
-        from app.services.audit.schemas import CorrelationContext
-
-        correlation = CorrelationContext(
-            workflow_id=workflow_id,
-            task_id=self.request.id if hasattr(self, "request") else None,
-        )
-        emit.workflow_started(
-            workflow_id=workflow_id,
-            intent="",
-            correlation=correlation,
-        )
-    except Exception:
-        pass
-
-    log = logging.getLogger(__name__)
-    wf_uuid = uuid.UUID(workflow_id)
-
-    log.info("[%s] process_workflow: starting", workflow_id)
-
-    # ── Step 1: Sync DB reads ──────────────────────────────────────────────
-    from app.tasks import _get_valid_conn, get_pg_pool
-
-    pg_pool = get_pg_pool()
-    conn, _ = _get_valid_conn(pg_pool)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, workspace_id, org_id, intent, intent_confidence, goal_id "
-                "FROM workflow_executions WHERE id = %s",
-                (workflow_id,),
-            )
-            wf_row = cur.fetchone()
-            if not wf_row:
-                log.error("Workflow %s not found", workflow_id)
-                return
-
-            wf_id, ws_id, org_id_str, intent_val, conf, goal_id = wf_row
-
-            cur.execute(
-                "SELECT goal_text FROM goals WHERE id = %s",
-                (goal_id,),
-            )
-            goal_row = cur.fetchone()
-            if not goal_row:
-                log.error("Goal not found for workflow %s", workflow_id)
-                return
-
-            goal_text = goal_row[0]
-
-            # Enrich Sentry with intent + org after DB read
-            sentry_sdk.set_tag("intent", intent_val)
-            sentry_sdk.set_tag("org_id", str(org_id_str))
-            sentry_sdk.set_tag("goal_id", str(goal_id))
-
-            cur.execute(
-                "UPDATE workflow_executions SET status = 'CLASSIFYING' WHERE id = %s",
-                (workflow_id,),
-            )
-            conn.commit()
-    except Exception as e:
-        log.error("DB read failed for workflow %s: %s", workflow_id, e)
-        return
-    finally:
-        pg_pool.putconn(conn)
-
-    # ── Step 2: Async LangGraph execution ──────────────────────────────────
-    from app.models import WorkflowStatus as WS
+    from sqlalchemy import select
+    from app.database import AsyncSessionLocal
+    from app.models import Goal, WorkflowExecution, WorkflowStatus as WS
     from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
-    from app.services.agent.graph import create_action_agent_graph
-
-    initial_state = PointerOnlyState(
-        graph_version=CURRENT_GRAPH_VERSION,
-        workflow_id=str(workflow_id),
-        workspace_id=str(ws_id),
-        org_id=str(org_id_str),
-        document_id="",
-        primary_intent=intent_val,
-        intent_confidence=conf or 0.0,
-        intent_confirmed_by_human=False,
-        goal_text=goal_text,
-        context_text=None,
-        plan_id=None,
-        current_task_index=0,
-        total_tasks=0,
-        status=WS.CLASSIFYING.value,
-        findings_summary="",
-        action_count=0,
-        session_file_ids=session_file_ids or [],
-        messages=[],
-        error_context=None,
-        retry_count=0,
+    from app.services.agent.nodes import (
+        ambiguity_gate_node, contradiction_node, decision_brief_node,
+        defined_terms_node, detect_node, escalation_node, findings_node,
+        graph_expansion_node, intent_node, result_node, retrieval_node,
+        synthesis_node,
     )
 
-    async def _run_graph():
-        from app.services.agent.checkpointer import get_checkpointer
+    sentry_sdk.set_tag("workflow_id", workflow_id)
+    wf_uuid = uuid.UUID(workflow_id) if isinstance(workflow_id, str) else workflow_id
+    logger.info("[%s] process_workflow: starting", workflow_id)
 
-        async with get_checkpointer() as checkpointer:
-            app = create_action_agent_graph().compile(
-                checkpointer=checkpointer,
-                interrupt_before=["ambiguity_gate", "decision_brief", "draft"],
-            )
-            config = {"configurable": {"thread_id": str(workflow_id)}}
-            final_state = await app.ainvoke(initial_state, config=config)
-            return final_state
+    async def _run():
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(WorkflowExecution).where(WorkflowExecution.id == wf_uuid))
+            wf = result.scalar_one_or_none()
+            if not wf:
+                logger.error("[%s] Workflow not found", workflow_id)
+                return {"status": "not_found"}
+            goal_res = await db.execute(select(Goal).where(Goal.id == wf.goal_id))
+            goal = goal_res.scalar_one_or_none()
 
-    async def _run_graph_with_cancel_guard():
-        """
-        Wraps _run_graph() in asyncio.wait_for so the coroutine is CANCELLED
-        (not orphaned) when the task times out.
-
-        Without this: SoftTimeLimitExceeded fires on the Celery thread →
-        future.result() raises → task returns → BUT _run_graph() keeps running
-        on _worker_loop, blocking it permanently. The next task schedules a new
-        coroutine on the same loop, but single-threaded asyncio can't run it
-        while the orphaned coroutine is stuck. Both tasks timeout. Compounds.
-
-        With this: asyncio.TimeoutError fires at 840s (60s before soft limit),
-        which cancels _run_graph() cleanly via asyncio's CancelledError mechanism.
-        _worker_loop is free for the next task.
-        """
-        try:
-            return await asyncio.wait_for(_run_graph(), timeout=840)
-        except asyncio.TimeoutError:
-            log.error(
-                "[%s] _run_graph timed out after 840s — cancelled cleanly", workflow_id
-            )
-            raise RuntimeError("Graph execution timed out (840s) — cancelled")
-
-    def _sync_mark_failed(wf_id: str) -> None:
-        """Synchronous DB update — safe to call outside async context."""
-        _pool = get_pg_pool()
-        _conn = _pool.getconn()
-        try:
-            with _conn.cursor() as _cur:
-                _cur.execute(
-                    "UPDATE workflow_executions SET status = 'FAILED' WHERE id = %s",
-                    (wf_id,),
-                )
-            _conn.commit()
-        except Exception as _dbe:
-            log.warning("[%s] Could not mark FAILED in DB: %s", wf_id, _dbe)
-        finally:
-            _pool.putconn(_conn)
-
-    try:
-        final_state = self.run_async(_run_graph_with_cancel_guard())
-        final_status = (final_state or {}).get("status", "")
-
-        if final_status == WS.AWAITING_APPROVAL.value:
-            # Graph paused at interrupt — task done, slot freed, message ACKed
-            log.info(
-                "[%s] process_workflow: paused at AWAITING_APPROVAL — exiting cleanly",
-                workflow_id,
-            )
-        else:
-            log.info("[%s] process_workflow: completed (%s)", workflow_id, final_status)
-
-        try:
-            from app.services.audit.events import emit
-            from app.services.audit.schemas import CorrelationContext
-            emit.workflow_completed(
-                workflow_id=workflow_id,
-                duration_ms=0,
-                correlation=CorrelationContext(workflow_id=workflow_id),
-            )
-        except Exception:
-            pass
-
-        return {"status": final_status, "paused": final_status == WS.AWAITING_APPROVAL.value}
-
-    except SoftTimeLimitExceeded:
-        # ── NOT a transient error — never retry timeouts ──────────────────
-        # A clean return (not raise) ACKs the RabbitMQ message, breaking
-        # the infinite 30-min redelivery loop permanently.
-        log.error(
-            "[%s] process_workflow: SoftTimeLimitExceeded — marking FAILED, NOT retrying",
-            workflow_id,
+        state = PointerOnlyState(
+            graph_version=CURRENT_GRAPH_VERSION, workflow_id=workflow_id,
+            workspace_id=str(wf.workspace_id), org_id=str(wf.org_id), document_id="",
+            primary_intent="ANALYZE", intent_confidence=0.0, intent_confirmed_by_human=False,
+            goal_text=goal.goal_text if goal else "", context_text=None, plan_id=None,
+            current_task_index=0, total_tasks=0, status=WS.CLASSIFYING.value,
+            findings_summary="", action_count=0, session_file_ids=session_file_ids or [],
+            messages=[], error_context=None, retry_count=0,
         )
-        _sync_mark_failed(workflow_id)
-        try:
-            from app.services.audit.events import emit
-            from app.services.audit.schemas import CorrelationContext
-            emit.workflow_failed(
-                workflow_id=workflow_id,
-                error="SoftTimeLimitExceeded — detect/draft/qa/plan chain too slow",
-                correlation=CorrelationContext(workflow_id=workflow_id),
-            )
-        except Exception:
-            pass
-        return {"failed": True, "reason": "timeout"}  # clean return = ACK
 
-    except Exception as e:
-        log.error("[%s] process_workflow: FAILED — %s", workflow_id, e, exc_info=True)
-        try:
-            from app.services.audit.events import emit
-            from app.services.audit.schemas import CorrelationContext
-            emit.workflow_failed(
-                workflow_id=workflow_id,
-                error=str(e),
-                correlation=CorrelationContext(workflow_id=workflow_id),
-            )
-        except Exception:
-            pass
-        try:
-            raise self.retry(exc=e, countdown=60)
-        except Exception as retry_err:
-            log.error("Workflow %s exhausted retries: %s", workflow_id, retry_err)
-            return {"failed": True}
+        state.update(await intent_node(state))
+        intent = state["primary_intent"]
+        logger.info("[%s] Intent: %s (conf=%.2f)", workflow_id, intent, state.get("intent_confidence", 0))
+
+        if state.get("intent_confidence", 0) < 0.80 and not state.get("intent_confirmed_by_human", False):
+            state.update(await ambiguity_gate_node(state))
+            if state.get("status") == WS.AWAITING_INTENT_CONFIRMATION.value:
+                logger.info("[%s] Paused at ambiguity gate", workflow_id)
+                return {"status": WS.AWAITING_INTENT_CONFIRMATION.value}
+
+        if intent == "ANALYZE":
+            state.update(await retrieval_node(state))
+            if state.get("retrieval_aborted"):
+                logger.info("[%s] ANALYZE: insufficient evidence", workflow_id)
+                return {"status": WS.COMPLETED.value}
+            state.update(await synthesis_node(state))
+            return {"status": WS.COMPLETED.value}
+
+        elif intent == "REASON":
+            state.update(await retrieval_node(state))
+            if state.get("retrieval_aborted"):
+                return {"status": WS.COMPLETED.value}
+            state.update(await graph_expansion_node(state))
+            state.update(await defined_terms_node(state))
+            state.update(await contradiction_node(state))
+            state.update(await findings_node(state))
+            state.update(await escalation_node(state))
+            state.update(await result_node(state))
+            return {"status": WS.COMPLETED.value}
+
+        elif intent == "ACT":
+            state.update(await retrieval_node(state))
+            state.update(await detect_node(state))
+            state.update(await decision_brief_node(state))
+            logger.info("[%s] ACT: brief generated, awaiting confirmation", workflow_id)
+            return {"status": WS.AWAITING_BRIEF_CONFIRMATION.value}
+
+        else:
+            logger.warning("[%s] Unknown intent: %s", workflow_id, intent)
+            return {"status": WS.FAILED.value}
+
+    result = asyncio.run(_run())
+    logger.info("[%s] process_workflow: done -> %s", workflow_id, result)
+    return result
 
 
-@celery_app.task(
-    name="app.tasks.resume_workflow_after_approval",
-    bind=True,
-    base=AsyncTask,
-    max_retries=2,
-    default_retry_delay=30,
-    queue="default",
-    acks_late=True,
-    soft_time_limit=600,   # 10 min for execute phase
-    time_limit=720,        # 12 min hard cap
-)
 def resume_workflow_after_approval(
     self, workflow_id: str, actor_user_id: str | None = None
 ):
@@ -1370,6 +1210,7 @@ def resume_workflow_after_approval(
     Resumes via ainvoke(None, config) which reads state from the checkpointer.
     """
     import logging
+
     import sentry_sdk
 
     log = logging.getLogger(__name__)
@@ -1418,11 +1259,14 @@ def resume_workflow_after_approval(
         final_state = self.run_async(_resume_with_cancel_guard())
         final_status = (final_state or {}).get("status", "")
         log.info(
-            "[%s] resume_workflow_after_approval: completed (%s)", workflow_id, final_status
+            "[%s] resume_workflow_after_approval: completed (%s)",
+            workflow_id,
+            final_status,
         )
         try:
             from app.services.audit.events import emit
             from app.services.audit.schemas import CorrelationContext
+
             emit.workflow_completed(
                 workflow_id=workflow_id,
                 duration_ms=0,
@@ -1445,6 +1289,7 @@ def resume_workflow_after_approval(
         try:
             from app.services.audit.events import emit
             from app.services.audit.schemas import CorrelationContext
+
             emit.workflow_failed(
                 workflow_id=workflow_id,
                 error="SoftTimeLimitExceeded during execute phase",
@@ -1458,11 +1303,15 @@ def resume_workflow_after_approval(
 
     except Exception as e:
         log.error(
-            "[%s] resume_workflow_after_approval: FAILED — %s", workflow_id, e, exc_info=True
+            "[%s] resume_workflow_after_approval: FAILED — %s",
+            workflow_id,
+            e,
+            exc_info=True,
         )
         try:
             from app.services.audit.events import emit
             from app.services.audit.schemas import CorrelationContext
+
             emit.workflow_failed(
                 workflow_id=workflow_id,
                 error=str(e),
@@ -1538,3 +1387,7 @@ def cleanup_stale_data():
         logger.error("Maintenance Task Failed: %s", e)
     finally:
         pg_pool.putconn(conn)
+
+
+# Register test brief task
+from app.test_brief_task import test_decision_brief  # noqa: F401
