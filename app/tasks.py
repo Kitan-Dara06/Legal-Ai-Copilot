@@ -1116,15 +1116,24 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
     import uuid
 
     import sentry_sdk
-
     from sqlalchemy import select
+
     from app.database import AsyncSessionLocal
-    from app.models import Goal, WorkflowExecution, WorkflowStatus as WS
+    from app.models import Goal, WorkflowExecution
+    from app.models import WorkflowStatus as WS
     from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
     from app.services.agent.nodes import (
-        ambiguity_gate_node, contradiction_node, decision_brief_node,
-        defined_terms_node, detect_node, escalation_node, findings_node,
-        graph_expansion_node, intent_node, result_node, retrieval_node,
+        ambiguity_gate_node,
+        contradiction_node,
+        decision_brief_node,
+        defined_terms_node,
+        detect_node,
+        escalation_node,
+        findings_node,
+        graph_expansion_node,
+        intent_node,
+        result_node,
+        retrieval_node,
         synthesis_node,
     )
 
@@ -1134,7 +1143,9 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
 
     async def _run():
         async with AsyncSessionLocal() as db:
-            result = await db.execute(select(WorkflowExecution).where(WorkflowExecution.id == wf_uuid))
+            result = await db.execute(
+                select(WorkflowExecution).where(WorkflowExecution.id == wf_uuid)
+            )
             wf = result.scalar_one_or_none()
             if not wf:
                 logger.error("[%s] Workflow not found", workflow_id)
@@ -1143,20 +1154,40 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
             goal = goal_res.scalar_one_or_none()
 
         state = PointerOnlyState(
-            graph_version=CURRENT_GRAPH_VERSION, workflow_id=workflow_id,
-            workspace_id=str(wf.workspace_id), org_id=str(wf.org_id), document_id="",
-            primary_intent="ANALYZE", intent_confidence=0.0, intent_confirmed_by_human=False,
-            goal_text=goal.goal_text if goal else "", context_text=None, plan_id=None,
-            current_task_index=0, total_tasks=0, status=WS.CLASSIFYING.value,
-            findings_summary="", action_count=0, session_file_ids=session_file_ids or [],
-            messages=[], error_context=None, retry_count=0,
+            graph_version=CURRENT_GRAPH_VERSION,
+            workflow_id=workflow_id,
+            workspace_id=str(wf.workspace_id),
+            org_id=str(wf.org_id),
+            document_id="",
+            primary_intent="ANALYZE",
+            intent_confidence=0.0,
+            intent_confirmed_by_human=False,
+            goal_text=goal.goal_text if goal else "",
+            context_text=None,
+            plan_id=None,
+            current_task_index=0,
+            total_tasks=0,
+            status=WS.CLASSIFYING.value,
+            findings_summary="",
+            action_count=0,
+            session_file_ids=session_file_ids or [],
+            messages=[],
+            error_context=None,
+            retry_count=0,
         )
 
         state.update(await intent_node(state))
         intent = state["primary_intent"]
-        logger.info("[%s] Intent: %s (conf=%.2f)", workflow_id, intent, state.get("intent_confidence", 0))
+        logger.info(
+            "[%s] Intent: %s (conf=%.2f)",
+            workflow_id,
+            intent,
+            state.get("intent_confidence", 0),
+        )
 
-        if state.get("intent_confidence", 0) < 0.80 and not state.get("intent_confirmed_by_human", False):
+        if state.get("intent_confidence", 0) < 0.80 and not state.get(
+            "intent_confirmed_by_human", False
+        ):
             state.update(await ambiguity_gate_node(state))
             if state.get("status") == WS.AWAITING_INTENT_CONFIRMATION.value:
                 logger.info("[%s] Paused at ambiguity gate", workflow_id)
@@ -1390,4 +1421,4 @@ def cleanup_stale_data():
 
 
 # Register test brief task
-from app.test_brief_task import test_decision_brief  # noqa: F401
+# from app.test_brief_task import test_decision_brief  # noqa: F401
