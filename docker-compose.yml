@@ -101,8 +101,8 @@ services:
         env_file:
             - .env.production
         environment:
-            - CELERY_HOT_START=${CELERY_HOT_START:-true}
-            - CELERY_HOT_START_INCLUDE_GEMINI=${CELERY_HOT_START_INCLUDE_GEMINI:-false}
+            - CELERY_HOT_START=false # SPLADE not preloaded — reduces fork memory from 1.7Gi to ~300Mi
+            - CELERY_HOT_START_INCLUDE_GEMINI=false
             - FASTEMBED_CACHE_DIR=/app/.fastembed_cache
         command: >
             celery -A app.worker worker

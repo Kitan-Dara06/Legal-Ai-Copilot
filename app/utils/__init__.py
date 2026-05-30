@@ -81,11 +81,14 @@ def is_scanned_pdf(file_bytes: bytes) -> bool:
     # Try PyMuPDF (fitz) first as it is generally faster and already installed
     try:
         import fitz
+
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         text = ""
         for i in range(min(3, len(doc))):
             text += doc[i].get_text() or ""
-        return len(text.strip()) < 5
+        return (
+            len(text.strip()) < 50
+        )  # Digital PDFs have hundreds+ chars per page; scanned PDFs have 0
     except Exception:
         pass
 
@@ -97,7 +100,7 @@ def is_scanned_pdf(file_bytes: bytes) -> bool:
         text = ""
         for i in range(min(3, len(reader.pages))):
             text += reader.pages[i].extract_text() or ""
-        return len(text.strip()) < 5
+        return len(text.strip()) < 50
     except Exception as e:
         logger.warning(f"Failed to check if PDF is scanned: {e}")
         return True  # Default to scanned (OCR) if we can't tell, to be safe

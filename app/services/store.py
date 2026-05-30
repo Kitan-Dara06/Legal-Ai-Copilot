@@ -1,4 +1,5 @@
 import logging
+import time
 import os
 import uuid
 from typing import Dict, List, Optional
@@ -240,7 +241,7 @@ def search_hybrid(
                 break
             except Exception as qe:
                 if attempt < 2:
-                    import time
+                    # import time (module-level)
 
                     time.sleep(2**attempt)
                     continue
@@ -468,7 +469,7 @@ def search_hybrid_qdrant(
             break
         except Exception as qe:
             if attempt < 2:
-                import time
+                # import time (module-level)
 
                 time.sleep(2**attempt)
                 continue

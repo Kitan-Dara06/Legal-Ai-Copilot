@@ -1,124 +1,99 @@
 # app/services/agent/node_tracer.py
 #
-# Tracing decorator for LangGraph nodes.
-# Creates a Sentry span + structured log entry for every node invocation,
-# so the Sentry Performance view shows the full workflow breakdown:
-#
-#   process_workflow (transaction)
-#   ├── intent_node (span)
-#   ├── retrieval_node (span)
-#   ├── draft_node (span)
-#   ├── qa_node (span)
-#   └── plan_node (span)
+# LangGraph Node Tracer — uses LangChain callbacks to trace node execution.
+# This is the ONLY reliable way to hook into LangGraph node execution,
+# as function decorators are bypassed by LangGraph's internal machinery.
 
-import functools
 import logging
+import os
 import time
 
-import sentry_sdk
+from langchain_core.callbacks import AsyncCallbackHandler
 
 logger = logging.getLogger(__name__)
 
 
-def traced_node(func):
+class NodeTracer(AsyncCallbackHandler):
     """
-    Decorator that wraps a LangGraph async node function with:
-      - A Sentry span (visible in Sentry Performance waterfall)
-      - Structured log INFO at entry / exit with duration
-      - Tags: workflow_id, node name, intent (if set)
+    LangChain callback handler that captures node start/end with timing.
+    Writes directly to MongoDB (bypasses queue/consumer for reliability).
 
     Usage:
-        @traced_node
-        async def intent_node(state: PointerOnlyState) -> Dict[str, Any]:
-            ...
+        tracer = NodeTracer()
+        app = graph.compile(checkpointer=checkpointer)
+        result = await app.ainvoke(input, {"callbacks": [tracer]})
     """
 
-    @functools.wraps(func)
-    async def wrapper(state, *args, **kwargs):
-        workflow_id = state.get("workflow_id", "unknown")
-        node_name = func.__name__
+    def __init__(self):
+        self._starts: dict = {}
 
-        logger.info("[%s] %s: enter", workflow_id, node_name)
+    async def on_chain_start(self, serialized, inputs, **kwargs):
+        name = kwargs.get("metadata", {}).get("langraph_node") or kwargs.get(
+            "metadata", {}
+        ).get("langgraph_node")
+        if not name:
+            return
+        run_id = kwargs.get("run_id")
+        if not run_id:
+            return
+        self._starts[run_id] = (name, time.monotonic())
+        _log_debug(name, "enter")
 
-        # Build correlation context for MongoDB audit
-        correlation = None
-        try:
-            from app.services.audit.logger import AuditLogger
-            from app.services.audit.schemas import CorrelationContext
+    async def on_chain_end(self, outputs, **kwargs):
+        run_id = kwargs.get("run_id")
+        if not run_id or run_id not in self._starts:
+            return
+        name, t0 = self._starts.pop(run_id)
+        elapsed = (time.monotonic() - t0) * 1000
+        _log_debug(name, "exit", elapsed)
 
-            correlation = CorrelationContext(
-                workflow_id=workflow_id,
-                trace_id=workflow_id,
-            )
-            AuditLogger.node_enter(node_name, correlation=correlation)
-        except Exception as e:
-            logger.debug("[%s] audit node_enter skipped: %s", workflow_id, e)
+    async def on_chain_error(self, error, **kwargs):
+        run_id = kwargs.get("run_id")
+        if not run_id or run_id not in self._starts:
+            return
+        name, t0 = self._starts.pop(run_id)
+        elapsed = (time.monotonic() - t0) * 1000
+        _log_debug(name, "exit", elapsed, error=str(error))
 
-        with sentry_sdk.start_span(
-            op="langgraph_node",
-            description=node_name,
-        ) as span:
-            span.set_tag("workflow_id", workflow_id)
-            span.set_tag("node", node_name)
+# kept for backward compat — nodes.py imports this
+traced_node = lambda func: func
 
-            t0 = time.monotonic()
-            try:
-                result = await func(state, *args, **kwargs)
 
-                elapsed = time.monotonic() - t0
-                span.set_tag("duration_ms", int(elapsed * 1000))
-                intent = state.get("primary_intent", "")
-                if intent:
-                    span.set_tag("intent", intent)
+def _log_debug(node_name: str, action: str, duration_ms: float = 0, error: str = ""):
+    """Log to stdout (visible in worker logs) + MongoDB."""
+    message = f"{'Enter' if action == 'enter' else 'Exit'}: {node_name}"
+    if duration_ms:
+        message += f" ({duration_ms:.0f}ms)"
+    if error:
+        message += f" FAILED: {error}"
+    logger.info("[tracer] %s", message)
 
-                logger.info(
-                    "[%s] %s: done (%.2fs)",
-                    workflow_id,
-                    node_name,
-                    elapsed,
-                )
+    # Direct MongoDB write
+    try:
+        import asyncio
 
-                # Log node success to MongoDB (BEFORE return!)
-                if correlation:
-                    try:
-                        AuditLogger.node_exit(
-                            node_name,
-                            duration_ms=elapsed * 1000,
-                            correlation=correlation,
-                        )
-                    except Exception as e:
-                        logger.debug("[%s] audit node_exit skipped: %s", workflow_id, e)
+        from motor.motor_asyncio import AsyncIOMotorClient
 
-                return result
-
-            except Exception as e:
-                elapsed = time.monotonic() - t0
-                span.set_tag("duration_ms", int(elapsed * 1000))
-                span.set_status("internal_error")
-
-                logger.error(
-                    "[%s] %s: FAILED after %.2fs — %s: %s",
-                    workflow_id,
-                    node_name,
-                    elapsed,
-                    type(e).__name__,
-                    e,
-                )
-
-                # Log node failure to MongoDB
-                if correlation:
-                    try:
-                        AuditLogger.node_exit(
-                            node_name,
-                            duration_ms=elapsed * 1000,
-                            correlation=correlation,
-                            error=str(e),
-                        )
-                    except Exception as ex:
-                        logger.debug(
-                            "[%s] audit node_exit (fail) skipped: %s", workflow_id, ex
-                        )
-
-                raise
-
-    return wrapper
+        uri = os.environ.get("MONGODB_URI", "")
+        if not uri:
+            return
+        mc = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=2000)
+        db = mc["cluster0"]
+        entry = {
+            "schema_version": 2,
+            "timestamp": time.time(),
+            "level": "error" if error else "debug",
+            "category": f"node_{action}",
+            "node": node_name,
+            "message": message,
+        }
+        if duration_ms:
+            entry["duration_ms"] = duration_ms
+        if error:
+            entry["error"] = error
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(db.debug_traces.insert_one(entry))
+        loop.close()
+        mc.close()
+    except Exception:
+        pass  # non-fatal
