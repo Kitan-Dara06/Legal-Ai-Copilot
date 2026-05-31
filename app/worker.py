@@ -127,35 +127,13 @@ async def _init_audit_for_worker():
         logger.warning("MongoDB audit init failed (non-fatal): %s", e)
 
 
-# ── Warmup and teardown (run on the persistent loop) ──────────────────────
+# ── Warmup and teardown ──────────────────────────────────────────────
 
 
 @worker_process_init.connect
 def init_worker_process(**kwargs):
-    """Warm up DB connections when worker process starts."""
-    future = asyncio.run_coroutine_threadsafe(_warmup(), _worker_loop)
-    try:
-        future.result(timeout=120)  # 120s — cold Supabase SSL + checkpointer DDL can take 60-90s
-        logger.info("Worker warmup complete (DB connections ready).")
-    except Exception as e:
-        # repr(e) shows type even when str(e) is blank (e.g. TimeoutError)
-        logger.error("Worker warmup failed (non-fatal): %s", repr(e))
-        # CRITICAL: cancel any stuck coroutines so _worker_loop stays free.
-        # A timed-out warmup leaves _setup_tables() or pool.open() still running
-        # on _worker_loop. Without cancellation, every subsequent task coroutine
-        # is queued but never scheduled — the loop is permanently locked.
-        try:
-            cancel_fut = asyncio.run_coroutine_threadsafe(
-                _cancel_worker_loop_tasks(), _worker_loop
-            )
-            cancel_fut.result(timeout=5)
-            logger.info("Worker loop cleaned up after warmup failure.")
-        except Exception as cancel_err:
-            logger.warning("Could not cancel warmup tasks: %s", cancel_err)
-
-    # MongoDB audit init — start_consumer() fires its own daemon thread
-    # with a dedicated event loop. This works synchronously (no asyncio needed
-    # because the _worker_loop thread doesn't survive os.fork()).
+    """Minimal init — no DB warmup needed since LangGraph was removed."""
+    # MongoDB audit consumer (fires its own daemon thread)
     try:
         from app.services.audit.logger import start_consumer
 
@@ -167,12 +145,9 @@ def init_worker_process(**kwargs):
 
 @worker_process_shutdown.connect
 def shutdown_worker_process(**kwargs):
-    """Tear down connections when worker shuts down."""
-    future = asyncio.run_coroutine_threadsafe(_teardown(), _worker_loop)
-    try:
-        future.result(timeout=10)
-    except Exception:
-        pass
+    """No-op — connections close on process exit."""
+    pass
+
 
 async def _cancel_worker_loop_tasks():
     """Cancel all running asyncio tasks on _worker_loop except the current one.
@@ -182,10 +157,7 @@ async def _cancel_worker_loop_tasks():
     lock _worker_loop and prevent any subsequent coroutines from starting.
     """
     current = asyncio.current_task()
-    tasks = [
-        t for t in asyncio.all_tasks()
-        if t is not current and not t.done()
-    ]
+    tasks = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
     if tasks:
         logger.info(
             "Cancelling %d orphaned task(s) on worker loop after warmup failure.",
