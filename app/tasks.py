@@ -1108,10 +1108,16 @@ def process_scanned_pdf(
     max_retries=0,
     queue="default",
     acks_late=True,
-    soft_time_limit=120,
-    time_limit=180,
+    soft_time_limit=300,
+    time_limit=360,
 )
-def process_workflow(self, workflow_id: str, session_file_ids: list | None = None):
+def process_workflow(
+    self,
+    workflow_id: str,
+    session_file_ids: list | None = None,
+    preclassified_intent: str | None = None,
+    intent_confidence: float = 0.0,
+):
     """Direct node calls - no LangGraph, no checkpointer, no 900s timeout."""
     import uuid
 
@@ -1123,10 +1129,20 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
     from app.models import WorkflowStatus as WS
     from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
     from app.services.agent.nodes import (
-        ambiguity_gate_node, contradiction_node, decision_brief_node,
-        defined_terms_node, detect_node, escalation_node, findings_node,
-        graph_expansion_node, intent_node, result_node, retrieval_node,
-        synthesis_node, draft_node, export_node,
+        ambiguity_gate_node,
+        contradiction_node,
+        decision_brief_node,
+        defined_terms_node,
+        detect_node,
+        draft_node,
+        escalation_node,
+        export_node,
+        findings_node,
+        graph_expansion_node,
+        intent_node,
+        result_node,
+        retrieval_node,
+        synthesis_node,
     )
 
     sentry_sdk.set_tag("workflow_id", workflow_id)
@@ -1146,13 +1162,26 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
             goal = goal_res.scalar_one_or_none()
 
         state = PointerOnlyState(
-            graph_version=CURRENT_GRAPH_VERSION, workflow_id=workflow_id,
-            workspace_id=str(wf.workspace_id), org_id=str(wf.org_id), document_id="",
-            primary_intent="ANALYZE", intent_confidence=0.0, intent_confirmed_by_human=False,
-            goal_text=goal.goal_text if goal else "", context_text=None, plan_id=None,
-            current_task_index=0, total_tasks=0, status=wf.status,
-            findings_summary="", action_count=0, session_file_ids=session_file_ids or [],
-            messages=[], error_context=None, retry_count=0,
+            graph_version=CURRENT_GRAPH_VERSION,
+            workflow_id=workflow_id,
+            workspace_id=str(wf.workspace_id),
+            org_id=str(wf.org_id),
+            document_id="",
+            primary_intent="ANALYZE",
+            intent_confidence=0.0,
+            intent_confirmed_by_human=False,
+            goal_text=goal.goal_text if goal else "",
+            context_text=None,
+            plan_id=None,
+            current_task_index=0,
+            total_tasks=0,
+            status=wf.status,
+            findings_summary="",
+            action_count=0,
+            session_file_ids=session_file_ids or [],
+            messages=[],
+            error_context=None,
+            retry_count=0,
         )
 
         # If resuming after brief confirmation, skip to draft
@@ -1169,12 +1198,30 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
             logger.info("[%s] Exported, completed", workflow_id)
             return {"status": WS.COMPLETED.value}
 
-        # Fresh start: run intent classification
-        state.update(await intent_node(state))
-        intent = state["primary_intent"]
-        logger.info("[%s] Intent: %s (conf=%.2f)", workflow_id, intent, state.get("intent_confidence", 0))
+        # Fresh start: run intent classification (unless pre-classified by API)
+        if preclassified_intent:
+            intent = preclassified_intent
+            state["primary_intent"] = intent
+            state["intent_confidence"] = intent_confidence
+            logger.info(
+                "[%s] Using pre-classified intent: %s (conf=%.2f)",
+                workflow_id,
+                intent,
+                intent_confidence,
+            )
+        else:
+            state.update(await intent_node(state))
+            intent = state["primary_intent"]
+            logger.info(
+                "[%s] Intent: %s (conf=%.2f)",
+                workflow_id,
+                intent,
+                state.get("intent_confidence", 0),
+            )
 
-        if state.get("intent_confidence", 0) < 0.80 and not state.get("intent_confirmed_by_human", False):
+        if state.get("intent_confidence", 0) < 0.80 and not state.get(
+            "intent_confirmed_by_human", False
+        ):
             state.update(await ambiguity_gate_node(state))
             if state.get("status") == WS.AWAITING_INTENT_CONFIRMATION.value:
                 logger.info("[%s] Paused at ambiguity gate", workflow_id)
@@ -1202,6 +1249,11 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
 
         elif intent == "ACT":
             state.update(await retrieval_node(state))
+            if state.get("retrieval_aborted"):
+                logger.info(
+                    "[%s] ACT: insufficient evidence, cannot draft", workflow_id
+                )
+                return {"status": WS.FAILED.value, "reason": "insufficient_evidence"}
             state.update(await detect_node(state))
             state.update(await decision_brief_node(state))
             logger.info("[%s] ACT: brief generated, awaiting confirmation", workflow_id)
