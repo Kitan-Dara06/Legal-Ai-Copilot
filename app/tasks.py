@@ -1101,10 +1101,10 @@ def process_scanned_pdf(
             os.remove(local_temp_path)
 
 
+
 @celery_app.task(
     name="app.tasks.process_workflow",
     bind=True,
-    base=AsyncTask,
     max_retries=0,
     queue="default",
     acks_late=True,
@@ -1118,177 +1118,116 @@ def process_workflow(
     preclassified_intent: str | None = None,
     intent_confidence: float = 0.0,
 ):
-    """Direct node calls - no LangGraph, no checkpointer, no 900s timeout."""
+    """Direct node calls. Uses asyncio.run() with sync DB."""
+    import asyncio
     import uuid
 
     import sentry_sdk
-    from sqlalchemy import select
 
-    from app.database import AsyncSessionLocal
-    from app.models import Goal, WorkflowExecution
-    from app.models import WorkflowStatus as WS
     from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
     from app.services.agent.nodes import (
-        ambiguity_gate_node,
-        contradiction_node,
-        decision_brief_node,
-        defined_terms_node,
-        detect_node,
-        draft_node,
-        escalation_node,
-        export_node,
-        findings_node,
-        graph_expansion_node,
-        intent_node,
-        result_node,
-        retrieval_node,
-        synthesis_node,
+        ambiguity_gate_node, contradiction_node, decision_brief_node,
+        defined_terms_node, detect_node, draft_node, escalation_node,
+        export_node, findings_node, graph_expansion_node, intent_node,
+        result_node, retrieval_node, synthesis_node,
     )
+    from app.tasks import _get_valid_conn, get_pg_pool
 
     sentry_sdk.set_tag("workflow_id", workflow_id)
-    wf_uuid = uuid.UUID(workflow_id) if isinstance(workflow_id, str) else workflow_id
     logger.info("[%s] process_workflow: starting", workflow_id)
 
     async def _run():
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(WorkflowExecution).where(WorkflowExecution.id == wf_uuid)
-            )
-            wf = result.scalar_one_or_none()
-            if not wf:
-                logger.error("[%s] Workflow not found", workflow_id)
-                return {"status": "not_found"}
-            goal_res = await db.execute(select(Goal).where(Goal.id == wf.goal_id))
-            goal = goal_res.scalar_one_or_none()
+        pg_pool = get_pg_pool()
+        conn, _ = _get_valid_conn(pg_pool)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, workspace_id, org_id, status, goal_id FROM workflow_executions WHERE id = %s",
+                    (workflow_id,),
+                )
+                wf_row = cur.fetchone()
+                if not wf_row:
+                    logger.error("[%s] Workflow not found", workflow_id)
+                    return {"status": "not_found"}
+                wf_id, ws_id, org_id_str, wf_status, goal_id = wf_row
+                cur.execute("SELECT goal_text FROM goals WHERE id = %s", (goal_id,))
+                goal_row = cur.fetchone()
+                goal_text = goal_row[0] if goal_row else ""
+        finally:
+            pg_pool.putconn(conn)
 
         state = PointerOnlyState(
-            graph_version=CURRENT_GRAPH_VERSION,
-            workflow_id=workflow_id,
-            workspace_id=str(wf.workspace_id),
-            org_id=str(wf.org_id),
-            document_id="",
-            primary_intent="ANALYZE",
-            intent_confidence=0.0,
-            intent_confirmed_by_human=False,
-            goal_text=goal.goal_text if goal else "",
-            context_text=None,
-            plan_id=None,
-            current_task_index=0,
-            total_tasks=0,
-            status=wf.status,
-            findings_summary="",
-            action_count=0,
-            session_file_ids=session_file_ids or [],
-            messages=[],
-            error_context=None,
-            retry_count=0,
+            graph_version=CURRENT_GRAPH_VERSION, workflow_id=workflow_id,
+            workspace_id=str(ws_id), org_id=str(org_id_str), document_id="",
+            primary_intent="ANALYZE", intent_confidence=0.0, intent_confirmed_by_human=False,
+            goal_text=goal_text, context_text=None, plan_id=None,
+            current_task_index=0, total_tasks=0, status=wf_status,
+            findings_summary="", action_count=0, session_file_ids=session_file_ids or [],
+            messages=[], error_context=None, retry_count=0,
         )
 
-        # If resuming after brief confirmation, skip to draft
-        if wf.status == WS.AWAITING_BRIEF_CONFIRMATION.value:
+        if wf_status == "AWAITING_BRIEF_CONFIRMATION":
             logger.info("[%s] Brief confirmed, drafting...", workflow_id)
             state.update(await draft_node(state))
-            logger.info("[%s] Draft generated, awaiting approval", workflow_id)
-            return {"status": WS.AWAITING_APPROVAL.value}
+            return {"status": "AWAITING_APPROVAL"}
 
-        # If resuming after approval, skip to export
-        if wf.status == WS.AWAITING_APPROVAL.value:
+        if wf_status == "AWAITING_APPROVAL":
             logger.info("[%s] Draft approved, exporting...", workflow_id)
             state.update(await export_node(state))
-            logger.info("[%s] Exported, completed", workflow_id)
-            return {"status": WS.COMPLETED.value}
+            return {"status": "COMPLETED"}
 
-        # Fresh start: run intent classification (unless pre-classified by API)
         if preclassified_intent:
             intent = preclassified_intent
             state["primary_intent"] = intent
             state["intent_confidence"] = intent_confidence
-            logger.info(
-                "[%s] Using pre-classified intent: %s (conf=%.2f)",
-                workflow_id,
-                intent,
-                intent_confidence,
-            )
+            logger.info("[%s] Using pre-classified intent: %s (conf=%.2f)", workflow_id, intent, intent_confidence)
         else:
             state.update(await intent_node(state))
             intent = state["primary_intent"]
-            logger.info(
-                "[%s] Intent: %s (conf=%.2f)",
-                workflow_id,
-                intent,
-                state.get("intent_confidence", 0),
-            )
+            logger.info("[%s] Intent: %s (conf=%.2f)", workflow_id, intent, state.get("intent_confidence", 0))
 
-        if state.get("intent_confidence", 0) < 0.80 and not state.get(
-            "intent_confirmed_by_human", False
-        ):
+        if state.get("intent_confidence", 0) < 0.80 and not state.get("intent_confirmed_by_human", False):
             state.update(await ambiguity_gate_node(state))
-            if state.get("status") == WS.AWAITING_INTENT_CONFIRMATION.value:
+            if state.get("status") == "AWAITING_INTENT_CONFIRMATION":
                 logger.info("[%s] Paused at ambiguity gate", workflow_id)
-                return {"status": WS.AWAITING_INTENT_CONFIRMATION.value}
+                return {"status": "AWAITING_INTENT_CONFIRMATION"}
 
         if intent == "ANALYZE":
             state.update(await retrieval_node(state))
             if state.get("retrieval_aborted"):
-                logger.info("[%s] ANALYZE: insufficient evidence", workflow_id)
-                return {"status": WS.COMPLETED.value}
+                return {"status": "COMPLETED"}
             state.update(await synthesis_node(state))
-            return {"status": WS.COMPLETED.value}
+            return {"status": "COMPLETED"}
 
         elif intent == "REASON":
             state.update(await retrieval_node(state))
             if state.get("retrieval_aborted"):
-                return {"status": WS.COMPLETED.value}
+                return {"status": "COMPLETED"}
             state.update(await graph_expansion_node(state))
             state.update(await defined_terms_node(state))
             state.update(await contradiction_node(state))
             state.update(await findings_node(state))
             state.update(await escalation_node(state))
             state.update(await result_node(state))
-            return {"status": WS.COMPLETED.value}
+            return {"status": "COMPLETED"}
 
         elif intent == "ACT":
             state.update(await retrieval_node(state))
             if state.get("retrieval_aborted"):
-                logger.info(
-                    "[%s] ACT: insufficient evidence, cannot draft", workflow_id
-                )
-                return {"status": WS.FAILED.value, "reason": "insufficient_evidence"}
+                logger.info("[%s] ACT: insufficient evidence", workflow_id)
+                return {"status": "FAILED", "reason": "insufficient_evidence"}
             state.update(await detect_node(state))
             state.update(await decision_brief_node(state))
             logger.info("[%s] ACT: brief generated, awaiting confirmation", workflow_id)
-            return {"status": WS.AWAITING_BRIEF_CONFIRMATION.value}
+            return {"status": "AWAITING_BRIEF_CONFIRMATION"}
 
         else:
             logger.warning("[%s] Unknown intent: %s", workflow_id, intent)
-            return {"status": WS.FAILED.value}
+            return {"status": "FAILED"}
 
-    async def _mark_failed(reason: str) -> None:
-        try:
-            async with AsyncSessionLocal() as db:
-                result = await db.execute(
-                    select(WorkflowExecution).where(WorkflowExecution.id == wf_uuid)
-                )
-                wf = result.scalar_one_or_none()
-                if wf:
-                    wf.status = WS.FAILED
-                    wf.error_context = reason[:500]
-                    await db.commit()
-        except Exception as db_err:
-            logger.error("[%s] Could not mark FAILED in DB: %s", workflow_id, db_err)
-
-    try:
-        result = self.run_async(_run())
-        logger.info("[%s] process_workflow: done -> %s", workflow_id, result)
-        return result
-    except SoftTimeLimitExceeded:
-        logger.error("[%s] process_workflow: soft time limit exceeded (120s)", workflow_id)
-        self.run_async(_mark_failed("SoftTimeLimitExceeded — task exceeded 120s"))
-        return {"status": WS.FAILED.value}
-    except Exception as exc:
-        logger.exception("[%s] process_workflow: unhandled error: %s", workflow_id, exc)
-        self.run_async(_mark_failed(str(exc)))
-        return {"status": WS.FAILED.value}
+    result = asyncio.run(_run())
+    logger.info("[%s] process_workflow: done -> %s", workflow_id, result)
+    return result
 
 
 def resume_workflow_after_approval(
