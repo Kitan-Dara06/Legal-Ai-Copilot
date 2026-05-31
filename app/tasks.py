@@ -1211,9 +1211,32 @@ def process_workflow(self, workflow_id: str, session_file_ids: list | None = Non
             logger.warning("[%s] Unknown intent: %s", workflow_id, intent)
             return {"status": WS.FAILED.value}
 
-    result = self.run_async(_run())
-    logger.info("[%s] process_workflow: done -> %s", workflow_id, result)
-    return result
+    async def _mark_failed(reason: str) -> None:
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(WorkflowExecution).where(WorkflowExecution.id == wf_uuid)
+                )
+                wf = result.scalar_one_or_none()
+                if wf:
+                    wf.status = WS.FAILED
+                    wf.error_context = reason[:500]
+                    await db.commit()
+        except Exception as db_err:
+            logger.error("[%s] Could not mark FAILED in DB: %s", workflow_id, db_err)
+
+    try:
+        result = self.run_async(_run())
+        logger.info("[%s] process_workflow: done -> %s", workflow_id, result)
+        return result
+    except SoftTimeLimitExceeded:
+        logger.error("[%s] process_workflow: soft time limit exceeded (120s)", workflow_id)
+        self.run_async(_mark_failed("SoftTimeLimitExceeded — task exceeded 120s"))
+        return {"status": WS.FAILED.value}
+    except Exception as exc:
+        logger.exception("[%s] process_workflow: unhandled error: %s", workflow_id, exc)
+        self.run_async(_mark_failed(str(exc)))
+        return {"status": WS.FAILED.value}
 
 
 def resume_workflow_after_approval(

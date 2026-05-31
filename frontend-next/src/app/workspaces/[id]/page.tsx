@@ -204,16 +204,23 @@ function WorkspaceDetailContent() {
     setSubmitting(true);
     setInlineResult(null);
     setSubmitError(null);
+    const submittedText = goalText.trim();
+    setGoalText("");
+
     try {
       const sessionRes = await createSession(freshToken, params.id, selectedDocIds, orgSlug);
       if (!sessionRes.session_id) throw new Error("Failed to create session");
 
-      const res = await createGoal(freshToken, params.id, goalText.trim(), sessionRes.session_id, orgSlug);
+      const res = await createGoal(freshToken, params.id, submittedText, sessionRes.session_id, orgSlug);
       if (!res.goal_id) throw new Error("No goal_id returned");
 
       const confidence = res.intent_confidence ?? 0;
-      const intent = res.primary_intent;
+      const intent = res.intent;
 
+      // Refresh history immediately so the new entry shows without a manual refresh
+      load();
+
+      // Ambiguity gate — only show when we genuinely don't know the intent
       if (confidence < 0.8 || !intent) {
         setPendingGoalId(res.goal_id);
         setPendingIntent(intent ?? null);
@@ -223,19 +230,20 @@ function WorkspaceDetailContent() {
         return;
       }
 
+      // ACT → navigate to workflow page for HITL review
       if (intent === "ACT" && res.workflow_id) {
-        setGoalText("");
         router.push(`/workspaces/${params.id}/workflows/${res.workflow_id}`);
         return;
       }
 
+      // ANALYZE / REASON — poll until done, then refresh history again
       if ((intent === "ANALYZE" || intent === "REASON") && res.goal_id) {
-        setGoalText("");
         const gotResult = await pollGoalResult(res.goal_id, intent, freshToken);
         if (!gotResult) setSubmitError("Lex couldn't generate a response. Try again.");
         await load();
       }
     } catch (err: any) {
+      setGoalText(submittedText); // restore text if submission failed
       if (err?.code === "AUTH_EXPIRED") {
         router.push("/login");
         return;
@@ -246,7 +254,7 @@ function WorkspaceDetailContent() {
 
   const pollGoalResult = async (goalId: string, intent: GoalIntent, freshToken?: string): Promise<boolean> => {
     const t = freshToken || token;
-    const MAX = 60;
+    const MAX = 60; // 3 min max
     for (let i = 0; i < MAX; i++) {
       await new Promise((r) => setTimeout(r, 3000));
       try {
@@ -258,13 +266,20 @@ function WorkspaceDetailContent() {
           });
           return true;
         }
-        if (["FAILED","ESCALATED","CANCELLED"].includes(res.status)) return false;
+        // Backend crashed or workflow explicitly failed — stop polling immediately
+        if (["FAILED", "ESCALATED", "CANCELLED"].includes(res.status)) {
+          setSubmitError("The workflow failed on the server. Check logs or try again.");
+          return false;
+        }
       } catch (err: any) {
         if (err?.code === "AUTH_EXPIRED") { router.push("/login"); return false; }
       }
     }
+    // Timed out after 3 minutes
+    setSubmitError("Request timed out. The server may still be processing — refresh to check.");
     return false;
   };
+
 
   const handleConfirmIntent = async (intent: GoalIntent) => {
     if (!token || !pendingGoalId) return;

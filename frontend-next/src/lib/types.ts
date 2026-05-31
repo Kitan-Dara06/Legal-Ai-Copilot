@@ -79,7 +79,7 @@ export interface CreateGoalResponse {
   status: string;
   answer?: string | null;
   workflow_id?: string | null;
-  primary_intent?: GoalIntent;
+  intent?: GoalIntent;           // backend sends "intent", not "primary_intent"
   intent_confidence?: number;
 }
 
