@@ -226,47 +226,46 @@ async def reject_workflow(
         )
 
     # Track revision count (max 3 cycles)
-    async with db.begin():
-        from sqlalchemy import func as sa_func
+    from sqlalchemy import func as sa_func
 
-        revision_res = await db.execute(
-            select(Action.revision_count)
-            .where(
-                Action.workflow_id == workflow_id,
-            )
-            .order_by(Action.revision_count.desc())
-            .limit(1)
+    revision_res = await db.execute(
+        select(Action.revision_count)
+        .where(
+            Action.workflow_id == workflow_id,
         )
-        current_revision = revision_res.scalar_one_or_none() or 0
+        .order_by(Action.revision_count.desc())
+        .limit(1)
+    )
+    current_revision = revision_res.scalar_one_or_none() or 0
 
-        if current_revision >= 3:
-            await db.execute(
-                update(WorkflowExecution)
-                .where(WorkflowExecution.id == workflow_id)
-                .values(status=WorkflowStatus.ESCALATED)
-            )
-            await db.commit()
-            return {
-                "workflow_id": str(workflow_id),
-                "status": "ESCALATED",
-                "message": "Maximum 3 revision cycles reached. Escalated to admin.",
-            }
-
-        # Increment revision count on all actions
-        await db.execute(
-            update(Action)
-            .where(Action.workflow_id == workflow_id)
-            .values(revision_count=Action.revision_count + 1)
-        )
-
+    if current_revision >= 3:
         await db.execute(
             update(WorkflowExecution)
-            .where(
-                WorkflowExecution.id == workflow_id,
-                WorkflowExecution.org_id == uuid.UUID(org_id),
-            )
-            .values(status=WorkflowStatus.REVISING)
+            .where(WorkflowExecution.id == workflow_id)
+            .values(status=WorkflowStatus.ESCALATED)
         )
+        await db.commit()
+        return {
+            "workflow_id": str(workflow_id),
+            "status": "ESCALATED",
+            "message": "Maximum 3 revision cycles reached. Escalated to admin.",
+        }
+
+    # Increment revision count on all actions
+    await db.execute(
+        update(Action)
+        .where(Action.workflow_id == workflow_id)
+        .values(revision_count=Action.revision_count + 1)
+    )
+
+    await db.execute(
+        update(WorkflowExecution)
+        .where(
+            WorkflowExecution.id == workflow_id,
+            WorkflowExecution.org_id == uuid.UUID(org_id),
+        )
+        .values(status=WorkflowStatus.REVISING)
+    )
 
     return {"workflow_id": str(workflow_id), "status": "REVISING"}
 
