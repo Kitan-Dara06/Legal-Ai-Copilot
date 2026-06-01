@@ -11,13 +11,14 @@ import asyncio
 import hashlib
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import delete, func, select
@@ -51,9 +52,14 @@ limiter = Limiter(key_func=get_remote_address)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# In-memory short-lived status cache to prevent redundant DB calls
+_workspace_status_cache = {}  # dict of (workspace_id: (status, timestamp))
+_STATUS_CACHE_TTL = 30.0  # seconds
+
+
 class CreateWorkspaceRequest(BaseModel):
-    name: str
-    description: str | None = None
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str | None = Field(None, max_length=1000)
 
 
 class UpdateWorkspaceRequest(BaseModel):
@@ -76,6 +82,18 @@ async def create_workspace(
 ):
     """Create a new workspace (deal folder) scoped to the current org."""
     org_uuid = uuid.UUID(org_id)
+
+    # Check soft limit of 20 active workspaces per org
+    active_count_stmt = select(func.count(Workspace.id)).where(
+        Workspace.org_id == org_uuid,
+        Workspace.archived_at.is_(None)
+    )
+    active_count = await db.scalar(active_count_stmt) or 0
+    if active_count >= 20:
+        raise HTTPException(
+            status_code=409,
+            detail="Archive an existing workspace before creating a new one (limit: 20)"
+        )
 
     workspace = Workspace(
         org_id=org_uuid,
@@ -105,6 +123,12 @@ async def create_workspace(
 
 
 async def sync_workspace_status_async(db: AsyncSession, workspace_id: uuid.UUID) -> IntelligenceStatus:
+    now = time.time()
+    if workspace_id in _workspace_status_cache:
+        status, ts = _workspace_status_cache[workspace_id]
+        if now - ts < _STATUS_CACHE_TTL:
+            return status
+
     pending_res = await db.execute(
         select(Document.id)
         .where(
@@ -125,6 +149,7 @@ async def sync_workspace_status_async(db: AsyncSession, workspace_id: uuid.UUID)
         await db.commit()
         await db.refresh(ws)
     
+    _workspace_status_cache[workspace_id] = (expected_status, now)
     return expected_status
 
 
@@ -137,15 +162,35 @@ async def list_workspaces(
     """List all workspaces for the current org, with document counts."""
     org_uuid = uuid.UUID(org_id)
 
+    # Correlated subquery to check if there are pending/processing documents
+    has_pending_subq = (
+        select(1)
+        .where(
+            Document.workspace_id == Workspace.id,
+            Document.status.in_([DocumentStatus.PENDING, DocumentStatus.PROCESSING])
+        )
+        .exists()
+    )
+
     result = await db.execute(
-        select(Workspace)
+        select(Workspace, has_pending_subq)
         .where(Workspace.org_id == org_uuid, Workspace.archived_at.is_(None))
         .order_by(Workspace.last_active_at.desc())
     )
-    workspaces = result.scalars().all()
+    rows = result.all()
 
-    # Sync intelligence status of all workspaces dynamically
-    await asyncio.gather(*(sync_workspace_status_async(db, ws.id) for ws in workspaces))
+    now = time.time()
+    any_updated = False
+    for ws, has_pending in rows:
+        expected_status = IntelligenceStatus.PENDING if has_pending else IntelligenceStatus.READY
+        # Seed cache
+        _workspace_status_cache[ws.id] = (expected_status, now)
+        if ws.intelligence_status != expected_status:
+            ws.intelligence_status = expected_status
+            any_updated = True
+
+    if any_updated:
+        await db.commit()
 
     return [
         {
@@ -157,7 +202,7 @@ async def list_workspaces(
             "created_at": ws.created_at.isoformat(),
             "last_active_at": ws.last_active_at.isoformat(),
         }
-        for ws in workspaces
+        for ws, _ in rows
     ]
 
 
@@ -499,12 +544,12 @@ async def upload_document(
 
 
 class CreateSessionRequest(BaseModel):
-    document_ids: list[uuid.UUID]
+    document_ids: list[uuid.UUID] = Field(..., min_length=0, max_length=100)
     user_id: uuid.UUID | None = None
 
 
 class UpdateSessionContextRequest(BaseModel):
-    document_ids: list[uuid.UUID] | None = None
+    document_ids: list[uuid.UUID] | None = Field(None, min_length=0, max_length=100)
     context: dict | None = None
 
 
