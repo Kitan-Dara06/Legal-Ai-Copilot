@@ -41,7 +41,13 @@ from app.models import (
     WorkflowStatus,
 )
 from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
-from app.services.agent.node_tracer import traced_node
+
+
+# No-op decorator — node_tracer was removed with LangGraph
+def traced_node(func):
+    return func
+
+
 from app.services.notifications import notify_approval_needed
 from app.services.object_storage import upload_bytes
 from app.utils import sanitize_goal_text
@@ -105,7 +111,6 @@ class ActionInfo:
     idempotency_class: str
     compensation_action: str | None
     compensation_params: dict[str, Any] | None
-
 
 
 def _adapt_state(state: PointerOnlyState) -> PointerOnlyState:
@@ -1208,7 +1213,9 @@ async def detect_node(state: PointerOnlyState) -> Dict[str, Any]:
             "obligation_description": dl.obligation_description,
             "obligation_type": dl.obligation_type.value,
             "urgency_score": float(dl.urgency_score),
-            "resolved_deadline": dl.resolved_deadline.isoformat() if dl.resolved_deadline else None,
+            "resolved_deadline": dl.resolved_deadline.isoformat()
+            if dl.resolved_deadline
+            else None,
             "source_clause_a": dl.source_clause_a,
         }
         for dl in capped_deadlines
@@ -1221,7 +1228,6 @@ async def detect_node(state: PointerOnlyState) -> Dict[str, Any]:
         "_detected_conflicts": conflict_dicts,
         "_detected_deadlines": deadline_dicts,
     }
-
 
 
 # ── Decision Brief schemas (locked from test_decision_brief.py validation) ────
@@ -1576,7 +1582,10 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
 
     if not wf or not wf.decision_brief_payload:
         logger.error("[%s] draft_node: no decision_brief_payload found", workflow_id)
-        return {"status": WorkflowStatus.FAILED.value, "error_context": "Brief payload missing"}
+        return {
+            "status": WorkflowStatus.FAILED.value,
+            "error_context": "Brief payload missing",
+        }
 
     brief = DecisionBriefResult(**wf.decision_brief_payload)
 
@@ -1584,7 +1593,11 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
     action_rows = []
     for rec in brief.recommended_actions:
         try:
-            action_type = ActionType[rec.action_type] if rec.action_type in ActionType.__members__ else ActionType.DRAFT_RESPONSE
+            action_type = (
+                ActionType[rec.action_type]
+                if rec.action_type in ActionType.__members__
+                else ActionType.DRAFT_RESPONSE
+            )
         except (KeyError, AttributeError):
             action_type = ActionType.DRAFT_RESPONSE
 
@@ -1653,8 +1666,9 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
                 description="Verbatim excerpts from grounding clauses cited in the draft"
             )
             grounding_score: float = Field(
-                ge=0.0, le=1.0,
-                description="Fraction of claims traceable to a grounding clause"
+                ge=0.0,
+                le=1.0,
+                description="Fraction of claims traceable to a grounding clause",
             )
             missing_info: list[str] = Field(
                 description="Information gaps not covered by the source clauses"
@@ -1698,7 +1712,9 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
     await _set_wf_status(workflow_id, WorkflowStatus.AWAITING_APPROVAL)
     logger.info(
         "[%s] draft_node complete: grounding=%.2f, %d citations",
-        workflow_id, grounding_score, len(source_citations),
+        workflow_id,
+        grounding_score,
+        len(source_citations),
     )
     return {"status": WorkflowStatus.AWAITING_APPROVAL.value}
 
@@ -1734,7 +1750,9 @@ async def export_node(state: PointerOnlyState) -> Dict[str, Any]:
         action = res.scalar_one_or_none()
 
     if not action or not action.draft_payload:
-        logger.error("[%s] export_node: no approved action with draft payload", workflow_id)
+        logger.error(
+            "[%s] export_node: no approved action with draft payload", workflow_id
+        )
         return {
             "status": WorkflowStatus.FAILED.value,
             "error_context": "No approved draft found for export",
@@ -1746,9 +1764,10 @@ async def export_node(state: PointerOnlyState) -> Dict[str, Any]:
 
     # Build DOCX
     try:
+        import io
+
         from docx import Document as DocxDocument
         from docx.shared import Pt
-        import io
 
         doc = DocxDocument()
         doc.add_heading("Legal Draft", level=1)
@@ -1814,10 +1833,10 @@ async def export_node(state: PointerOnlyState) -> Dict[str, Any]:
         "status": WorkflowStatus.COMPLETED.value,
         "draft_r2_key": r2_key,
     }
+
+
 # =============================================================================
 # REMOVED: This node is no longer part of the ACT path (replaced by the
 # Decision Brief -> Draft -> Export pipeline). Kept for reference only.
 # DO NOT wire into graph.py.
 # =============================================================================
-
-
