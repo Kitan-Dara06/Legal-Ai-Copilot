@@ -41,6 +41,11 @@ celery_app.conf.update(
             "schedule": crontab(minute="*/15"),
             "options": {"queue": "deadline"},
         },
+        "stale-task-sweeper-every-5-min": {
+            "task": "app.tasks.stale_task_sweeper",
+            "schedule": crontab(minute="*/5"),
+            "options": {"queue": "default"},
+        },
     },
 )
 

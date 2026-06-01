@@ -824,6 +824,87 @@ def deadline_scanner(self):
         pg_pool.putconn(conn)
 
 
+@celery_app.task(
+    name="app.tasks.stale_task_sweeper",
+    bind=True,
+    max_retries=0,
+    acks_late=True,
+)
+def stale_task_sweeper(self):
+    """
+    Celery Beat task that runs every 5 minutes.
+
+    Marks any PROCESSING/PENDING records that have been stuck for too long
+    as FAILED so the frontend stops polling and the user sees a real error.
+
+    Thresholds:
+      - WorkflowExecution stuck in PROCESSING/PENDING > 10 min → FAILED
+      - Document stuck in PROCESSING/PENDING > 15 min → FAILED
+      - Goal stuck in PROCESSING > 10 min → FAILED
+    """
+    from datetime import datetime, timezone
+
+    pg_pool = get_pg_pool()
+    conn, _ = _get_valid_conn(pg_pool)
+    try:
+        with conn.cursor() as cur:
+            now = datetime.now(timezone.utc)
+
+            # ── WorkflowExecution ─────────────────────────────────────────
+            cur.execute(
+                """
+                UPDATE workflow_executions
+                SET    status = 'FAILED',
+                       error_context = 'Swept: task exceeded time limit without completing'
+                WHERE  status IN ('PROCESSING', 'PENDING', 'CLASSIFYING',
+                                  'RETRIEVING', 'EXPANDING', 'REASONING',
+                                  'BRIEFING', 'DRAFTING', 'RECOVERING')
+                  AND  updated_at < NOW() - INTERVAL '10 minutes'
+                RETURNING id
+                """
+            )
+            wf_rows = cur.fetchall()
+
+            # ── Goals ─────────────────────────────────────────────────────
+            cur.execute(
+                """
+                UPDATE goals
+                SET    status = 'FAILED'
+                WHERE  status = 'PROCESSING'
+                  AND  updated_at < NOW() - INTERVAL '10 minutes'
+                RETURNING id
+                """
+            )
+            goal_rows = cur.fetchall()
+
+            # ── Documents ────────────────────────────────────────────────
+            cur.execute(
+                """
+                UPDATE documents
+                SET    status = 'FAILED',
+                       processing_error = 'Swept: ingestion task exceeded time limit'
+                WHERE  status IN ('PROCESSING', 'PENDING')
+                  AND  updated_at < NOW() - INTERVAL '15 minutes'
+                RETURNING id
+                """
+            )
+            doc_rows = cur.fetchall()
+
+        conn.commit()
+        logger.info(
+            "[stale_task_sweeper] ✓ Swept %d workflows, %d goals, %d documents",
+            len(wf_rows),
+            len(goal_rows),
+            len(doc_rows),
+        )
+    except Exception as e:
+        conn.rollback()
+        logger.error("[stale_task_sweeper] Failed: %s", e)
+    finally:
+        pg_pool.putconn(conn)
+
+
+
 def _notify_approver_urgency(
     deadline_id: str,
     obligation_desc: str,
@@ -1229,137 +1310,6 @@ def process_workflow(
     logger.info("[%s] process_workflow: done -> %s", workflow_id, result)
     return result
 
-
-def resume_workflow_after_approval(
-    self, workflow_id: str, actor_user_id: str | None = None
-):
-    """
-    Task 2 of 2: Resume the LangGraph from the AWAITING_APPROVAL checkpoint.
-
-    Enqueued by the approvals router after token validation. Never blocks
-    the FastAPI request — callers use .delay() and return immediately.
-
-    Resumes via ainvoke(None, config) which reads state from the checkpointer.
-    """
-    import logging
-
-    import sentry_sdk
-
-    log = logging.getLogger(__name__)
-    sentry_sdk.set_tag("workflow_id", workflow_id)
-    log.info("[%s] resume_workflow_after_approval: starting", workflow_id)
-
-    async def _resume():
-        from app.services.agent.checkpointer import get_checkpointer
-        from app.services.agent.graph import create_action_agent_graph
-
-        async with get_checkpointer() as checkpointer:
-            app = create_action_agent_graph().compile(
-                checkpointer=checkpointer,
-                interrupt_before=["ambiguity_gate", "decision_brief", "draft"],
-            )
-            config = {"configurable": {"thread_id": str(workflow_id)}}
-            # ainvoke(None) resumes from the checkpoint — no new initial state
-            final_state = await app.ainvoke(None, config=config)
-            return final_state
-
-    def _sync_mark_failed_resume(wf_id: str) -> None:
-        _pool = get_pg_pool()
-        _conn = _pool.getconn()
-        try:
-            with _conn.cursor() as _cur:
-                _cur.execute(
-                    "UPDATE workflow_executions SET status = 'FAILED' WHERE id = %s",
-                    (wf_id,),
-                )
-            _conn.commit()
-        except Exception as _dbe:
-            log.warning("[%s] Could not mark FAILED in DB: %s", wf_id, _dbe)
-        finally:
-            _pool.putconn(_conn)
-
-    async def _resume_with_cancel_guard():
-        try:
-            return await asyncio.wait_for(_resume(), timeout=540)
-        except asyncio.TimeoutError:
-            log.error(
-                "[%s] _resume timed out after 540s — cancelled cleanly", workflow_id
-            )
-            raise RuntimeError("Resume execution timed out (540s) — cancelled")
-
-    try:
-        final_state = self.run_async(_resume_with_cancel_guard())
-        final_status = (final_state or {}).get("status", "")
-        log.info(
-            "[%s] resume_workflow_after_approval: completed (%s)",
-            workflow_id,
-            final_status,
-        )
-        try:
-            from app.services.audit.events import emit
-            from app.services.audit.schemas import CorrelationContext
-
-            emit.workflow_completed(
-                workflow_id=workflow_id,
-                duration_ms=0,
-                intent="approval.resumed",
-                correlation=CorrelationContext(
-                    workflow_id=workflow_id,
-                    user_id=actor_user_id,
-                ),
-            )
-        except Exception:
-            pass
-        return {"status": final_status}
-
-    except SoftTimeLimitExceeded:
-        log.error(
-            "[%s] resume_workflow_after_approval: SoftTimeLimitExceeded — NOT retrying",
-            workflow_id,
-        )
-        _sync_mark_failed_resume(workflow_id)
-        try:
-            from app.services.audit.events import emit
-            from app.services.audit.schemas import CorrelationContext
-
-            emit.workflow_failed(
-                workflow_id=workflow_id,
-                error="SoftTimeLimitExceeded during execute phase",
-                correlation=CorrelationContext(
-                    workflow_id=workflow_id, user_id=actor_user_id
-                ),
-            )
-        except Exception:
-            pass
-        return {"failed": True, "reason": "timeout"}
-
-    except Exception as e:
-        log.error(
-            "[%s] resume_workflow_after_approval: FAILED — %s",
-            workflow_id,
-            e,
-            exc_info=True,
-        )
-        try:
-            from app.services.audit.events import emit
-            from app.services.audit.schemas import CorrelationContext
-
-            emit.workflow_failed(
-                workflow_id=workflow_id,
-                error=str(e),
-                correlation=CorrelationContext(
-                    workflow_id=workflow_id, user_id=actor_user_id
-                ),
-            )
-        except Exception:
-            pass
-        try:
-            raise self.retry(exc=e, countdown=30)
-        except Exception as retry_err:
-            log.error(
-                "resume_workflow %s exhausted retries: %s", workflow_id, retry_err
-            )
-            return {"failed": True}
 
 
 @celery_app.task(name="app.tasks.cleanup_stale_data")

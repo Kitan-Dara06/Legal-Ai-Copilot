@@ -887,18 +887,14 @@ async def confirm_plan(
         approval.status = ApprovalStatus.USED
         await db.commit()
 
-    # Resume the LangGraph workflow via the checkpointer
+    # Dispatch process_workflow — it will see AWAITING_APPROVAL and run export_node
     try:
-        from app.services.agent.checkpointer import get_checkpointer
-        from app.services.agent.graph import create_action_agent_graph
-
-        async with get_checkpointer() as checkpointer:
-            app = create_action_agent_graph().compile(
-                checkpointer=checkpointer,
-                interrupt_before=["ambiguity_gate", "human_approval"],
-            )
-            config = {"configurable": {"thread_id": str(workflow.id)}}
-            final_state = await app.ainvoke(None, config=config)
+        from app.celery_app import celery_app as _celery
+        _celery.send_task(
+            "app.tasks.process_workflow",
+            args=[str(workflow.id)],
+            queue="default",
+        )
 
         goal.status = GoalStatus.PROCESSING
         await db.commit()
@@ -906,8 +902,8 @@ async def confirm_plan(
         return {
             "goal_id": str(goal_id),
             "workflow_id": str(workflow.id),
-            "status": final_state.get("status", WorkflowStatus.EXECUTING.value),
-            "message": "Plan approved. Resuming workflow.",
+            "status": "EXPORTING",
+            "message": "Plan approved. Workflow resumed.",
         }
     except Exception as e:
         logger.error(
