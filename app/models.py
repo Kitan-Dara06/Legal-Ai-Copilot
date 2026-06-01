@@ -80,10 +80,12 @@ class WorkflowStatus(str, enum.Enum):
     RETRIEVING = "RETRIEVING"
     EXPANDING = "EXPANDING"
     REASONING = "REASONING"
-    BRIEFING = "BRIEFING"                                          # decision_brief_node running
-    AWAITING_BRIEF_CONFIRMATION = "AWAITING_BRIEF_CONFIRMATION"    # HITL pause 1: lawyer reviews brief
+    BRIEFING = "BRIEFING"  # decision_brief_node running
+    AWAITING_BRIEF_CONFIRMATION = (
+        "AWAITING_BRIEF_CONFIRMATION"  # HITL pause 1: lawyer reviews brief
+    )
     DRAFTING = "DRAFTING"
-    AWAITING_APPROVAL = "AWAITING_APPROVAL"                        # HITL pause 2: lawyer reviews draft
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"  # HITL pause 2: lawyer reviews draft
     EXECUTING = "EXECUTING"
     REVISING = "REVISING"
     RECOVERING = "RECOVERING"
@@ -691,7 +693,9 @@ class IntentLog(Base):
     # True  = lawyer actively selected a different intent from the classifier's guess
     # False = lawyer confirmed, or no ambiguity gate was triggered
     lawyer_changed_intent: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False,
+        Boolean,
+        nullable=False,
+        default=False,
         comment="True when the lawyer overrode the classifier's primary intent at the ambiguity gate",
     )
     created_at: Mapped[datetime] = mapped_column(

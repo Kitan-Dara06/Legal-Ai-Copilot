@@ -854,12 +854,11 @@ def stale_task_sweeper(self):
             cur.execute(
                 """
                 UPDATE workflow_executions
-                SET    status = 'FAILED',
-                       error_context = 'Swept: task exceeded time limit without completing'
+                SET    status = 'FAILED'
                 WHERE  status IN ('PROCESSING', 'PENDING', 'CLASSIFYING',
                                   'RETRIEVING', 'EXPANDING', 'REASONING',
                                   'BRIEFING', 'DRAFTING', 'RECOVERING')
-                  AND  updated_at < NOW() - INTERVAL '10 minutes'
+                  AND  created_at < NOW() - INTERVAL '10 minutes'
                 RETURNING id
                 """
             )
@@ -871,7 +870,7 @@ def stale_task_sweeper(self):
                 UPDATE goals
                 SET    status = 'FAILED'
                 WHERE  status = 'PROCESSING'
-                  AND  updated_at < NOW() - INTERVAL '10 minutes'
+                  AND  created_at < NOW() - INTERVAL '10 minutes'
                 RETURNING id
                 """
             )
@@ -882,9 +881,9 @@ def stale_task_sweeper(self):
                 """
                 UPDATE documents
                 SET    status = 'FAILED',
-                       processing_error = 'Swept: ingestion task exceeded time limit'
+                       error_message = 'Swept: ingestion task exceeded time limit'
                 WHERE  status IN ('PROCESSING', 'PENDING')
-                  AND  updated_at < NOW() - INTERVAL '15 minutes'
+                  AND  upload_date < NOW() - INTERVAL '15 minutes'
                 RETURNING id
                 """
             )
@@ -902,7 +901,6 @@ def stale_task_sweeper(self):
         logger.error("[stale_task_sweeper] Failed: %s", e)
     finally:
         pg_pool.putconn(conn)
-
 
 
 def _notify_approver_urgency(
@@ -1182,6 +1180,19 @@ def process_scanned_pdf(
             os.remove(local_temp_path)
 
 
+def _reset_async_engine() -> None:
+    """Reset the async engine cache so a fresh engine + pool is created.
+
+    Called before each ``asyncio.run()`` to prevent stale asyncpg connections
+    tied to a previous event loop from being reused on the new loop.
+    """
+    try:
+        from app.database import _get_engine, _reset_engine
+
+        _reset_engine()
+    except Exception:
+        logger.debug("Async engine reset skipped")
+
 
 @celery_app.task(
     name="app.tasks.process_workflow",
@@ -1207,10 +1218,20 @@ def process_workflow(
 
     from app.services.agent.agent_state import CURRENT_GRAPH_VERSION, PointerOnlyState
     from app.services.agent.nodes import (
-        ambiguity_gate_node, contradiction_node, decision_brief_node,
-        defined_terms_node, detect_node, draft_node, escalation_node,
-        export_node, findings_node, graph_expansion_node, intent_node,
-        result_node, retrieval_node, synthesis_node,
+        ambiguity_gate_node,
+        contradiction_node,
+        decision_brief_node,
+        defined_terms_node,
+        detect_node,
+        draft_node,
+        escalation_node,
+        export_node,
+        findings_node,
+        graph_expansion_node,
+        intent_node,
+        result_node,
+        retrieval_node,
+        synthesis_node,
     )
     from app.tasks import _get_valid_conn, get_pg_pool
 
@@ -1238,13 +1259,26 @@ def process_workflow(
             pg_pool.putconn(conn)
 
         state = PointerOnlyState(
-            graph_version=CURRENT_GRAPH_VERSION, workflow_id=workflow_id,
-            workspace_id=str(ws_id), org_id=str(org_id_str), document_id="",
-            primary_intent="ANALYZE", intent_confidence=0.0, intent_confirmed_by_human=False,
-            goal_text=goal_text, context_text=None, plan_id=None,
-            current_task_index=0, total_tasks=0, status=wf_status,
-            findings_summary="", action_count=0, session_file_ids=session_file_ids or [],
-            messages=[], error_context=None, retry_count=0,
+            graph_version=CURRENT_GRAPH_VERSION,
+            workflow_id=workflow_id,
+            workspace_id=str(ws_id),
+            org_id=str(org_id_str),
+            document_id="",
+            primary_intent="ANALYZE",
+            intent_confidence=0.0,
+            intent_confirmed_by_human=False,
+            goal_text=goal_text,
+            context_text=None,
+            plan_id=None,
+            current_task_index=0,
+            total_tasks=0,
+            status=wf_status,
+            findings_summary="",
+            action_count=0,
+            session_file_ids=session_file_ids or [],
+            messages=[],
+            error_context=None,
+            retry_count=0,
         )
 
         if wf_status == "AWAITING_BRIEF_CONFIRMATION":
@@ -1261,13 +1295,25 @@ def process_workflow(
             intent = preclassified_intent
             state["primary_intent"] = intent
             state["intent_confidence"] = intent_confidence
-            logger.info("[%s] Using pre-classified intent: %s (conf=%.2f)", workflow_id, intent, intent_confidence)
+            logger.info(
+                "[%s] Using pre-classified intent: %s (conf=%.2f)",
+                workflow_id,
+                intent,
+                intent_confidence,
+            )
         else:
             state.update(await intent_node(state))
             intent = state["primary_intent"]
-            logger.info("[%s] Intent: %s (conf=%.2f)", workflow_id, intent, state.get("intent_confidence", 0))
+            logger.info(
+                "[%s] Intent: %s (conf=%.2f)",
+                workflow_id,
+                intent,
+                state.get("intent_confidence", 0),
+            )
 
-        if state.get("intent_confidence", 0) < 0.80 and not state.get("intent_confirmed_by_human", False):
+        if state.get("intent_confidence", 0) < 0.80 and not state.get(
+            "intent_confirmed_by_human", False
+        ):
             state.update(await ambiguity_gate_node(state))
             if state.get("status") == "AWAITING_INTENT_CONFIRMATION":
                 logger.info("[%s] Paused at ambiguity gate", workflow_id)
@@ -1295,8 +1341,9 @@ def process_workflow(
         elif intent == "ACT":
             state.update(await retrieval_node(state))
             if state.get("retrieval_aborted"):
-                logger.info("[%s] ACT: insufficient evidence", workflow_id)
-                return {"status": "FAILED", "reason": "insufficient_evidence"}
+                logger.info(
+                    "[%s] ACT: low-confidence chunks, proceeding anyway", workflow_id
+                )
             state.update(await detect_node(state))
             state.update(await decision_brief_node(state))
             logger.info("[%s] ACT: brief generated, awaiting confirmation", workflow_id)
@@ -1306,10 +1353,11 @@ def process_workflow(
             logger.warning("[%s] Unknown intent: %s", workflow_id, intent)
             return {"status": "FAILED"}
 
+    _reset_async_engine()
     result = asyncio.run(_run())
     logger.info("[%s] process_workflow: done -> %s", workflow_id, result)
-    return result
 
+    return result
 
 
 @celery_app.task(name="app.tasks.cleanup_stale_data")

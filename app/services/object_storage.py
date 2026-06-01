@@ -131,6 +131,17 @@ def download_file(blob_name: str, destination_file_name: str) -> None:
     client.download_file(_bucket(), blob_name, destination_file_name)
 
 
+def generate_presigned_download_url(blob_name: str, expires_in: int = 3600) -> str:
+    """Generate a presigned GET URL for an R2 object."""
+    client = _get_client()
+    url = client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": _bucket(), "Key": blob_name},
+        ExpiresIn=expires_in,
+    )
+    return url
+
+
 # Backward-compatible alias
 download_file_from_gcs = download_file
 

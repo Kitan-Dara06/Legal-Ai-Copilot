@@ -63,7 +63,7 @@ class ConfirmIntentRequest(BaseModel):
 
 
 class ConfirmBriefRequest(BaseModel):
-    proceed: bool = True           # False = lawyer aborts after reviewing brief
+    proceed: bool = True  # False = lawyer aborts after reviewing brief
     override_notes: str | None = None  # Optional lawyer annotation
 
 
@@ -104,7 +104,10 @@ async def _get_workflow_for_org(
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 
-@router.post("/confirm-brief/{workflow_id}", summary="Confirm Decision Brief and proceed to drafting")
+@router.post(
+    "/confirm-brief/{workflow_id}",
+    summary="Confirm Decision Brief and proceed to drafting",
+)
 @limiter.limit("10/minute")
 async def confirm_brief(
     request: Request,
@@ -131,7 +134,11 @@ async def confirm_brief(
         # Lawyer chose to abort — mark cancelled
         wf.status = WorkflowStatus.CANCELLED
         await db.commit()
-        return {"workflow_id": str(workflow_id), "status": "CANCELLED", "message": "Brief rejected. Workflow cancelled."}
+        return {
+            "workflow_id": str(workflow_id),
+            "status": "CANCELLED",
+            "message": "Brief rejected. Workflow cancelled.",
+        }
 
     # ── LangGraph removed — dispatch process_workflow directly ──────────────
     # Keep status as AWAITING_BRIEF_CONFIRMATION so the task knows
@@ -139,12 +146,15 @@ async def confirm_brief(
     await db.commit()
 
     from app.celery_app import celery_app as _celery
+
     _celery.send_task(
         "app.tasks.process_workflow",
         args=[str(workflow_id)],
         queue="default",
     )
-    logger.info("[%s] confirm_brief: dispatched process_workflow for drafting", workflow_id)
+    logger.info(
+        "[%s] confirm_brief: dispatched process_workflow for drafting", workflow_id
+    )
 
     return {
         "workflow_id": str(workflow_id),
@@ -180,19 +190,21 @@ async def approve_workflow(
     await db.commit()
 
     from app.celery_app import celery_app as _celery
+
     _celery.send_task(
         "app.tasks.process_workflow",
         args=[str(workflow_id)],
         queue="default",
     )
-    logger.info("[%s] approve_workflow: dispatched process_workflow for export", workflow_id)
+    logger.info(
+        "[%s] approve_workflow: dispatched process_workflow for export", workflow_id
+    )
 
     return {
         "workflow_id": str(workflow_id),
         "status": "EXPORTING",
         "message": "Draft approved. Export started.",
     }
-
 
 
 @router.post("/reject/{workflow_id}", summary="Reject plan")
@@ -267,12 +279,39 @@ async def get_workflow_status(
 ):
     wf = await _get_workflow_for_org(workflow_id, org_id, db)
 
-    return {
+    response = {
         "workflow_id": str(wf.id),
         "status": wf.status.value,
         "created_at": wf.created_at.isoformat(),
         "completed_at": wf.completed_at.isoformat() if wf.completed_at else None,
+        "download_url": None,
     }
+
+    # When completed, generate a presigned download URL for the DOCX
+    if wf.status == WorkflowStatus.COMPLETED:
+        from sqlalchemy import select
+
+        from app.models import Action, ActionStatus
+
+        res = await db.execute(
+            select(Action).where(
+                Action.workflow_id == workflow_id,
+                Action.status == ActionStatus.EXECUTED,
+            )
+        )
+        action = res.scalar_one_or_none()
+        if action:
+            r2_key = f"drafts/{workflow_id}/{action.id}.docx"
+            try:
+                from app.services.object_storage import generate_presigned_download_url
+
+                response["download_url"] = generate_presigned_download_url(r2_key)
+            except Exception as url_err:
+                logger.warning(
+                    "[%s] Failed to generate download URL: %s", workflow_id, url_err
+                )
+
+    return response
 
 
 @router.get("/{workflow_id}/brief", summary="Get Decision Brief for workflow")
@@ -301,7 +340,6 @@ async def get_workflow_brief(
 
 
 @router.get("/{workflow_id}/actions", summary="Get actions for workflow")
-
 async def get_workflow_actions(
     workflow_id: uuid.UUID,
     org_id: str = Depends(get_org_id_unified),
@@ -325,7 +363,8 @@ async def get_workflow_actions(
                 "description": a.description,
                 "status": a.status.value,
                 "urgency": float(a.urgency_score) if a.urgency_score else 0.0,
-                "draft_payload": a.draft_payload or {},  # includes draft_text, citations, grounding_score
+                "draft_payload": a.draft_payload
+                or {},  # includes draft_text, citations, grounding_score
             }
             for a in actions
         ]

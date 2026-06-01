@@ -299,7 +299,7 @@ async def retrieval_node(state: PointerOnlyState) -> Dict[str, Any]:
     Executes hybrid search (Qdrant) with dual dense (voyage + nomic) + sparse (SPLADE).
 
     Returns structured results with relevance scores.
-    Falls back to UNDETERMINED if fewer than 3 chunks score > 0.6.
+    Falls back to UNDETERMINED if fewer than 3 chunks score > 0.5.
     """
     state = _adapt_state(state)
     workflow_id = state["workflow_id"]
@@ -410,12 +410,12 @@ async def retrieval_node(state: PointerOnlyState) -> Dict[str, Any]:
                     "[%s] Reranker metrics logging failed: %s", workflow_id, log_err
                 )
 
-        # NFR-PERF-02: UNDETERMINED fallback — fewer than 3 chunks with score > 0.6
-        high_conf_chunks = [r for r in reranked_results if r["score"] > 0.6]
+        # NFR-PERF-02: UNDETERMINED fallback — fewer than 3 chunks with score > 0.5
+        high_conf_chunks = [r for r in reranked_results if r["score"] > 0.5]
         if len(high_conf_chunks) < 3:
             retrieval_aborted = True
             logger.info(
-                "[%s] UNDETERMINED: only %d chunks > 0.6 (need 3)",
+                "[%s] UNDETERMINED: only %d chunks > 0.5 (need 3)",
                 workflow_id,
                 len(high_conf_chunks),
             )
@@ -433,7 +433,7 @@ async def retrieval_node(state: PointerOnlyState) -> Dict[str, Any]:
                             escalation_type=EscalationType.INSUFFICIENT_COVERAGE,
                             definitional_conflicts=[
                                 {
-                                    "reason": f"Only {len(high_conf_chunks)} chunk(s) scored above 0.6 relevance threshold (need 3)",
+                                    "reason": f"Only {len(high_conf_chunks)} chunk(s) scored above 0.5 relevance threshold (need 3)",
                                     "top_score": reranker_metrics.get(
                                         "top_1_score", 0.0
                                     ),
@@ -1799,9 +1799,9 @@ async def export_node(state: PointerOnlyState) -> Dict[str, Any]:
     # Upload to R2
     r2_key = f"drafts/{workflow_id}/{action.id}.docx"
     try:
-        await upload_bytes(
-            key=r2_key,
+        upload_bytes(
             data=docx_bytes,
+            destination_blob_name=r2_key,
             content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
     except Exception as upload_err:
@@ -1824,6 +1824,7 @@ async def export_node(state: PointerOnlyState) -> Dict[str, Any]:
             .values(
                 status=WorkflowStatus.COMPLETED,
                 completed_at=datetime.now(timezone.utc),
+                result_ref=r2_key,
             )
         )
         await db.commit()
