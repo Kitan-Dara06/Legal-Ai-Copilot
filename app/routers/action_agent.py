@@ -63,7 +63,7 @@ class ConfirmIntentRequest(BaseModel):
 
 
 class ConfirmBriefRequest(BaseModel):
-    proceed: bool = True           # False = lawyer aborts after reviewing brief
+    proceed: bool = True  # False = lawyer aborts after reviewing brief
     override_notes: str | None = None  # Optional lawyer annotation
 
 
@@ -104,7 +104,10 @@ async def _get_workflow_for_org(
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 
-@router.post("/confirm-brief/{workflow_id}", summary="Confirm Decision Brief and proceed to drafting")
+@router.post(
+    "/confirm-brief/{workflow_id}",
+    summary="Confirm Decision Brief and proceed to drafting",
+)
 @limiter.limit("10/minute")
 async def confirm_brief(
     request: Request,
@@ -131,7 +134,11 @@ async def confirm_brief(
         # Lawyer chose to abort — mark cancelled
         wf.status = WorkflowStatus.CANCELLED
         await db.commit()
-        return {"workflow_id": str(workflow_id), "status": "CANCELLED", "message": "Brief rejected. Workflow cancelled."}
+        return {
+            "workflow_id": str(workflow_id),
+            "status": "CANCELLED",
+            "message": "Brief rejected. Workflow cancelled.",
+        }
 
     # ── LangGraph removed — dispatch process_workflow directly ──────────────
     # Keep status as AWAITING_BRIEF_CONFIRMATION so the task knows
@@ -139,12 +146,15 @@ async def confirm_brief(
     await db.commit()
 
     from app.celery_app import celery_app as _celery
+
     _celery.send_task(
         "app.tasks.process_workflow",
         args=[str(workflow_id)],
         queue="default",
     )
-    logger.info("[%s] confirm_brief: dispatched process_workflow for drafting", workflow_id)
+    logger.info(
+        "[%s] confirm_brief: dispatched process_workflow for drafting", workflow_id
+    )
 
     return {
         "workflow_id": str(workflow_id),
@@ -180,19 +190,21 @@ async def approve_workflow(
     await db.commit()
 
     from app.celery_app import celery_app as _celery
+
     _celery.send_task(
         "app.tasks.process_workflow",
         args=[str(workflow_id)],
         queue="default",
     )
-    logger.info("[%s] approve_workflow: dispatched process_workflow for export", workflow_id)
+    logger.info(
+        "[%s] approve_workflow: dispatched process_workflow for export", workflow_id
+    )
 
     return {
         "workflow_id": str(workflow_id),
         "status": "EXPORTING",
         "message": "Draft approved. Export started.",
     }
-
 
 
 @router.post("/reject/{workflow_id}", summary="Reject plan")
@@ -214,47 +226,46 @@ async def reject_workflow(
         )
 
     # Track revision count (max 3 cycles)
-    async with db.begin():
-        from sqlalchemy import func as sa_func
+    from sqlalchemy import func as sa_func
 
-        revision_res = await db.execute(
-            select(Action.revision_count)
-            .where(
-                Action.workflow_id == workflow_id,
-            )
-            .order_by(Action.revision_count.desc())
-            .limit(1)
+    revision_res = await db.execute(
+        select(Action.revision_count)
+        .where(
+            Action.workflow_id == workflow_id,
         )
-        current_revision = revision_res.scalar_one_or_none() or 0
+        .order_by(Action.revision_count.desc())
+        .limit(1)
+    )
+    current_revision = revision_res.scalar_one_or_none() or 0
 
-        if current_revision >= 3:
-            await db.execute(
-                update(WorkflowExecution)
-                .where(WorkflowExecution.id == workflow_id)
-                .values(status=WorkflowStatus.ESCALATED)
-            )
-            await db.commit()
-            return {
-                "workflow_id": str(workflow_id),
-                "status": "ESCALATED",
-                "message": "Maximum 3 revision cycles reached. Escalated to admin.",
-            }
-
-        # Increment revision count on all actions
-        await db.execute(
-            update(Action)
-            .where(Action.workflow_id == workflow_id)
-            .values(revision_count=Action.revision_count + 1)
-        )
-
+    if current_revision >= 3:
         await db.execute(
             update(WorkflowExecution)
-            .where(
-                WorkflowExecution.id == workflow_id,
-                WorkflowExecution.org_id == uuid.UUID(org_id),
-            )
-            .values(status=WorkflowStatus.REVISING)
+            .where(WorkflowExecution.id == workflow_id)
+            .values(status=WorkflowStatus.ESCALATED)
         )
+        await db.commit()
+        return {
+            "workflow_id": str(workflow_id),
+            "status": "ESCALATED",
+            "message": "Maximum 3 revision cycles reached. Escalated to admin.",
+        }
+
+    # Increment revision count on all actions
+    await db.execute(
+        update(Action)
+        .where(Action.workflow_id == workflow_id)
+        .values(revision_count=Action.revision_count + 1)
+    )
+
+    await db.execute(
+        update(WorkflowExecution)
+        .where(
+            WorkflowExecution.id == workflow_id,
+            WorkflowExecution.org_id == uuid.UUID(org_id),
+        )
+        .values(status=WorkflowStatus.REVISING)
+    )
 
     return {"workflow_id": str(workflow_id), "status": "REVISING"}
 
@@ -301,7 +312,6 @@ async def get_workflow_brief(
 
 
 @router.get("/{workflow_id}/actions", summary="Get actions for workflow")
-
 async def get_workflow_actions(
     workflow_id: uuid.UUID,
     org_id: str = Depends(get_org_id_unified),
@@ -325,7 +335,8 @@ async def get_workflow_actions(
                 "description": a.description,
                 "status": a.status.value,
                 "urgency": float(a.urgency_score) if a.urgency_score else 0.0,
-                "draft_payload": a.draft_payload or {},  # includes draft_text, citations, grounding_score
+                "draft_payload": a.draft_payload
+                or {},  # includes draft_text, citations, grounding_score
             }
             for a in actions
         ]

@@ -48,9 +48,9 @@ services:
                 limits:
                     memory: 1500M # Hard cap — API never loads ML models
                     cpus: "0.9" # 1-vCPU droplet: max is 1.0, leave 0.1 for nginx/OS
-        depends_on:
-            migrations:
-                condition: service_completed_successfully
+        # depends_on:
+        #     migrations:
+        #         condition: service_completed_successfully
         healthcheck:
             test: ["CMD", "curl", "-f", "http://localhost:8000/live"]
             interval: 30s
