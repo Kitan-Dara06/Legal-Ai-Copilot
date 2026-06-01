@@ -288,19 +288,22 @@ async def confirm_brief(
         await db.commit()
         return {"workflow_id": str(workflow_id), "status": "CANCELLED", "message": "Brief rejected. Workflow cancelled."}
 
-    async with get_checkpointer() as checkpointer:
-        app = create_action_agent_graph().compile(
-            checkpointer=checkpointer,
-            interrupt_before=["ambiguity_gate", "decision_brief", "draft"],
-        )
-        config = _make_config(str(workflow_id))
+    # ── LangGraph removed — dispatch process_workflow directly ──────────────
+    # Keep status as AWAITING_BRIEF_CONFIRMATION so the task knows
+    # it is a resume-after-brief and should jump straight to draft_node.
+    await db.commit()
 
-        await app.aupdate_state(config, {"brief_confirmed": True})
-        final_state = await app.ainvoke(None, config=config)
+    from app.celery_app import celery_app as _celery
+    _celery.send_task(
+        "app.tasks.process_workflow",
+        args=[str(workflow_id)],
+        queue="default",
+    )
+    logger.info("[%s] confirm_brief: dispatched process_workflow for drafting", workflow_id)
 
     return {
         "workflow_id": str(workflow_id),
-        "status": final_state.get("status"),
+        "status": "DRAFTING",
         "message": "Brief confirmed. Draft generation started.",
     }
 
@@ -327,18 +330,22 @@ async def approve_workflow(
             status_code=409, detail=f"Cannot approve in status: {wf.status.value}"
         )
 
-    async with get_checkpointer() as checkpointer:
-        app = create_action_agent_graph().compile(
-            checkpointer=checkpointer,
-            interrupt_before=["ambiguity_gate", "decision_brief", "draft"],
-        )
-        config = _make_config(str(workflow_id))
-        final_state = await app.ainvoke(None, config=config)
+    # ── LangGraph removed — dispatch process_workflow directly ──────────────
+    # Keep status as AWAITING_APPROVAL so the task resumes at export_node.
+    await db.commit()
+
+    from app.celery_app import celery_app as _celery
+    _celery.send_task(
+        "app.tasks.process_workflow",
+        args=[str(workflow_id)],
+        queue="default",
+    )
+    logger.info("[%s] approve_workflow: dispatched process_workflow for export", workflow_id)
 
     return {
         "workflow_id": str(workflow_id),
-        "status": final_state.get("status", WorkflowStatus.COMPLETED.value),
-        "draft_r2_key": final_state.get("draft_r2_key"),
+        "status": "EXPORTING",
+        "message": "Draft approved. Export started.",
     }
 
 

@@ -24,6 +24,8 @@ function WorkflowPageContent() {
 
   const [token, setToken] = useState<string | null>(null);
   const [orgSlug, setOrgSlug] = useState<string | undefined>();
+  // Optimistic transitioning flag — hides the HITL panel immediately on click
+  const [transitioning, setTransitioning] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }: any) => {
@@ -41,8 +43,21 @@ function WorkflowPageContent() {
 
   const handleProceed = async () => {
     if (!token) return;
-    await confirmBrief(token, params.workflowId, true, orgSlug);
-    refresh();
+    setTransitioning(true);
+    try {
+      await confirmBrief(token, params.workflowId, true, orgSlug);
+    } catch (e) {
+      setTransitioning(false);
+      return;
+    }
+    // Poll until status moves away from AWAITING_BRIEF_CONFIRMATION
+    const wait = () => new Promise((r) => setTimeout(r, 2000));
+    for (let i = 0; i < 30; i++) {
+      await wait();
+      await refresh();
+      if (status !== "AWAITING_BRIEF_CONFIRMATION") break;
+    }
+    setTransitioning(false);
   };
 
   const handleAbort = async () => {
@@ -53,7 +68,14 @@ function WorkflowPageContent() {
 
   const handleApprove = async () => {
     if (!token) return;
-    await approveWorkflow(token, params.workflowId, orgSlug);
+    setTransitioning(true);
+    try {
+      await approveWorkflow(token, params.workflowId, orgSlug);
+    } catch (e) {
+      setTransitioning(false);
+      return;
+    }
+    setTransitioning(false);
     refresh();
   };
 
@@ -89,19 +111,21 @@ function WorkflowPageContent() {
 
       {/* ── State-driven content ── */}
 
-      {/* Spinning while processing */}
-      {status && !["AWAITING_BRIEF_CONFIRMATION", "AWAITING_APPROVAL", "COMPLETED", "FAILED", "ESCALATED", "CANCELLED"].includes(status) && (
+      {/* Spinning while processing or transitioning between HITL steps */}
+      {(transitioning || (status && !["AWAITING_BRIEF_CONFIRMATION", "AWAITING_APPROVAL", "COMPLETED", "FAILED", "ESCALATED", "CANCELLED"].includes(status))) && (
         <div className="flex flex-col items-center justify-center py-20 gap-4 animate-fade-in">
           <Loader2 className="w-10 h-10 text-[#D4A853] animate-spin-slow" />
           <div className="text-center">
-            <p className="text-[#F0EEE9] font-medium">{humanStatus(status)}</p>
+            <p className="text-[#F0EEE9] font-medium">
+              {transitioning ? "Submitting…" : humanStatus(status ?? "")}
+            </p>
             <p className="text-sm text-[#7A7A8A] mt-1">This usually takes 30–90 seconds…</p>
           </div>
         </div>
       )}
 
       {/* HITL Pause 1 — Brief */}
-      {status === "AWAITING_BRIEF_CONFIRMATION" && brief && (
+      {!transitioning && status === "AWAITING_BRIEF_CONFIRMATION" && brief && (
         <BriefReview
           brief={brief}
           workflowId={params.workflowId}
