@@ -1283,13 +1283,17 @@ def process_workflow(
 
         if wf_status == "AWAITING_BRIEF_CONFIRMATION":
             logger.info("[%s] Brief confirmed, drafting...", workflow_id)
-            state.update(await draft_node(state))
+            draft_result = await draft_node(state)
+            if draft_result.get("status") == "FAILED":
+                return {"status": "FAILED", "reason": draft_result.get("error_context")}
+            state.update(draft_result)
             return {"status": "AWAITING_APPROVAL"}
 
         if wf_status == "AWAITING_APPROVAL":
             logger.info("[%s] Draft approved, exporting...", workflow_id)
-            state.update(await export_node(state))
-            return {"status": "COMPLETED"}
+            export_result = await export_node(state)
+            state.update(export_result)
+            return {"status": export_result.get("status", "COMPLETED")}
 
         if preclassified_intent:
             intent = preclassified_intent

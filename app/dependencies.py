@@ -1,11 +1,11 @@
 import asyncio
-import bcrypt
 import hashlib
 import hmac
 import os
 import time
 from dataclasses import dataclass
 
+import bcrypt
 import httpx
 import redis.asyncio as aioredis
 import sentry_sdk
@@ -53,8 +53,12 @@ class SupabaseAuthContext:
 def hash_api_key(raw_key: str) -> str:
     """
     Hash the key so we never store or compare raw secrets directly.
+    Uses PBKDF2-HMAC-SHA256 with a per-app salt for key derivation.
     """
-    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    salt = os.getenv("API_KEY_HASH_SALT", "lex-api-key-v1").encode("utf-8")
+    return hashlib.pbkdf2_hmac(
+        "sha256", raw_key.encode("utf-8"), salt, iterations=100_000
+    ).hex()
 
 
 async def get_auth_context(

@@ -6,17 +6,20 @@ PATCH /orgs/{org_id}/members/{user_id}/role — Change a user's role
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_admin_auth_context, AuthContext
+from app.dependencies import AuthContext, get_admin_auth_context
 from app.models import UserOrgMembership, UserRole
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/orgs/{org_id}/members", tags=["Admin"])
+limiter = Limiter(key_func=get_remote_address)
 
 
 class UpdateRoleRequest(BaseModel):
@@ -24,7 +27,9 @@ class UpdateRoleRequest(BaseModel):
 
 
 @router.patch("/{user_id}/role", status_code=200)
+@limiter.limit("20/minute")
 async def update_member_role(
+    request: Request,
     user_id: uuid.UUID,
     req: UpdateRoleRequest,
     ctx: AuthContext = Depends(get_admin_auth_context),  # C3: requires ADMIN role

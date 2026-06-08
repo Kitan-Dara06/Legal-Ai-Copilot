@@ -1683,11 +1683,57 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
         missing_info_list = draft_output.missing_info
 
     except Exception as draft_err:
-        logger.error("[%s] draft_node LLM call failed: %s", workflow_id, draft_err)
-        return {
-            "status": WorkflowStatus.FAILED.value,
-            "error_context": f"Draft generation failed: {draft_err}",
-        }
+        # Groq structured output sometimes rejects valid JSON via function-call validation.
+        # The ``failed_generation`` field contains the raw output — recover it.
+        draft_text = None
+        source_citations = []
+        grounding_score = 0.5
+        missing_info_list = []
+        err_str = str(draft_err)
+        logger.warning(
+            "[%s] draft_node structured output rejected; attempting recovery", workflow_id
+        )
+        if "failed_generation" in err_str:
+            import json
+            try:
+                fn_start = err_str.find("<function=DraftOutput>")
+                fn_end = err_str.rfind("</function>")
+                if fn_start >= 0 and fn_end > fn_start:
+                    json_start = err_str.find(">", fn_start) + 1
+                    raw_json = err_str[json_start:fn_end].strip()
+                    raw_json = raw_json.replace("\\n", "\n").replace('\\"', '"')
+                    try:
+                        parsed = json.loads(raw_json)
+                    except json.JSONDecodeError:
+                        parsed = {}
+                        key = '"draft_text": "'
+                        idx = raw_json.find(key)
+                        if idx >= 0:
+                            val_end = raw_json.find('", "source', idx + len(key))
+                            if val_end < 0:
+                                val_end = raw_json.rfind('"')
+                            if val_end > idx:
+                                parsed["draft_text"] = raw_json[idx + len(key):val_end]
+                    draft_text = parsed.get("draft_text", "")
+                    if isinstance(parsed.get("source_citations"), list):
+                        source_citations = parsed["source_citations"]
+                    grounding_score = float(parsed.get("grounding_score", 0.5))
+                    if isinstance(parsed.get("missing_info"), list):
+                        missing_info_list = parsed["missing_info"]
+                    logger.info(
+                        "[%s] draft_node recovered from failed_generation (grounding=%.2f)",
+                        workflow_id, grounding_score,
+                    )
+            except Exception as parse_err:
+                logger.error(
+                    "[%s] draft_node recovery failed: %s", workflow_id, parse_err
+                )
+
+        if draft_text is None:
+            return {
+                "status": WorkflowStatus.FAILED.value,
+                "error_context": f"Draft generation failed: {draft_err}",
+            }
 
     # Write draft payload to the first Action row
     async with AsyncSessionLocal() as db:

@@ -1,5 +1,6 @@
 # app/routers/cron.py
 
+import hmac
 import logging
 import os
 
@@ -24,7 +25,7 @@ def verify_cron_secret(
         raise HTTPException(
             status_code=500, detail="Server misconfiguration: CRON_SECRET missing."
         )
-    if x_cron_secret != expected_secret:
+    if not hmac.compare_digest(x_cron_secret, expected_secret):
         logger.warning("Unauthorized cron request attempted.")
         raise HTTPException(status_code=401, detail="Unauthorized cron trigger.")
 
@@ -178,8 +179,9 @@ async def warn_expiring_approvals(db: AsyncSession = Depends(get_db)):
         result = await db.execute(warn_stmt)
         rows = result.mappings().all()
 
-        from app.models import Notification
         import uuid as _uuid
+
+        from app.models import Notification
 
         warned = 0
         for row in rows:
@@ -187,7 +189,9 @@ async def warn_expiring_approvals(db: AsyncSession = Depends(get_db)):
             # In production, this would also dispatch a Celery email/Slack task
             notif = Notification(
                 id=_uuid.uuid4(),
-                user_id=_uuid.UUID("00000000-0000-0000-0000-000000000000"),  # sentinel; real delivery via Celery
+                user_id=_uuid.UUID(
+                    "00000000-0000-0000-0000-000000000000"
+                ),  # sentinel; real delivery via Celery
                 org_id=row["org_id"],
                 title="Approval Token Expiring Soon",
                 body=(
@@ -207,7 +211,9 @@ async def warn_expiring_approvals(db: AsyncSession = Depends(get_db)):
     except Exception as e:
         await db.rollback()
         logger.error("[cron] Failed to send expiry warnings: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to warn expiring approvals.")
+        raise HTTPException(
+            status_code=500, detail="Failed to warn expiring approvals."
+        )
 
 
 @router.post("/expire-stale-ambiguity", dependencies=[Depends(verify_cron_secret)])

@@ -18,7 +18,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -392,7 +392,7 @@ async def create_goal(
             if pg_sess:
                 session_data = {
                     "org_id": str(org_uuid),
-                    "files": {str(did): "READY" for did in pg_sess.document_subset}
+                    "files": {str(did): "READY" for did in pg_sess.document_subset},
                 }
         except ValueError:
             pass
@@ -553,16 +553,17 @@ async def list_goals(
                 f"Valid values: {[s.value for s in GoalStatus]}",
             )
 
-    # Get total count
-    count_res = await db.execute(
-        select(Goal.id).where(
-            Goal.workspace_id == workspace_id, Goal.org_id == org_uuid
-        )
+    # Get total count (matches the same WHERE clause)
+    count_query = select(func.count(Goal.id)).where(
+        Goal.workspace_id == workspace_id, Goal.org_id == org_uuid
     )
-    total = len(count_res.scalars().all())
+    if status_filter:
+        count_query = count_query.where(Goal.status == status_enum)
+    total = await db.scalar(count_query) or 0
 
     # Paginated results — join latest workflow_id per goal
     from sqlalchemy import outerjoin
+
     res = await db.execute(query.offset(offset).limit(limit))
     goals = res.scalars().all()
 
@@ -890,6 +891,7 @@ async def confirm_plan(
     # Dispatch process_workflow — it will see AWAITING_APPROVAL and run export_node
     try:
         from app.celery_app import celery_app as _celery
+
         _celery.send_task(
             "app.tasks.process_workflow",
             args=[str(workflow.id)],

@@ -48,6 +48,7 @@ def generate_final_answer(question: str, context_chunks: list[str], groq_client)
                 },
             ],
             temperature=0,
+            max_tokens=4096,
         )
         return response.choices[0].message.content
     except Exception as e:

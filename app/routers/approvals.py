@@ -28,13 +28,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_admin_auth_context, get_org_id_unified, AuthContext
-from app.services.audit.events import emit
-from app.services.audit.schemas import CorrelationContext
+from app.dependencies import AuthContext, get_admin_auth_context, get_org_id_unified
 from app.models import (
     Action,
     ApprovalRequest,
@@ -42,6 +40,8 @@ from app.models import (
     WorkflowExecution,
     WorkflowStatus,
 )
+from app.services.audit.events import emit
+from app.services.audit.schemas import CorrelationContext
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/approvals", tags=["Approvals"])
@@ -191,14 +191,18 @@ async def list_pending_approvals(
     now = datetime.now(timezone.utc)
 
     # Count
-    count_res = await db.execute(
-        select(ApprovalRequest).where(
-            ApprovalRequest.org_id == org_uuid,
-            ApprovalRequest.status == ApprovalStatus.PENDING,
-            ApprovalRequest.expires_at > now,
+    total = (
+        await db.scalar(
+            select(func.count())
+            .where(
+                ApprovalRequest.org_id == org_uuid,
+                ApprovalRequest.status == ApprovalStatus.PENDING,
+                ApprovalRequest.expires_at > now,
+            )
+            .select_from(ApprovalRequest)
         )
+        or 0
     )
-    total = len(count_res.scalars().all())
 
     # Fetch page
     res = await db.execute(
@@ -326,11 +330,14 @@ async def approve_via_token(
     actor_user_id = getattr(request.state, "user_id", None)
     approval.status = ApprovalStatus.USED
     approval.decision_timestamp = now
-    approval.actor = actor_user_id  # FR-EXEC-01: actor IS NOT NULL required before execution
+    approval.actor = (
+        actor_user_id  # FR-EXEC-01: actor IS NOT NULL required before execution
+    )
     await db.commit()
 
     # Dispatch process_workflow — it will see AWAITING_APPROVAL and run export_node
     from app.celery_app import celery_app as _celery
+
     _celery.send_task(
         "app.tasks.process_workflow",
         args=[str(workflow_id)],
