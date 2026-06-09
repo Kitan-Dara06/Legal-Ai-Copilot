@@ -16,6 +16,7 @@ from sqlalchemy import (
     Uuid,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -431,8 +432,13 @@ class WorkflowExecution(Base):
     )
     langgraph_checkpoint: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     result_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    error_context: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Human-readable error context set when status=FAILED",
+    )
     decision_brief_payload: Mapped[dict | None] = mapped_column(
-        JSONB,
+        MutableDict.as_mutable(JSONB),
         nullable=True,
         comment="Stores DecisionBriefResult JSONB between HITL pause 1 (brief) and pause 2 (draft)",
     )
@@ -491,7 +497,9 @@ class Action(Base):
         Enum(ActionStatus), nullable=False, default=ActionStatus.DETECTED
     )
     source_clause_ref: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    draft_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    draft_payload: Mapped[dict | None] = mapped_column(
+        MutableDict.as_mutable(JSONB), nullable=True
+    )
     idempotency_class: Mapped[IdempotencyClass] = mapped_column(
         Enum(IdempotencyClass), nullable=False, default=IdempotencyClass.IDEMPOTENT
     )

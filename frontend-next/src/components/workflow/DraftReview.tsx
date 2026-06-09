@@ -3,7 +3,7 @@
 import { useState } from "react";
 import {
   Download, CheckSquare, AlertCircle, ChevronDown,
-  ChevronUp, FileCheck, Link as LinkIcon, ThumbsDown,
+  ChevronUp, FileCheck, Link as LinkIcon, ThumbsDown, Edit3,
 } from "lucide-react";
 import { clsx } from "clsx";
 import { Button } from "@/components/ui/Button";
@@ -15,7 +15,7 @@ interface DraftReviewProps {
   draft: DraftPayload;
   workflowId: string;
   r2Key?: string | null;
-  onApprove: () => Promise<void>;
+  onApprove: (updatedDraft: string, resolvedMissing: Record<string, string>) => Promise<void>;
   onReject: (reason: string) => Promise<void>;
 }
 
@@ -29,13 +29,29 @@ export function DraftReview({
   const [checkDone, setCheckDone] = useState<Set<number>>(new Set());
   const [citExpanded, setCitExpanded] = useState(false);
 
+  // Live editing state
+  const [editedDraft, setEditedDraft] = useState(draft.draft_text);
+  const [isEditing, setIsEditing] = useState(false);
+
+  // Missing info fill-in state (keyed by the missing_info string)
+  const [resolvedMissing, setResolvedMissing] = useState<Record<string, string>>({});
+
   const groundingPct = Math.round((draft.grounding_score ?? 0) * 100);
   const groundingColor =
     groundingPct >= 80 ? "#3ECFA4" : groundingPct >= 60 ? "#E8A44C" : "#F06B6B";
 
+  const allMissingResolved =
+    !draft.missing_info ||
+    draft.missing_info.length === 0 ||
+    draft.missing_info.every((item) => resolvedMissing[item]?.trim());
+
   const handleApprove = async () => {
     setApproving(true);
-    try { await onApprove(); } finally { setApproving(false); }
+    try {
+      await onApprove(editedDraft, resolvedMissing);
+    } finally {
+      setApproving(false);
+    }
   };
 
   const handleReject = async () => {
@@ -62,9 +78,9 @@ export function DraftReview({
               Draft Review
             </span>
           </div>
-          <h2 className="text-xl font-semibold text-[#F0EEE9]">Review the Draft</h2>
+          <h2 className="text-xl font-semibold text-[#F0EEE9]">Review & Edit the Draft</h2>
           <p className="text-sm text-[#7A7A8A] mt-1">
-            Approve to export as DOCX, or reject with feedback to revise.
+            Edit the draft directly, fill in any missing information, then approve to export as DOCX.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -78,31 +94,90 @@ export function DraftReview({
       {/* Two-column layout */}
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-5">
 
-        {/* LEFT — Draft text */}
+        {/* LEFT — Draft text (editable) */}
         <div className="space-y-4">
           <Card className="p-5 border-[#7C6AF7]/15">
-            <div className="prose prose-sm max-w-none">
-              <div className="legal-text whitespace-pre-wrap text-[#F0EEE9] leading-[1.85] text-[15px]">
-                {draft.draft_text}
-              </div>
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-medium text-[#7A7A8A] uppercase tracking-wider">
+                Draft Document
+              </span>
+              <button
+                onClick={() => setIsEditing((v) => !v)}
+                className="flex items-center gap-1.5 text-xs text-[#7C6AF7] hover:text-[#9A8AFF] transition-colors"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                {isEditing ? "Done editing" : "Edit draft"}
+              </button>
             </div>
+            {isEditing ? (
+              <textarea
+                className="w-full bg-[#1A1A22] border border-[#7C6AF7]/30 focus:border-[#7C6AF7] rounded-lg px-4 py-3 text-[15px] text-[#F0EEE9] leading-[1.85] outline-none transition-colors resize-y font-mono"
+                rows={20}
+                value={editedDraft}
+                onChange={(e) => setEditedDraft(e.target.value)}
+                spellCheck={false}
+              />
+            ) : (
+              <div className="legal-text whitespace-pre-wrap text-[#F0EEE9] leading-[1.85] text-[15px] min-h-[200px]">
+                {editedDraft}
+              </div>
+            )}
+            {editedDraft !== draft.draft_text && (
+              <div className="mt-2 flex items-center gap-1.5 text-[11px] text-[#7C6AF7]">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#7C6AF7]" />
+                Draft edited — changes will be saved to the exported DOCX
+              </div>
+            )}
           </Card>
 
-          {/* Missing info warnings */}
+          {/* Missing info — now fill-in inputs */}
           {draft.missing_info && draft.missing_info.length > 0 && (
             <Card className="p-5 border-[#E8A44C]/20 bg-[#E8A44C]/[0.03]">
               <div className="flex items-center gap-2 mb-3">
                 <AlertCircle className="w-4 h-4 text-[#E8A44C]" strokeWidth={1.5} />
-                <h3 className="text-sm font-semibold text-[#E8A44C]">Missing Information</h3>
+                <h3 className="text-sm font-semibold text-[#E8A44C]">
+                  Missing Information — Please Fill In
+                </h3>
               </div>
-              <ul className="space-y-1.5">
-                {draft.missing_info.map((item, i) => (
-                  <li key={i} className="text-xs text-[#F0EEE9]/80 flex items-start gap-2">
-                    <span className="text-[#E8A44C] mt-0.5 shrink-0">!</span>
-                    {item}
-                  </li>
-                ))}
-              </ul>
+              <p className="text-xs text-[#7A7A8A] mb-4">
+                The AI flagged these gaps. Fill them in here and they will be appended to the exported document.
+              </p>
+              <div className="space-y-3">
+                {draft.missing_info.map((item, i) => {
+                  const resolved = resolvedMissing[item];
+                  return (
+                    <div key={i} className="space-y-1">
+                      <label className="flex items-start gap-2 text-xs text-[#F0EEE9]/80">
+                        <span
+                          className={clsx(
+                            "mt-0.5 shrink-0 font-bold",
+                            resolved?.trim() ? "text-[#3ECFA4]" : "text-[#E8A44C]",
+                          )}
+                        >
+                          {resolved?.trim() ? "✓" : "!"}
+                        </span>
+                        <span className={clsx(resolved?.trim() && "line-through text-[#7A7A8A]")}>
+                          {item}
+                        </span>
+                      </label>
+                      <input
+                        type="text"
+                        className={clsx(
+                          "w-full bg-[#1E1E28] border rounded-lg px-3 py-2 text-sm text-[#F0EEE9] placeholder-[#4A4A5A] outline-none transition-colors",
+                          resolved?.trim()
+                            ? "border-[#3ECFA4]/30 focus:border-[#3ECFA4]"
+                            : "border-[#2A2A32] focus:border-[#E8A44C]",
+                        )}
+                        placeholder="Provide your answer here…"
+                        value={resolved ?? ""}
+                        onChange={(e) =>
+                          setResolvedMissing((prev) => ({ ...prev, [item]: e.target.value }))
+                        }
+                      />
+                    </div>
+                  );
+                })}
+              </div>
             </Card>
           )}
 
@@ -163,6 +238,31 @@ export function DraftReview({
             </p>
           </Card>
 
+          {/* Missing info status */}
+          {draft.missing_info && draft.missing_info.length > 0 && (
+            <Card className="p-4">
+              <p className="text-xs text-[#7A7A8A] mb-2">Missing info status</p>
+              <div className="flex items-center gap-2">
+                <div className="flex-1 h-1.5 bg-[#2A2A32] rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-[#3ECFA4] transition-all duration-500"
+                    style={{
+                      width: `${Math.round(
+                        (Object.values(resolvedMissing).filter((v) => v?.trim()).length /
+                          draft.missing_info.length) *
+                          100,
+                      )}%`,
+                    }}
+                  />
+                </div>
+                <span className="text-xs text-[#7A7A8A] font-mono">
+                  {Object.values(resolvedMissing).filter((v) => v?.trim()).length}/
+                  {draft.missing_info.length} filled
+                </span>
+              </div>
+            </Card>
+          )}
+
           {/* Verification Checklist */}
           {draft.verification_checklist && draft.verification_checklist.length > 0 && (
             <Card className="p-5">
@@ -201,6 +301,11 @@ export function DraftReview({
 
           {/* CTAs */}
           <div className="space-y-2">
+            {draft.missing_info && draft.missing_info.length > 0 && !allMissingResolved && (
+              <p className="text-[11px] text-[#E8A44C] text-center px-1">
+                Fill in all missing information above before approving.
+              </p>
+            )}
             <Button
               variant="gold"
               size="lg"
@@ -209,7 +314,7 @@ export function DraftReview({
               onClick={handleApprove}
             >
               <Download className="w-4 h-4" />
-              Approve & Export DOCX
+              Approve &amp; Export DOCX
             </Button>
 
             <Button

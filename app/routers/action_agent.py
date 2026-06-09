@@ -32,6 +32,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.database import get_db
 from app.dependencies import get_org_id_unified
@@ -68,7 +69,8 @@ class ConfirmBriefRequest(BaseModel):
 
 
 class ApproveRequest(BaseModel):
-    pass  # JWT auth only — HMAC token pattern removed from ACT path
+    updated_draft: str | None = None  # Live-edited draft from the frontend
+    resolved_missing: dict | None = None  # Optional filled-in missing_info values
 
 
 class RejectRequest(BaseModel):
@@ -185,8 +187,51 @@ async def approve_workflow(
             status_code=409, detail=f"Cannot approve in status: {wf.status.value}"
         )
 
+    # ── Persist lawyer edits before dispatching export ─────────────────────
+    if req.updated_draft or req.resolved_missing:
+        from app.models import Action, ActionStatus
+
+        res = await db.execute(
+            select(Action)
+            .where(
+                Action.workflow_id == workflow_id,
+                Action.status == ActionStatus.AWAITING_APPROVAL,
+            )
+            .order_by(Action.task_order)
+            .limit(1)
+        )
+        action = res.scalar_one_or_none()
+        if action and action.draft_payload:
+            updated_payload = dict(action.draft_payload)
+            if req.updated_draft:
+                updated_payload["draft_text"] = req.updated_draft
+            if req.resolved_missing:
+                # Append resolved missing-info answers as a supplementary section
+                resolved_notes = "\n\n--- SUPPLEMENTARY INFORMATION ---\n"
+                for field, value in req.resolved_missing.items():
+                    resolved_notes += f"{field}: {value}\n"
+                updated_payload["draft_text"] = (
+                    updated_payload.get("draft_text", "") + resolved_notes
+                )
+                # Clear out the items that were resolved
+                remaining_missing = [
+                    item for item in updated_payload.get("missing_info", [])
+                    if item not in req.resolved_missing
+                ]
+                updated_payload["missing_info"] = remaining_missing
+            action.draft_payload = updated_payload
+            # flag_modified tells SQLAlchemy the JSONB column is dirty even
+            # when we assign a new dict reference (reference-equality check).
+            flag_modified(action, "draft_payload")
+            logger.info(
+                "[%s] approve_workflow: persisted %s lawyer edits",
+                workflow_id,
+                "draft_text+missing_info" if req.resolved_missing else "draft_text",
+            )
+
     # ── LangGraph removed — dispatch process_workflow directly ──────────────
     # Keep status as AWAITING_APPROVAL so the task resumes at export_node.
+    # Single commit covers both the edit persist and the status check above.
     await db.commit()
 
     from app.celery_app import celery_app as _celery
@@ -251,7 +296,22 @@ async def reject_workflow(
             "message": "Maximum 3 revision cycles reached. Escalated to admin.",
         }
 
-    # Increment revision count on all actions
+    # Increment revision count on all actions and store rejection reason
+    # so draft_node can pick it up when regenerating
+    res = await db.execute(
+        select(Action)
+        .where(Action.workflow_id == workflow_id)
+        .order_by(Action.task_order)
+        .limit(1)
+    )
+    primary_action = res.scalar_one_or_none()
+    if primary_action and primary_action.draft_payload:
+        updated = dict(primary_action.draft_payload)
+        updated["rejection_reason"] = req.reason.strip()
+        updated["revision_number"] = current_revision + 1
+        primary_action.draft_payload = updated
+        flag_modified(primary_action, "draft_payload")
+
     await db.execute(
         update(Action)
         .where(Action.workflow_id == workflow_id)
@@ -266,6 +326,16 @@ async def reject_workflow(
         )
         .values(status=WorkflowStatus.REVISING)
     )
+    await db.commit()
+
+    # Dispatch process_workflow — it will see REVISING and call draft_node again
+    from app.celery_app import celery_app as _celery
+    _celery.send_task(
+        "app.tasks.process_workflow",
+        args=[str(workflow_id)],
+        queue="default",
+    )
+    logger.info("[%s] reject_workflow: dispatched revision cycle", workflow_id)
 
     return {"workflow_id": str(workflow_id), "status": "REVISING"}
 
@@ -286,29 +356,41 @@ async def get_workflow_status(
         "download_url": None,
     }
 
-    # When completed, generate a presigned download URL for the DOCX
-    if wf.status == WorkflowStatus.COMPLETED:
-        from sqlalchemy import select
+    # When completed, generate a presigned download URL for the DOCX.
+    # Always re-generate fresh (presigned URLs expire in 1 hour — re-signing
+    # on every status poll ensures the link is always valid regardless of when
+    # the user returns to the page).
+    if wf.status == WorkflowStatus.COMPLETED and wf.result_ref:
+        try:
+            from app.services.object_storage import generate_presigned_download_url
 
-        from app.models import Action, ActionStatus
-
-        res = await db.execute(
-            select(Action).where(
-                Action.workflow_id == workflow_id,
-                Action.status == ActionStatus.EXECUTED,
+            # result_ref stores the authoritative R2 key set by export_node
+            response["download_url"] = generate_presigned_download_url(
+                wf.result_ref, expires_in=86400  # 24-hour URL
             )
-        )
-        action = res.scalar_one_or_none()
-        if action:
-            r2_key = f"drafts/{workflow_id}/{action.id}.docx"
+        except Exception as url_err:
+            logger.warning(
+                "[%s] Failed to generate download URL from result_ref=%s: %s",
+                workflow_id, wf.result_ref, url_err,
+            )
+            # Fallback: try reconstructing from EXECUTED action
             try:
-                from app.services.object_storage import generate_presigned_download_url
-
-                response["download_url"] = generate_presigned_download_url(r2_key)
-            except Exception as url_err:
-                logger.warning(
-                    "[%s] Failed to generate download URL: %s", workflow_id, url_err
+                from app.models import Action, ActionStatus
+                res = await db.execute(
+                    select(Action).where(
+                        Action.workflow_id == workflow_id,
+                        Action.status == ActionStatus.EXECUTED,
+                    )
                 )
+                action = res.scalar_one_or_none()
+                if action:
+                    r2_key = f"drafts/{workflow_id}/{action.id}.docx"
+                    from app.services.object_storage import generate_presigned_download_url
+                    response["download_url"] = generate_presigned_download_url(
+                        r2_key, expires_in=86400
+                    )
+            except Exception:
+                pass
 
     return response
 

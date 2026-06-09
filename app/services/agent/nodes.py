@@ -1323,7 +1323,7 @@ The lawyer needs to decide: "Should I proceed with drafting a response, and if s
 
 Your task is to synthesize the retrieved contract context into a structured brief that:
 1. Identifies the SPECIFIC clauses most relevant to the goal (not everything — just what matters)
-2. Recommends concrete actions with their action type (DRAFT_RESPONSE, DRAFT_NOTICE, or DRAFT_AMENDMENT)
+2. Recommends concrete actions with their action type — use ONLY these valid values: DRAFT_RESPONSE, SEND_NOTICE, FILE_DOCUMENT, SET_REMINDER, ESCALATE_TO_COUNSEL
 3. Flags any conflicts or ambiguities the lawyer must resolve before drafting
 4. Identifies implicated deadlines
 5. Produces a verification checklist of things the lawyer MUST confirm before a draft is generated
@@ -1346,13 +1346,75 @@ RETRIEVED CONTRACT CONTEXT:
 
 Generate the DecisionBriefResult now."""
 
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        temperature=0.0,
-        api_key=os.getenv("GROQ_API_KEY", ""),
-    ).with_structured_output(DecisionBriefResult)
-
-    brief: DecisionBriefResult = await llm.ainvoke(prompt)
+    brief: DecisionBriefResult | None = None
+    try:
+        llm = ChatGroq(
+            model="llama-3.3-70b-versatile",
+            temperature=0.0,
+            api_key=os.getenv("GROQ_API_KEY", ""),
+        ).with_structured_output(DecisionBriefResult)
+        brief = await llm.ainvoke(prompt)
+    except Exception as brief_err:
+        logger.warning(
+            "[%s] decision_brief_node: structured output failed (%s), attempting plain-text fallback",
+            workflow_id,
+            brief_err,
+        )
+        # ── Plain-text fallback: ask for minimal valid JSON ──────────────────
+        try:
+            import json as _json
+            fallback_prompt = (
+                f"You are a legal AI. Respond with ONLY a JSON object — no markdown, no commentary.\n"
+                f"Keys required: goal (str), summary (str), recommended_actions (list), "
+                f"relevant_clauses (list), conflicts_to_resolve (list), deadlines_implicated (list), "
+                f"verification_checklist (list of str), proceed_recommended (bool), "
+                f"proceed_reasoning (str), confidence (float 0-1).\n\n"
+                f"GOAL: {goal_text}\n\nContext (truncated):\n{context_block[:3000]}"
+            )
+            plain_llm = ChatGroq(
+                model="llama-3.3-70b-versatile",
+                temperature=0.0,
+                api_key=os.getenv("GROQ_API_KEY", ""),
+            )
+            plain_resp = await plain_llm.ainvoke(fallback_prompt)
+            raw_content = plain_resp.content if hasattr(plain_resp, "content") else str(plain_resp)
+            # Strip markdown fences if present
+            raw_content = raw_content.strip()
+            if raw_content.startswith("```"):
+                raw_content = raw_content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            parsed = _json.loads(raw_content)
+            # Coerce lists that may be missing
+            for lst_key in ("recommended_actions", "relevant_clauses", "conflicts_to_resolve",
+                            "deadlines_implicated", "verification_checklist"):
+                if not isinstance(parsed.get(lst_key), list):
+                    parsed[lst_key] = []
+            brief = DecisionBriefResult(**parsed)
+            logger.info("[%s] decision_brief_node: plain-text fallback succeeded", workflow_id)
+        except Exception as fallback_err:
+            logger.error(
+                "[%s] decision_brief_node: fallback also failed (%s) — creating safe minimal brief",
+                workflow_id,
+                fallback_err,
+            )
+            # Last-resort minimal brief so the workflow doesn't crash entirely
+            brief = DecisionBriefResult(
+                goal=goal_text,
+                summary=(
+                    "The AI could not generate a complete brief due to a temporary service error. "
+                    "Please review the retrieved clauses manually and retry if needed."
+                ),
+                recommended_actions=[],
+                relevant_clauses=[],
+                conflicts_to_resolve=[],
+                deadlines_implicated=[],
+                verification_checklist=[
+                    "Manually review the retrieved contract context before proceeding",
+                    "Confirm the goal statement accurately reflects the required action",
+                ],
+                proceed_recommended=False,
+                proceed_reasoning="Brief generation failed due to a temporary AI service error. Do not proceed without manual review.",
+                confidence=0.0,
+            )
 
     # ── Persist brief and pause ──────────────────────────────────────────────
     brief_payload = brief.model_dump(mode="json")
@@ -1582,9 +1644,10 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
 
     if not wf or not wf.decision_brief_payload:
         logger.error("[%s] draft_node: no decision_brief_payload found", workflow_id)
+        await _set_wf_status(workflow_id, WorkflowStatus.FAILED)
         return {
             "status": WorkflowStatus.FAILED.value,
-            "error_context": "Brief payload missing",
+            "error_context": "Brief payload missing — the brief may not have saved correctly. Please retry.",
         }
 
     brief = DecisionBriefResult(**wf.decision_brief_payload)
@@ -1729,10 +1792,51 @@ async def draft_node(state: PointerOnlyState) -> Dict[str, Any]:
                     "[%s] draft_node recovery failed: %s", workflow_id, parse_err
                 )
 
+        # ── Second fallback: plain (non-structured) completion ───────────────
         if draft_text is None:
+            logger.warning(
+                "[%s] draft_node: attempting plain-text fallback generation", workflow_id
+            )
+            try:
+                import json as _json
+                plain_llm = ChatGroq(
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.0,
+                    api_key=os.getenv("GROQ_API_KEY", ""),
+                    max_tokens=4096,
+                )
+                plain_resp = await plain_llm.ainvoke(
+                    prompt
+                    + "\n\nIMPORTANT: Respond with ONLY raw JSON, no markdown fences or commentary."
+                )
+                raw = plain_resp.content if hasattr(plain_resp, "content") else str(plain_resp)
+                raw = raw.strip()
+                if raw.startswith("```"):
+                    raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                parsed_fb = _json.loads(raw)
+                draft_text = parsed_fb.get("draft_text", "")
+                if isinstance(parsed_fb.get("source_citations"), list):
+                    source_citations = parsed_fb["source_citations"]
+                grounding_score = float(parsed_fb.get("grounding_score", 0.4))
+                if isinstance(parsed_fb.get("missing_info"), list):
+                    missing_info_list = parsed_fb["missing_info"]
+                logger.info(
+                    "[%s] draft_node: plain-text fallback succeeded (grounding=%.2f)",
+                    workflow_id, grounding_score,
+                )
+            except Exception as plain_err:
+                logger.error(
+                    "[%s] draft_node: plain-text fallback also failed: %s", workflow_id, plain_err
+                )
+
+        if draft_text is None:
+            await _set_wf_status(workflow_id, WorkflowStatus.FAILED)
             return {
                 "status": WorkflowStatus.FAILED.value,
-                "error_context": f"Draft generation failed: {draft_err}",
+                "error_context": (
+                    "Draft generation failed after multiple attempts. "
+                    "This is likely a temporary AI service issue — please try again in a moment."
+                ),
             }
 
     # Write draft payload to the first Action row

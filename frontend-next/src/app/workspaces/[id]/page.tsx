@@ -254,7 +254,7 @@ function WorkspaceDetailContent() {
 
   const pollGoalResult = async (goalId: string, intent: GoalIntent, freshToken?: string): Promise<boolean> => {
     const t = freshToken || token;
-    const MAX = 60; // 3 min max
+    const MAX = 20; // 1 min max (~20 × 3s polls)
     for (let i = 0; i < MAX; i++) {
       await new Promise((r) => setTimeout(r, 3000));
       try {
@@ -268,15 +268,20 @@ function WorkspaceDetailContent() {
         }
         // Backend crashed or workflow explicitly failed — stop polling immediately
         if (["FAILED", "ESCALATED", "CANCELLED"].includes(res.status)) {
-          setSubmitError("The workflow failed on the server. Check logs or try again.");
+          setSubmitError("The workflow failed on the server. Please try again.");
           return false;
         }
       } catch (err: any) {
         if (err?.code === "AUTH_EXPIRED") { router.push("/login"); return false; }
+        // 5xx — server is down, no point continuing to poll
+        if (err?.code === "SERVER_ERROR") {
+          setSubmitError("The server encountered an error. Please try again in a moment.");
+          return false;
+        }
       }
     }
-    // Timed out after 3 minutes
-    setSubmitError("Request timed out. The server may still be processing — refresh to check.");
+    // Timed out after ~1 minute
+    setSubmitError("Request timed out. The server may still be processing — refresh to check, or try again.");
     return false;
   };
 
@@ -389,7 +394,18 @@ function WorkspaceDetailContent() {
                 {submitError && (
                   <div className="flex items-start gap-2 p-2.5 rounded-lg bg-[#F06B6B]/5 border border-[#F06B6B]/20">
                     <AlertTriangle className="w-3.5 h-3.5 text-[#F06B6B] mt-0.5 shrink-0" />
-                    <p className="text-xs text-[#F06B6B]">{submitError}</p>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-[#F06B6B]">{submitError}</p>
+                      <button
+                        className="text-[10px] text-[#F06B6B]/70 hover:text-[#F06B6B] mt-1 underline underline-offset-2 transition-colors"
+                        onClick={() => {
+                          setSubmitError(null);
+                          setGoalText(goalText || "");
+                        }}
+                      >
+                        Dismiss &amp; try again
+                      </button>
+                    </div>
                   </div>
                 )}
                 <div className="flex items-center justify-between">

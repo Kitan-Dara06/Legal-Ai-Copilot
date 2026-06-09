@@ -70,6 +70,14 @@ export async function apiFetch<T>(
     if (res.status === 401 || res.status === 403) {
       throw new AppError("AUTH_EXPIRED", "AUTH_EXPIRED", res.status);
     }
+    // 5xx — server crash. Never expose raw internal detail to the UI.
+    if (res.status >= 500) {
+      throw new AppError(
+        "The server encountered an error. Please try again in a moment.",
+        "SERVER_ERROR",
+        res.status,
+      );
+    }
     let detail = `HTTP ${res.status}`;
     try {
       const json = await res.json();
@@ -425,6 +433,8 @@ export function approveWorkflow(
   token: string,
   workflowId: string,
   orgSlug?: string,
+  updatedDraft?: string,
+  resolvedMissing?: Record<string, string>,
 ) {
   return apiFetch<{
     workflow_id: string;
@@ -435,7 +445,10 @@ export function approveWorkflow(
     orgSlug,
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({
+      updated_draft: updatedDraft ?? null,
+      resolved_missing: resolvedMissing ?? null,
+    }),
   });
 }
 

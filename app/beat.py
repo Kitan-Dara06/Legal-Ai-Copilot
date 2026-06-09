@@ -46,7 +46,13 @@ celery_app.conf.update(
             "schedule": crontab(minute="*/5"),
             "options": {"queue": "default"},
         },
+        "cleanup-stale-data-daily": {
+            "task": "app.tasks.cleanup_stale_data",
+            "schedule": crontab(hour=2, minute=0),  # 2am UTC daily
+            "options": {"queue": "default"},
+        },
     },
 )
+
 
 logger.info("Celery Beat scheduler initialized (lightweight entry point).")

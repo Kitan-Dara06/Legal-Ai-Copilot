@@ -1295,6 +1295,21 @@ def process_workflow(
             state.update(export_result)
             return {"status": export_result.get("status", "COMPLETED")}
 
+        if wf_status == "REVISING":
+            # Lawyer rejected the draft — re-run draft_node to generate a
+            # revised draft. draft_node reads the brief payload and the
+            # rejection reason from the Action row's revision_count.
+            logger.info("[%s] Revision requested, regenerating draft...", workflow_id)
+            from app.services.agent.nodes import _set_wf_status
+            from app.models import WorkflowStatus as _WfStatus
+            await _set_wf_status(workflow_id, _WfStatus.DRAFTING)
+            draft_result = await draft_node(state)
+            if draft_result.get("status") == "FAILED":
+                return {"status": "FAILED", "reason": draft_result.get("error_context")}
+            state.update(draft_result)
+            return {"status": "AWAITING_APPROVAL"}
+
+
         if preclassified_intent:
             intent = preclassified_intent
             state["primary_intent"] = intent
@@ -1358,7 +1373,48 @@ def process_workflow(
             return {"status": "FAILED"}
 
     _reset_async_engine()
-    result = asyncio.run(_run())
+
+    async def _safe_run():
+        """Top-level safety net: any uncaught exception marks the workflow FAILED."""
+        try:
+            return await _run()
+        except Exception as top_err:
+            logger.exception(
+                "[%s] process_workflow: UNHANDLED exception — marking FAILED: %s",
+                workflow_id,
+                top_err,
+            )
+            # Best-effort DB update so the workflow doesn't stay stuck forever.
+            # Uses error_context column (Text) on workflow_executions.
+            try:
+                pg_pool = get_pg_pool()
+                conn, _ = _get_valid_conn(pg_pool)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE workflow_executions
+                               SET status       = 'FAILED',
+                                   error_context = %s
+                             WHERE id = %s
+                            """,
+                            (
+                                f"Unhandled worker error: {str(top_err)[:400]}",
+                                workflow_id,
+                            ),
+                        )
+                    conn.commit()
+                finally:
+                    pg_pool.putconn(conn)
+            except Exception as db_err:
+                logger.error(
+                    "[%s] process_workflow: could not write FAILED status to DB: %s",
+                    workflow_id,
+                    db_err,
+                )
+            return {"status": "FAILED", "error_context": str(top_err)[:400]}
+
+    result = asyncio.run(_safe_run())
     logger.info("[%s] process_workflow: done -> %s", workflow_id, result)
 
     return result

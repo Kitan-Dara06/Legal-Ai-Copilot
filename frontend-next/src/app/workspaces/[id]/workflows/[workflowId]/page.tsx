@@ -10,7 +10,8 @@ import { PipelineTracker } from "@/components/workflow/PipelineTracker";
 import { BriefReview } from "@/components/workflow/BriefReview";
 import { DraftReview } from "@/components/workflow/DraftReview";
 import { Badge } from "@/components/ui/Badge";
-import { Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
+import { Button } from "@/components/ui/Button";
+import { Loader2, CheckCircle2, XCircle, AlertTriangle, Download, RefreshCw } from "lucide-react";
 import Link from "next/link";
 
 function WorkflowPageContent() {
@@ -34,7 +35,7 @@ function WorkflowPageContent() {
         });
     }, []);
 
-    const { status, brief, draft, loading, error, refresh } =
+    const { status, brief, draft, downloadUrl, loading, error, refresh } =
         usePollWorkflowStatus(params.workflowId, token, orgSlug);
 
     const handleProceed = async () => {
@@ -62,11 +63,20 @@ function WorkflowPageContent() {
         router.push(`/workspaces/${params.id}`);
     };
 
-    const handleApprove = async () => {
+    const handleApprove = async (
+        updatedDraft: string,
+        resolvedMissing: Record<string, string>,
+    ) => {
         if (!token) return;
         setTransitioning(true);
         try {
-            await approveWorkflow(token, params.workflowId, orgSlug);
+            await approveWorkflow(
+                token,
+                params.workflowId,
+                orgSlug,
+                updatedDraft,
+                resolvedMissing,
+            );
         } catch (e) {
             setTransitioning(false);
             return;
@@ -88,6 +98,9 @@ function WorkflowPageContent() {
             </div>
         );
     }
+
+    // Effective download URL: prefer from status poll, fallback to draft payload
+    const effectiveDownloadUrl = downloadUrl ?? null;
 
     return (
         <div className="max-w-[1200px] mx-auto px-6 py-8">
@@ -114,6 +127,25 @@ function WorkflowPageContent() {
 
             {/* Pipeline Tracker */}
             <PipelineTracker status={status} />
+
+            {/* ── Error card with retry ── */}
+            {error && (
+                <div className="flex flex-col items-center gap-3 p-5 mb-6 rounded-xl border border-[#F06B6B]/25 bg-[#F06B6B]/[0.05] animate-slide-up">
+                    <div className="flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 text-[#F06B6B] shrink-0" />
+                        <p className="text-sm text-[#F06B6B]">{error}</p>
+                    </div>
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => refresh()}
+                        className="gap-1.5 text-[#7A7A8A] hover:text-[#F0EEE9]"
+                    >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        Try again
+                    </Button>
+                </div>
+            )}
 
             {/* ── State-driven content ── */}
 
@@ -176,18 +208,25 @@ function WorkflowPageContent() {
                             Workflow Complete
                         </h3>
                         <p className="text-sm text-[#7A7A8A] mt-1">
-                            Your DOCX has been generated and is ready for
-                            download.
+                            Your DOCX has been generated and is ready for download.
                         </p>
                     </div>
-                    <a
-                        href={draft?.r2_download_url ?? "#"}
-                        download
-                        className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-[#D4A853] text-[#0D0D14] font-semibold text-sm hover:bg-[#C49A3F] transition-colors disabled:opacity-50"
-                    >
-                        <Download className="w-4 h-4" />
-                        Download DOCX
-                    </a>
+                    {effectiveDownloadUrl ? (
+                        <a
+                            href={effectiveDownloadUrl}
+                            download
+                            className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-[#D4A853] text-[#0D0D14] font-semibold text-sm hover:bg-[#C49A3F] transition-colors"
+                        >
+                            <Download className="w-4 h-4" />
+                            Download DOCX
+                        </a>
+                    ) : (
+                        /* Download URL not yet available — poll once more */
+                        <Button variant="ghost" size="sm" onClick={() => refresh()} className="gap-1.5">
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            Refresh to get download link
+                        </Button>
+                    )}
                     <Badge variant="success">COMPLETED</Badge>
                 </div>
             )}
@@ -207,9 +246,19 @@ function WorkflowPageContent() {
                         <p className="text-sm text-[#7A7A8A] mt-1">
                             {status === "CANCELLED"
                                 ? "You aborted this workflow."
-                                : "Something went wrong. Check escalations for details."}
+                                : "Something went wrong on the server. You can go back and try again."}
                         </p>
                     </div>
+                    {status === "FAILED" && (
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => router.push(`/workspaces/${params.id}`)}
+                            className="gap-1.5"
+                        >
+                            ← Back to workspace &amp; retry
+                        </Button>
+                    )}
                 </div>
             )}
 
@@ -224,8 +273,7 @@ function WorkflowPageContent() {
                             Escalated
                         </h3>
                         <p className="text-sm text-[#7A7A8A] mt-1">
-                            Maximum revision cycles reached. View in
-                            Escalations.
+                            Maximum revision cycles reached. View in Escalations.
                         </p>
                     </div>
                     <Link
@@ -235,12 +283,6 @@ function WorkflowPageContent() {
                         View Escalations →
                     </Link>
                 </div>
-            )}
-
-            {error && (
-                <p className="text-xs text-[#F06B6B] text-center mt-4">
-                    {error}
-                </p>
             )}
         </div>
     );
