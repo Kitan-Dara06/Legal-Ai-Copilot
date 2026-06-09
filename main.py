@@ -140,17 +140,17 @@ async def lifespan(app: FastAPI):
     # ── Cohere API Key Check ─────────────────────────────────────────────
     cohere_key = os.getenv("COHERE_API_KEY")
     if cohere_key:
-        print(f"✅ COHERE_API_KEY is set ({cohere_key[:8]}...{cohere_key[-4:]})")
+        logger.info("COHERE_API_KEY configured (prefix: %s...)", cohere_key[:8])
     else:
-        print("⚠️  COHERE_API_KEY not set — reranker disabled, using Qdrant RRF")
+        logger.warning("COHERE_API_KEY not set — reranker disabled, using Qdrant RRF")
 
     # ── Voyage API Key Check ────────────────────────────────────────────
     voyage_key = os.getenv("VOYAGE_API_KEY")
     if voyage_key:
-        print(f"✅ VOYAGE_API_KEY is set ({voyage_key[:8]}...{voyage_key[-4:]})")
+        logger.info("VOYAGE_API_KEY configured (prefix: %s...)", voyage_key[:8])
     else:
-        print(
-            "⚠️  VOYAGE_API_KEY not set — voyage-rerank-2 disabled, embeddings will fail"
+        logger.warning(
+            "VOYAGE_API_KEY not set — voyage-rerank-2 disabled, embeddings will fail"
         )
 
     # ── Storage readiness check: fail fast in production by default.
