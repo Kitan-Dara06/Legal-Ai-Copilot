@@ -85,14 +85,13 @@ async def create_workspace(
 
     # Check soft limit of 20 active workspaces per org
     active_count_stmt = select(func.count(Workspace.id)).where(
-        Workspace.org_id == org_uuid,
-        Workspace.archived_at.is_(None)
+        Workspace.org_id == org_uuid, Workspace.archived_at.is_(None)
     )
     active_count = await db.scalar(active_count_stmt) or 0
     if active_count >= 20:
         raise HTTPException(
             status_code=409,
-            detail="Archive an existing workspace before creating a new one (limit: 20)"
+            detail="Archive an existing workspace before creating a new one (limit: 20)",
         )
 
     workspace = Workspace(
@@ -122,7 +121,9 @@ async def create_workspace(
     }
 
 
-async def sync_workspace_status_async(db: AsyncSession, workspace_id: uuid.UUID) -> IntelligenceStatus:
+async def sync_workspace_status_async(
+    db: AsyncSession, workspace_id: uuid.UUID
+) -> IntelligenceStatus:
     now = time.time()
     if workspace_id in _workspace_status_cache:
         status, ts = _workspace_status_cache[workspace_id]
@@ -133,22 +134,22 @@ async def sync_workspace_status_async(db: AsyncSession, workspace_id: uuid.UUID)
         select(Document.id)
         .where(
             Document.workspace_id == workspace_id,
-            Document.status.in_([DocumentStatus.PENDING, DocumentStatus.PROCESSING])
+            Document.status.in_([DocumentStatus.PENDING, DocumentStatus.PROCESSING]),
         )
         .limit(1)
     )
     has_pending = pending_res.scalar_one_or_none() is not None
-    expected_status = IntelligenceStatus.PENDING if has_pending else IntelligenceStatus.READY
-    
-    ws_res = await db.execute(
-        select(Workspace).where(Workspace.id == workspace_id)
+    expected_status = (
+        IntelligenceStatus.PENDING if has_pending else IntelligenceStatus.READY
     )
+
+    ws_res = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
     ws = ws_res.scalar_one_or_none()
     if ws and ws.intelligence_status != expected_status:
         ws.intelligence_status = expected_status
         await db.commit()
         await db.refresh(ws)
-    
+
     _workspace_status_cache[workspace_id] = (expected_status, now)
     return expected_status
 
@@ -167,7 +168,7 @@ async def list_workspaces(
         select(1)
         .where(
             Document.workspace_id == Workspace.id,
-            Document.status.in_([DocumentStatus.PENDING, DocumentStatus.PROCESSING])
+            Document.status.in_([DocumentStatus.PENDING, DocumentStatus.PROCESSING]),
         )
         .exists()
     )
@@ -182,7 +183,9 @@ async def list_workspaces(
     now = time.time()
     any_updated = False
     for ws, has_pending in rows:
-        expected_status = IntelligenceStatus.PENDING if has_pending else IntelligenceStatus.READY
+        expected_status = (
+            IntelligenceStatus.PENDING if has_pending else IntelligenceStatus.READY
+        )
         # Seed cache
         _workspace_status_cache[ws.id] = (expected_status, now)
         if ws.intelligence_status != expected_status:
@@ -479,7 +482,14 @@ async def upload_document(
         raise HTTPException(status_code=500, detail="Failed to store file.")
 
     # 6. Determine file type and create Document record
-    is_scanned = filename.lower().endswith(".pdf") and is_scanned_pdf(raw_bytes)
+    # Skip scanned check for known digital sources (SEC filings, HTML-to-PDF, etc.)
+    fn_lower = filename.lower()
+    if fn_lower.endswith(".pdf") and any(
+        kw in fn_lower for kw in ("sec.gov", "edgar", ".htm.", "archives")
+    ):
+        is_scanned = False
+    else:
+        is_scanned = fn_lower.endswith(".pdf") and is_scanned_pdf(raw_bytes)
     file_type = DocumentType.SCANNED_PDF if is_scanned else DocumentType.DIGITAL_PDF
 
     new_doc = Document(

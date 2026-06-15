@@ -1300,15 +1300,15 @@ def process_workflow(
             # revised draft. draft_node reads the brief payload and the
             # rejection reason from the Action row's revision_count.
             logger.info("[%s] Revision requested, regenerating draft...", workflow_id)
-            from app.services.agent.nodes import _set_wf_status
             from app.models import WorkflowStatus as _WfStatus
+            from app.services.agent.nodes import _set_wf_status
+
             await _set_wf_status(workflow_id, _WfStatus.DRAFTING)
             draft_result = await draft_node(state)
             if draft_result.get("status") == "FAILED":
                 return {"status": "FAILED", "reason": draft_result.get("error_context")}
             state.update(draft_result)
             return {"status": "AWAITING_APPROVAL"}
-
 
         if preclassified_intent:
             intent = preclassified_intent
